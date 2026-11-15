@@ -1,0 +1,15 @@
+# Runtime state: never versioned
+logs/
+tasks/
+mailbox/
+memory/
+inbox/
+worktrees/
+config/*_state.json
+config/router_state.json
+config/*.bak*
+__pycache__/
+*.pyc
+*.cfg
+.DS_Store
+*.bak-*
