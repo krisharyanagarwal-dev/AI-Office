@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string>
+		<key>TZ</key>
+		<string>Asia/Kolkata</string>
+	</dict>
+	<key>Label</key>
+	<string>com.aryan.notes-signals-intraday</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Library/Frameworks/Python.framework/Versions/3.14/bin/python3</string>
+		<string>/Users/aryanagarwal/Documents/Qoder/2026-10-10/8d335b89/signals/watch.py</string>
+		<string>--mode</string>
+		<string>intraday</string>
+	</array>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardErrorPath</key>
+	<string>/Users/aryanagarwal/Library/Logs/notes-signals/launchd-intraday.err</string>
+	<key>StandardOutPath</key>
+	<string>/Users/aryanagarwal/Library/Logs/notes-signals/launchd-intraday.out</string>
+	<key>StartInterval</key>
+	<integer>900</integer>
+	<key>WorkingDirectory</key>
+	<string>/Users/aryanagarwal/Documents/Qoder/2026-10-10/8d335b89/signals</string>
+</dict>
+</plist>

@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aryan.headroom-proxy</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/aryanagarwal/.local/share/uv/tools/headroom-ai/bin/headroom</string>
+        <string>proxy</string>
+        <string>--port</string>
+        <string>8799</string>
+        <string>--no-http2</string>
+    </array>
+
+    <!-- Absolute binary path used; PATH kept sane for any subprocess. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/aryanagarwal/.local/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HEADROOM_PORT</key>
+        <string>8799</string>
+    </dict>
+
+    <!-- /tmp cwd: avoids the "never run headroom from inside the clone dir" shadow gotcha. -->
+    <key>WorkingDirectory</key>
+    <string>/tmp</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Logs to /tmp, NOT ~/Documents — avoids the exit-78 (EX_CONFIG/TCC) trap. -->
+    <key>StandardOutPath</key>
+    <string>/tmp/headroom-proxy.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/headroom-proxy.err.log</string>
+</dict>
+</plist>

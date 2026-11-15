@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>OFFICE_HUD_BRANCH</key>
+		<string>main</string>
+		<key>OFFICE_HUD_DEPLOY_REPO</key>
+		<string>/Users/aryanagarwal/fleet-worktrees/office-deploy</string>
+		<key>OFFICE_HUD_REMOTE</key>
+		<string>origin</string>
+	</dict>
+	<key>Label</key>
+	<string>com.aryan.office-hud-sync</string>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/zsh</string>
+		<string>/Users/aryanagarwal/bin/office-hud-deployed-check.sh</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Users/aryanagarwal/Library/Logs/office-hud-deployed-error.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/aryanagarwal/Library/Logs/office-hud-deployed.log</string>
+	<key>StartInterval</key>
+	<integer>900</integer>
+	<key>WorkingDirectory</key>
+	<string>/Users/aryanagarwal/fleet-worktrees/office-deploy/office-hud</string>
+</dict>
+</plist>

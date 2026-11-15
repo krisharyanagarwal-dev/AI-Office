@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>com.aryan.dashboard-triage</string>
+<key>ProgramArguments</key><array><string>/usr/bin/python3</string><string>/Users/aryanagarwal/dashboard-hub/triage.py</string></array>
+<key>WorkingDirectory</key><string>/Users/aryanagarwal/dashboard-hub</string>
+<key>EnvironmentVariables</key><dict><key>PATH</key><string>/Users/aryanagarwal/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+<key>StartInterval</key><integer>1800</integer>
+<key>RunAtLoad</key><false/>
+<key>StandardOutPath</key><string>/tmp/com.aryan.dashboard-triage.out</string><key>StandardErrorPath</key><string>/tmp/com.aryan.dashboard-triage.err</string>
+</dict></plist>

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>com.aryan.uacc-frontend</string>
+<key>ProgramArguments</key><array><string>/Users/aryanagarwal/.nvm/versions/node/v22.22.3/bin/node</string><string>/Users/aryanagarwal/openalice-universal-command-center/node_modules/.bin/next</string><string>dev</string><string>-p</string><string>3300</string></array>
+<key>WorkingDirectory</key><string>/Users/aryanagarwal/openalice-universal-command-center</string>
+<key>EnvironmentVariables</key><dict><key>BACKEND_URL</key><string>http://127.0.0.1:8610</string><key>PATH</key><string>/Users/aryanagarwal/.nvm/versions/node/v22.22.3/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+<key>KeepAlive</key><true/><key>RunAtLoad</key><true/><key>ThrottleInterval</key><integer>15</integer>
+<key>StandardOutPath</key><string>/tmp/com.aryan.uacc-frontend.log</string><key>StandardErrorPath</key><string>/tmp/com.aryan.uacc-frontend.log</string>
+</dict></plist>

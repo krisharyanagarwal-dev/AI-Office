@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Supervised publication owner for github-opencode-archives.
+
+  Deliberately has NO KeepAlive and NO SuccessfulExit=false. The monitor's own comment
+  (opencode-fleet-monitor.sh:322-327) records what that pairing did: a non-zero exit under
+  KeepAlive.SuccessfulExit=false respawned at ~6 ticks/minute, each minting one more unbacked commit.
+  A failed push here must simply be loud in the log and wait for the next interval.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.aryan.fleet-monitor-push</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/aryanagarwal/bin/fleet-monitor-push.sh</string>
+    <string>--apply</string>
+  </array>
+  <key>StartInterval</key><integer>14400</integer>
+  <key>RunAtLoad</key><true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- launchd's default PATH is /usr/bin:/bin:/usr/sbin:/sbin and does NOT contain gh. The job
+         aborted on RunAtLoad with "cannot read the remote ref", which was the correct fail-safe: an
+         unreadable ref must never be published against. Put gh's real directory on PATH here. -->
+    <key>PATH</key><string>/Users/aryanagarwal/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>/Users/aryanagarwal</string>
+  </dict>
+  <key>StandardOutPath</key><string>/Users/aryanagarwal/.opencode-monitor/push.log</string>
+  <key>StandardErrorPath</key><string>/Users/aryanagarwal/.opencode-monitor/push-error.log</string>
+</dict>
+</plist>

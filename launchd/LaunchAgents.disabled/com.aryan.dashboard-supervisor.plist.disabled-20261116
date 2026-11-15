@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>com.aryan.dashboard-supervisor</string>
+<key>ProgramArguments</key><array><string>/bin/zsh</string><string>-lc</string><string>exec /usr/bin/python3 /Users/aryanagarwal/dashboard-hub/supervisor/supervisor.py</string></array>
+<key>StartInterval</key><integer>900</integer>
+<key>RunAtLoad</key><true/>
+<key>StandardOutPath</key><string>/tmp/com.aryan.dashboard-supervisor.out</string>
+<key>StandardErrorPath</key><string>/tmp/com.aryan.dashboard-supervisor.err</string>
+</dict></plist>

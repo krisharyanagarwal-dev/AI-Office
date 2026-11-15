@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.aryan.codex-model-matrix</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/aryanagarwal/.codex/local-harness/run-weekly-reverify.sh</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/aryanagarwal/.codex/local-harness</string>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key><integer>0</integer>
+    <key>Hour</key><integer>5</integer>
+    <key>Minute</key><integer>17</integer>
+  </dict>
+  <key>RunAtLoad</key><false/>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>/Users/aryanagarwal/Library/Logs/codex-model-matrix.log</string>
+  <key>StandardErrorPath</key><string>/Users/aryanagarwal/Library/Logs/codex-model-matrix.log</string>
+</dict>
+</plist>

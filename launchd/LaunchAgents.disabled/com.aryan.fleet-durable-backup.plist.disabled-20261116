@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Nightly off-machine snapshot: refresh per-repo bundles + uncommitted-work tarball, ship to the mini,
+  verify sha256 on both hosts, and only then write the freshness file.
+
+  Scheduled as a plain shell job on purpose. A Qoder automation would spend agent-turn credits on every
+  firing and inherit the quota/failure bands this fleet already logs (code 110, 10605, restart bursts).
+
+  04:00 keeps clear of com.aryan.polymarket-backup at 03:00. RunAtLoad catches a laptop that was asleep
+  when the interval fired -- the failure mode that made the 0-byte nightly_backup.out look like health.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.aryan.fleet-durable-backup</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/aryanagarwal/bin/fleet-durable-backup.sh</string>
+    <string>--apply</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>4</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+  <key>RunAtLoad</key><false/>
+  <key>StandardOutPath</key><string>/Users/aryanagarwal/.fleet-workflow/durable-backup.log</string>
+  <key>StandardErrorPath</key><string>/Users/aryanagarwal/.fleet-workflow/durable-backup-error.log</string>
+</dict>
+</plist>

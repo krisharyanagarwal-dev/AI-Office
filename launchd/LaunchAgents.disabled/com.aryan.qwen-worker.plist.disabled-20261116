@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aryan.qwen-worker</string>
+    <key>Comment</key>
+    <string>Qwen3.5-9B autonomous task worker - processes queued tasks via Ollama API</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Library/Frameworks/Python.framework/Versions/3.14/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Library/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python</string>
+        <string>/Users/aryanagarwal/.openclaw/autonomous-qwen-worker.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/aryanagarwal</string>
+    <key>StandardOutPath</key>
+    <string>/Users/aryanagarwal/Library/Logs/qwen-worker.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/aryanagarwal/Library/Logs/qwen-worker.log</string>
+</dict>
+</plist>

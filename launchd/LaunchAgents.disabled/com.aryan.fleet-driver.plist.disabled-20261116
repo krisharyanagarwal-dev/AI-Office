@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- DRAFT, NOT INSTALLED. Load only after fleet-driver.sh has been read and
+	     dry-run. Filename matches Label deliberately: a mismatch fails bootstrap
+	     with "Bootstrap failed: 5" while plutil still reports OK. -->
+	<key>Label</key>
+	<string>com.aryan.fleet-driver</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>/Users/aryanagarwal/.local/bin/fleet-driver.sh</string>
+	</array>
+
+	<key>RunAtLoad</key>
+	<true/>
+
+	<key>StartInterval</key>
+	<integer>300</integer>
+
+	<!-- No KeepAlive and no SuccessfulExit=false on purpose. A gated no-op that
+	     exits non-zero on a respawn-managed job becomes a tick storm; every hold
+	     path in the script exits 0 instead. -->
+	<key>ThrottleInterval</key>
+	<integer>60</integer>
+
+	<key>EnvironmentVariables</key>
+	<dict>
+		<!-- Off by default: installing this job must not be able to spend money.
+		     Flipping this to 1 is the human's decision, per tick if you want it. -->
+		<key>FLEET_DRIVER_ENABLE</key>
+		<string>0</string>
+		<key>FLEET_DAY_BUDGET</key>
+		<string>4</string>
+		<key>FLEET_MAX_PER_RUN</key>
+		<string>1</string>
+		<key>FLEET_DEDUPE_S</key>
+		<string>14400</string>
+		<key>FLEET_SILENT_S</key>
+		<string>300</string>
+		<key>FLEET_SPEND_CEILING_PER_H</key>
+		<string>20</string>
+		<key>PATH</key>
+		<string>/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin</string>
+	</dict>
+
+	<key>StandardOutPath</key>
+	<string>/Users/aryanagarwal/.local/state/fleet-driver/launchd.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/aryanagarwal/.local/state/fleet-driver/launchd.log</string>
+
+	<key>WorkingDirectory</key>
+	<string>/Users/aryanagarwal</string>
+</dict>
+</plist>

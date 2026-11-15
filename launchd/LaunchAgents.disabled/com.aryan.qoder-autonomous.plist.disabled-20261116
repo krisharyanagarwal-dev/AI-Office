@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>com.aryan.qoder-autonomous</string>
+<key>ProgramArguments</key><array><string>/bin/bash</string><string>/Users/aryanagarwal/qoder-keepalive/auto_team.sh</string></array>
+<key>StartInterval</key><integer>7200</integer>
+<key>RunAtLoad</key><false/>
+<key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:/Users/aryanagarwal/.local/bin</string></dict>
+<key>StandardOutPath</key><string>/tmp/qoder-autonomous.log</string>
+<key>StandardErrorPath</key><string>/tmp/qoder-autonomous.log</string>
+</dict></plist>

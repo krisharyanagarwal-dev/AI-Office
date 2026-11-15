@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aryan.opencode-daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Library/Frameworks/Python.framework/Versions/3.14/bin/python3</string>
+        <string>/Users/aryanagarwal/.local/bin/opencode-daemon.py</string>
+    </array>
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/aryanagarwal/Library/Logs/opencode-daemon-launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/aryanagarwal/Library/Logs/opencode-daemon-launchd.log</string>
+</dict>
+</plist>

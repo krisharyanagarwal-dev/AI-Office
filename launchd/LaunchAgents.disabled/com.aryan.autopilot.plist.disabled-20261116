@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aryan.autopilot</string>
+    
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/aryanagarwal/openalice-fleet/hive/lib/autopilot_manager.py</string>
+    </array>
+    
+    <key>WorkingDirectory</key>
+    <string>/Users/aryanagarwal/openalice-fleet</string>
+    
+    <key>RunAtLoad</key>
+    <true/>
+    
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crash</key>
+        <true/>
+    </dict>
+    
+    <key>StandardOutPath</key>
+    <string>/Users/aryanagarwal/Library/Logs/openalice-autopilot.log</string>
+    
+    <key>StandardErrorPath</key>
+    <string>/Users/aryanagarwal/Library/Logs/openalice-autopilot-error.log</string>
+    
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>OPENALICE_FLEET_ENABLED</key>
+        <string>true</string>
+        <key>AUTONOMOUS_MODE</key>
+        <string>enabled</string>
+    </dict>
+    
+    <key>StartInterval</key>
+    <integer>60</integer>
+</dict>
+</plist>

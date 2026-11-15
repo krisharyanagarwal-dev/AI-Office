@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>JEV_PATH</key>
+		<string>/Users/aryanagarwal/.local/bin/jev</string>
+		<key>MODEL_ROUTER_URL</key>
+		<string>http://localhost:8003</string>
+		<key>OFFICE_LOOP_INTERVAL</key>
+		<string>15</string>
+		<key>OFFICE_MAX_CONCURRENT_API</key>
+		<string>1</string>
+		<key>OFFICE_STATE_FILE</key>
+		<string>/Users/aryanagarwal/dashboard-hub/data/office-autonomous.json</string>
+		<key>OPENCLAW_URL</key>
+		<string>http://localhost:18789</string>
+		<key>RETRIEVAL_URL</key>
+		<string>http://localhost:8001</string>
+	</dict>
+	<key>KeepAlive</key>
+	<true/>
+	<key>Label</key>
+	<string>com.aryan.autonomous-office</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/aryanagarwal/ai-office/services/orchestrator/crewai_venv/bin/python</string>
+		<string>autonomous_office.py</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/tmp/com.aryan.autonomous-office.err</string>
+	<key>StandardOutPath</key>
+	<string>/tmp/com.aryan.autonomous-office.out</string>
+	<key>WorkingDirectory</key>
+	<string>/Users/aryanagarwal/ai-office/services/orchestrator</string>
+</dict>
+</plist>
