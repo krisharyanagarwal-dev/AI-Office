@@ -235,23 +235,6 @@ class ProviderClient:
 
         raise RuntimeError(f"No content in response: {out[:200]}")
 
-    def _log_token_usage(self, usage: dict):
-        """Log token usage to a file for tracking free-tier consumption."""
-        try:
-            log_path = Path("/Users/aryanagarwal/office-os/logs/token_usage.jsonl")
-            entry = {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "pool": self.pool_name,
-                "model": self.model,
-                "prompt_tokens": usage.get("prompt_tokens"),
-                "completion_tokens": usage.get("completion_tokens"),
-                "total_tokens": usage.get("total_tokens"),
-            }
-            with open(log_path, "a") as f:
-                f.write(json.dumps(entry) + "\n")
-        except Exception:
-            pass  # Never fail a task because of logging
-
     @staticmethod
     def _strip_reasoning(text: str) -> str:
         """Strip reasoning/thinking blocks from model responses.

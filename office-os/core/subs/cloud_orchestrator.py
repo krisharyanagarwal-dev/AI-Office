@@ -14,6 +14,7 @@ No DNS gate - per-call results drive key health.
 
 import json
 import os
+import random
 import sys
 import time
 from pathlib import Path
@@ -110,6 +111,12 @@ class CloudModelOrchestrator:
             if p not in pool_order:
                 pool_order.append(p)
 
+        # Fully randomize pool order so concurrent workers don't all hit the
+        # same pool first (thundering herd on rate-limited keys). Primary pool
+        # stays in the list but its position is randomized — over many calls
+        # this spreads load evenly across all available keys.
+        random.shuffle(pool_order)
+
         for pool_name in pool_order:
             pool = self.router.pools.get(pool_name)
             if not pool:
@@ -135,6 +142,10 @@ class CloudModelOrchestrator:
         Returns (response_text, model_used, pool_name) or raises.
         Timeout defaults to DEFAULT_TIMEOUT (45s) for fail-fast behavior.
         """
+        # Jitter: spread out concurrent workers so they don't all hit the same
+        # pool simultaneously (thundering herd on rate-limited keys).
+        time.sleep(random.uniform(0, 5))
+
         client = ProviderClient(pool_name, model)
         timeout = timeout or DEFAULT_TIMEOUT
 
@@ -237,30 +248,37 @@ class CloudModelOrchestrator:
 
     def _call_with_failover(self, agent_info, prompt, task_id, priority, skip_pool=None):
         """
-        Try the remaining pools in failover order, skipping skip_pool.
-        Returns (text, model, pool) on first success, raises if all fail.
+        Try ONE failover pool (randomized) — no cascading through all pools.
+        A single rate limit shouldn't overload every other key.
+        Returns (text, model, pool) on success, raises if the one attempt fails.
         """
         tier = agent_info["tier"]
         needs_heavy = agent_needs_heavy_model(agent_info["agent_id"])
         primary_pool = TIER_POOL_MAP.get("pro" if needs_heavy or tier == "pro" else "lite", "nvidia_key1")
 
-        for pool_name in self._failover_pools(tier):
-            if pool_name == skip_pool or pool_name == primary_pool:
+        # Build and shuffle failover candidates (exclude primary + skip_pool)
+        candidates = []
+        for p in self._failover_pools(tier):
+            if p == skip_pool or p == primary_pool:
                 continue
-            pool = self.router.pools.get(pool_name)
+            pool = self.router.pools.get(p)
             if not pool:
                 continue
-            if not self.router.is_available(pool_name):
+            if not self.router.is_available(p):
                 continue
-            models = pool["models"]
-            model = models[0] if needs_heavy else self.router._round_robin_model(pool_name)
-            try:
-                text, m, p = self.call_model(model, pool_name, prompt, task_id=task_id, priority=priority)
-                return text, m, p
-            except Exception:
-                continue  # try next pool
+            candidates.append(p)
 
-        raise RuntimeError(f"All failover pools exhausted for tier={tier}")
+        if not candidates:
+            raise RuntimeError(f"No failover pools available for tier={tier}")
+
+        random.shuffle(candidates)
+        pool_name = candidates[0]
+        pool = self.router.pools[pool_name]
+        models = pool["models"]
+        model = models[0] if needs_heavy else self.router._round_robin_model(pool_name)
+
+        text, m, p = self.call_model(model, pool_name, prompt, task_id=task_id, priority=priority)
+        return text, m, p
 
     def status(self):
         """Return orchestrator status for monitoring."""

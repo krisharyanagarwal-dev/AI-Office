@@ -6,6 +6,7 @@ Pool selection persists across CLI invocations via a state file.
 import json
 import os
 import time
+import threading
 from pathlib import Path
 
 
@@ -19,6 +20,7 @@ class ProviderRouter:
         # Per-pool state: cooldown until timestamp, task count for round-robin
         self.cooldowns = {name: 0 for name in self.pools}
         self.task_counts = self._load_task_counts()
+        self._lock = threading.Lock()
 
     def _load_task_counts(self):
         """Load persisted task counts for round-robin across CLI invocations."""
@@ -39,13 +41,15 @@ class ProviderRouter:
 
     def is_available(self, pool_name):
         """Check if a provider pool is available (not in cooldown)."""
-        return time.time() > self.cooldowns.get(pool_name, 0)
+        with self._lock:
+            return time.time() > self.cooldowns.get(pool_name, 0)
 
     def select_provider(self, tier="general", preferred_pool=None):
         """
         Select the best available provider for a given tier.
         Round-robins across available pools of that tier by task count (persisted).
         Falls back through fallback_chain if none available.
+        Thread-safe for concurrent worker access.
         """
         def _pool_matches_tier(pool, tier):
             """Check if a pool serves a given tier. Pool tier can be a string or list."""
@@ -54,45 +58,47 @@ class ProviderRouter:
                 return tier in ptier or "any" in ptier
             return ptier in (tier, "any")
 
-        # First try preferred pool if specified and available
-        if preferred_pool and self.is_available(preferred_pool):
-            pool = self.pools[preferred_pool]
-            if _pool_matches_tier(pool, tier):
-                self.task_counts[preferred_pool] = self.task_counts.get(preferred_pool, 0) + 1
+        with self._lock:
+            # First try preferred pool if specified and available
+            if preferred_pool and self.is_available(preferred_pool):
+                pool = self.pools[preferred_pool]
+                if _pool_matches_tier(pool, tier):
+                    self.task_counts[preferred_pool] = self.task_counts.get(preferred_pool, 0) + 1
+                    self._save_task_counts()
+                    model = self._round_robin_model(preferred_pool)
+                    return preferred_pool, model
+
+            # Find all available pools matching the tier
+            candidates = []
+            for name, pool in self.pools.items():
+                if self.is_available(name) and _pool_matches_tier(pool, tier):
+                    candidates.append(name)
+
+            if candidates:
+                # Round-robin: pick the pool with the fewest tasks assigned
+                best = min(candidates, key=lambda n: self.task_counts.get(n, 0))
+                self.task_counts[best] = self.task_counts.get(best, 0) + 1
                 self._save_task_counts()
-                model = self._round_robin_model(preferred_pool)
-                return preferred_pool, model
+                pool = self.pools[best]
+                model = self._round_robin_model(best)
+                return best, model
 
-        # Find all available pools matching the tier
-        candidates = []
-        for name, pool in self.pools.items():
-            if self.is_available(name) and _pool_matches_tier(pool, tier):
-                candidates.append(name)
+            # Fallback chain
+            for pool_name in self.fallback_chain:
+                if self.is_available(pool_name):
+                    pool = self.pools[pool_name]
+                    self.task_counts[pool_name] = self.task_counts.get(pool_name, 0) + 1
+                    self._save_task_counts()
+                    model = self._round_robin_model(pool_name)
+                    return pool_name, model
 
-        if candidates:
-            # Round-robin: pick the pool with the fewest tasks assigned
-            best = min(candidates, key=lambda n: self.task_counts.get(n, 0))
-            self.task_counts[best] = self.task_counts.get(best, 0) + 1
-            self._save_task_counts()
-            pool = self.pools[best]
-            model = self._round_robin_model(best)
-            return best, model
-
-        # Fallback chain
-        for pool_name in self.fallback_chain:
-            if self.is_available(pool_name):
-                pool = self.pools[pool_name]
-                self.task_counts[pool_name] = self.task_counts.get(pool_name, 0) + 1
-                self._save_task_counts()
-                model = self._round_robin_model(pool_name)
-                return pool_name, model
-
-        return None, None
+            return None, None
 
     def mark_rate_limited(self, pool_name, cooldown_sec=None):
         """Mark a pool as rate-limited, set cooldown."""
         cooldown = cooldown_sec or self.pools.get(pool_name, {}).get("cooldown_sec", 60)
-        self.cooldowns[pool_name] = time.time() + cooldown
+        with self._lock:
+            self.cooldowns[pool_name] = time.time() + cooldown
         print(f"[router] {pool_name} rate-limited, cooling down for {cooldown}s")
 
     def mark_daily_quota_exceeded(self, pool_name):
@@ -103,7 +109,8 @@ class ProviderRouter:
         tomorrow = _dt.datetime.now().date() + _dt.timedelta(days=1)
         midnight = _dt.datetime.combine(tomorrow, _dt.datetime.min.time())
         cooldown = (midnight - now).total_seconds()
-        self.cooldowns[pool_name] = time.time() + cooldown
+        with self._lock:
+            self.cooldowns[pool_name] = time.time() + cooldown
         print(f"[router] {pool_name} daily quota exhausted, cooling down for {cooldown/3600:.1f}h until midnight")
 
     def mark_success(self, pool_name):
@@ -114,10 +121,11 @@ class ProviderRouter:
         """Get next model from a pool's model list, round-robin style."""
         pool = self.pools[pool_name]
         models = pool["models"]
-        if not hasattr(self, "_rr_index"):
-            self._rr_index = {}
-        idx = self._rr_index.get(pool_name, 0) % len(models)
-        self._rr_index[pool_name] = idx + 1
+        with self._lock:
+            if not hasattr(self, "_rr_index"):
+                self._rr_index = {}
+            idx = self._rr_index.get(pool_name, 0) % len(models)
+            self._rr_index[pool_name] = idx + 1
         return models[idx]
 
     def get_all_pools(self):

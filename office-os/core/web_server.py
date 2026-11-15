@@ -773,6 +773,43 @@ class OfficeHandler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
+        # JEV throughput metrics: tasks/min, calls today, error rate
+        now = time.time()
+        jev_tasks_per_min = 0
+        jev_errors = 0
+        jev_calls_today = jev_created  # all created tasks count as calls
+        try:
+            for hive_file in glob.glob(os.path.join(HIVE_DIR, "*.json")):
+                try:
+                    with open(hive_file) as f:
+                        t = json.load(f)
+                    if t.get("metadata", {}).get("source") != "jev-cloud-orchestrator":
+                        continue
+                    ts = t.get("updated_at") or t.get("created_at")
+                    if ts:
+                        try:
+                            task_time = time.mktime(time.strptime(ts, "%Y-%m-%dT%H:%M:%SZ"))
+                            if now - task_time <= 60:
+                                jev_tasks_per_min += 1
+                        except ValueError:
+                            pass
+                    if t.get("status") == "error":
+                        jev_errors += 1
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Provider pool status from router
+        pool_status = {}
+        try:
+            sys.path.insert(0, "/Users/aryanagarwal/AI-Office/office-os")
+            from core.router import ProviderRouter
+            router = ProviderRouter()
+            pool_status = router.status()
+        except Exception:
+            pass
+
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -784,10 +821,19 @@ class OfficeHandler(BaseHTTPRequestHandler):
                 "tasks_created": jev_created,
                 "tasks_done": jev_done,
                 "completion_rate": round(jev_done / jev_created * 100, 1) if jev_created > 0 else 0,
+                "tasks_per_min": round(jev_tasks_per_min, 1),
+                "calls_today": jev_calls_today,
+                "error_rate": round(jev_errors / jev_created * 100, 1) if jev_created > 0 else 0,
             },
             "ollama": {
                 "available": ollama_ok,
                 "model": "hauhaucs/qwen3.5-9b-uncensored-aggressive",
+            },
+            "provider_pools": pool_status,
+            "free_ceiling": {
+                "calls_per_day_ceiling": 288000,
+                "calls_today": jev_calls_today,
+                "headroom_pct": round((1 - jev_calls_today / 288000) * 100, 1) if jev_calls_today < 288000 else 0,
             },
         }).encode())
 
