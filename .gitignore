@@ -1,0 +1,50 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.python-version
+.pytest_cache/
+.coverage
+.tox/
+
+# Logs
+logs/
+*.log
+
+# Office runtime
+tasks/
+inbox/
+mailbox/
+memory/
+worktrees/
+
+# Editor/IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS generated
+Thumbs.db
+ehthumbs.db
+
+# Environment
+.env
+.env.local
+*.key
+*.pem
+
+# Temporary
+*.tmp
+*.bak-*
+*~
+
+# Node
+node_modules/
+package-lock.json

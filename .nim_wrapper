@@ -1,0 +1,30 @@
+#!/bin/bash
+# NVIDIA NIM wrapper
+
+MODEL="${NVIDIA_MODEL:-nvidia/nemotron-3-super-120b-a12b}"
+MAX_TOKENS="${MAX_TOKENS:-32}"
+TEMPERATURE="${TEMPERATURE:-0.7}"
+
+if [ $# -eq 0 ]; then
+    echo "Usage: nim \"your prompt\""
+    echo "Env: NVIDIA_MODEL, MAX_TOKENS, TEMPERATURE"
+    exit 1
+fi
+
+curl -sf http://127.0.0.1:19593/v1/messages \
+  -H 'content-type: application/json' \
+  -H 'x-api-key: local' \
+  -H 'anthropic-version: 2023-06-01' \
+  -d "{\"model\":\"$MODEL\",\"max_tokens\":$MAX_TOKENS,\"temperature\":$TEMPERATURE,\"messages\":[{\"role\":\"user\",\"content\":\"$1\"}]}" \
+  | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    if 'content' in data:
+        for c in data['content']:
+            if c.get('type') == 'text':
+                print(c['text'])
+                break
+except:
+    pass
+"
