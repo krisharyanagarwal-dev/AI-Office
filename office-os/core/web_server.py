@@ -753,7 +753,7 @@ class OfficeHandler(BaseHTTPRequestHandler):
                 try:
                     with open(hive_file) as f:
                         t = json.load(f)
-                    if t.get("metadata", {}).get("source") == "jev-qwen-planner":
+                    if t.get("metadata", {}).get("source") == "jev-cloud-orchestrator":
                         jev_created += 1
                         if t.get("status") == "done":
                             jev_done += 1

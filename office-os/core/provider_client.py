@@ -105,6 +105,30 @@ class ProviderClient:
         self.api_key = os.environ.get(self.key_name, "") or _key_from_env_file(self.key_name)
         if not self.api_key:
             raise ValueError(f"Missing env var {self.key_name} for pool {pool_name}")
+        # Resolve hostname to IP via dig (system resolver is broken for some
+        # providers; dig uses its own resolver and works). Cache per instance.
+        self._resolve_ip = self._resolve_host()
+
+    def _resolve_host(self):
+        """Resolve endpoint hostname to IP using dig. Returns None on failure."""
+        from urllib.parse import urlparse
+        try:
+            hostname = urlparse(self.endpoint).hostname
+        except Exception:
+            return None
+        try:
+            result = subprocess.run(
+                ["dig", "+short", "+time=2", "+tries=1", hostname],
+                capture_output=True, text=True, timeout=8,
+            )
+            if result.returncode == 0:
+                for line in result.stdout.strip().split("\n"):
+                    line = line.strip()
+                    if line and "." in line:
+                        return line
+        except Exception:
+            pass
+        return None
 
     def complete(self, prompt: str, max_tokens: int = 4096, temperature: float = 0.0,
                  priority: str = "normal", timeout: Optional[int] = None) -> str:
@@ -144,6 +168,13 @@ class ProviderClient:
                 "--config", str(tmp_cfg),
                 "--data-binary", payload,
             ]
+            # Use --resolve with dig-resolved IP to bypass broken system DNS
+            if self._resolve_ip:
+                from urllib.parse import urlparse
+                hostname = urlparse(self.endpoint).hostname
+                port = urlparse(self.endpoint).port or 443
+                cmd.insert(4, "--resolve")
+                cmd.insert(5, f"{hostname}:{port}:{self._resolve_ip}")
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 10)
         finally:
             try:
@@ -151,9 +182,10 @@ class ProviderClient:
             except OSError:
                 pass
 
-        # curl exit code 28 = operation timeout → treat as pool failure
-        if result.returncode == 28:
-            raise self.PoolUnavailable(f"curl timeout after {timeout}s on {self.pool_name}")
+        # curl exit code 28 = operation timeout, 6 = couldn't resolve host,
+        # 7 = failed to connect → treat all as pool failure for failover
+        if result.returncode in (28, 6, 7):
+            raise self.PoolUnavailable(f"curl exit {result.returncode} on {self.pool_name}")
 
         if result.returncode != 0:
             raise RuntimeError(f"curl failed (exit {result.returncode}): {result.stderr}")
