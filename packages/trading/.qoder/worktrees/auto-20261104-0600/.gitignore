@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+*.egg-info/
+dist/
+build/
+.ipynb_checkpoints/
+*.backup
+*.backup*
+alpha_model.ipynb.backup
+
+# OS
+.DS_Store
+
+# Logs
+*.log

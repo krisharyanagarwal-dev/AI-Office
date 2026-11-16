@@ -1,0 +1,25 @@
+{
+  "id": "aryanagarwal12/alpha-model",
+  "title": "Alpha Model",
+  "code_file": "alpha_model.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": false,
+  "enable_gpu": false,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "description": "A complete alpha model pipeline demonstrating factor investing, machine learning enhancement, purged/embargoed cross-validation, and ensemble techniques. Includes traditional factors (momentum, reversal, volatility, skewness, trend), LightGBM ML model, factor+ML ensemble, transaction cost modeling, and comprehensive performance analysis.",
+  "tags": [
+    "alpha-model",
+    "quantitative-finance", 
+    "machine-learning",
+    "factor-investing",
+    "cross-validation",
+    "lightgbm",
+    "backtesting",
+    "trading-signals"
+  ],
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": []
+}

@@ -1,0 +1,762 @@
+"""
+Trading Bot - orchestrates the 3 brains (Chart, Decision, Learning)
+This is the main execution loop that brings everything together.
+"""
+import time
+import threading
+from typing import Optional, Dict, Any
+from datetime import datetime, timedelta
+import queue
+import logging
+
+from .schemas import Bar, ChartContext, Decision, Order, Fill, PnL, Positions
+from .chart_brain import ChartBrain
+from .decision_brain import DecisionBrain
+from .learning_brain import LearningBrain
+from .state_store import StateStore
+from alpha.data.ws_provider import BinanceWSProvider, BybitWSProvider
+
+
+class TradingBot:
+    """
+    Main trading bot that orchestrates the three brains:
+    1. Chart Brain - maintains market state
+    2. Decision Brain - makes trading decisions
+    3. Learning Brain - learns from outcomes
+    
+    The bot operates in a continuous loop:
+    - Receive market data (bar)
+    - Update Chart Brain → get ChartContext
+    - Run Decision Brain → get Decision (orders)
+    - Execute orders (via execution module)
+    - Monitor positions and fills
+    - On position close: record outcome → update Learning Brain
+    """
+    
+    def __init__(self, 
+                 symbol: str,
+                 config: Optional[Dict] = None,
+                 paper_trading: bool = True,
+                 state_store: Optional[StateStore] = None):
+        """
+        Initialize trading bot
+        
+        Args:
+            symbol: Trading symbol (e.g., "BTCUSDT")
+            config: Configuration dictionary
+            paper_trading: If True, use paper trading; False for live
+            state_store: Optional state store instance
+        """
+        self.symbol = symbol
+        self.paper_trading = paper_trading
+        self.state_store = state_store or StateStore()
+        # Merge provided config with defaults
+        default_config = self._default_config()
+        self.config = {**default_config, **(config or {})}
+        self.chart_brain = ChartBrain(symbol=symbol, state_store=self.state_store)
+        self.decision_brain = DecisionBrain(config=self.config, state_store=self.state_store)
+        self.learning_brain = LearningBrain(state_store=self.state_store)
+        
+        # State
+        self.is_running = False
+        self.current_positions = Positions()
+        self.pending_orders: Dict[str, Order] = {}  # order_id -> Order
+        self.filled_orders: Dict[str, Fill] = {}   # order_id -> Fill
+        
+        # Data queues
+        self.bar_queue = queue.Queue(maxsize=1000)
+        self.order_queue = queue.Queue(maxsize=1000)
+        self.fill_queue = queue.Queue(maxsize=1000)
+        
+        # Threads
+        self.chart_thread: Optional[threading.Thread] = None
+        self.decision_thread: Optional[threading.Thread] = None
+        self.execution_thread: Optional[threading.Thread] = None
+        self.learning_thread: Optional[threading.Thread] = None
+        
+        # Performance tracking
+        self.start_time = None
+        self.total_pnl = 0.0
+        self.bars_processed = 0
+        self.decisions_made = 0
+        self.orders_generated = 0
+        self.trade_count = 0
+        
+        # Setup logging
+        self.logger = logging.getLogger(f"TradingBot.{symbol}")
+        self.logger.setLevel(logging.INFO)
+        
+        # Initialize WebSocket provider for live trading
+        self.ws_provider = None
+        self.ws_thread: Optional[threading.Thread] = None
+        if not self.paper_trading:
+            # Get exchange and symbols from config
+            exchange = self.config.get("exchange", "binance")
+            symbols = [self.symbol]  # For now, single symbol
+            interval = self.config.get("ws_interval", "1m")
+            use_futures = self.config.get("use_futures", False)
+            
+            if exchange.lower() == "binance":
+                self.ws_provider = BinanceWSProvider(
+                    symbols=symbols,
+                    callback=self._on_ws_bar,
+                    interval=interval,
+                    is_futures=use_futures
+                )
+            elif exchange.lower() == "bybit":
+                self.ws_provider = BybitWSProvider(
+                    symbols=symbols,
+                    callback=self._on_ws_bar,
+                    interval=interval,
+                    is_testnet=self.config.get("use_testnet", False)
+                )
+            else:
+                raise ValueError(f"Unsupported exchange: {exchange}")
+        # Check survival state on startup
+        self._check_survival_state()
+    
+    def _default_config(self) -> Dict:
+        """Default configuration"""
+        return {
+            'max_position_pct': 0.10,      # 10% max position
+            'max_leverage': 2.0,           # 2x max leverage
+            'min_edge_bp': 0.5,            # 0.5 basis points minimum edge
+            'kelly_cap': 0.25,             # Never risk more than 25% Kelly
+            'signal_entry_threshold': 0.5,  # Minimum signal to enter
+            'signal_exit_threshold': 0.2,   # Signal to exit/reduce
+            'max_daily_loss': 0.05,        # 5% daily loss limit (stop trading)
+            'max_weekly_loss': 0.15,       # 15% weekly loss limit (stop trading)
+            'position_update_interval': 1,  # Seconds between position updates
+            'decision_interval': 1,         # Seconds between decisions
+            'enable_learning': True,        # Whether to update learning from trades
+        }
+    
+    def _check_survival_state(self):
+        """Check if we should be trading based on survival state"""
+        survival = self.state_store.load_survival_state()
+        
+        if survival['daily_dd'] >= self.config['max_daily_loss']:
+            self.logger.warning(f"DAILY LOSS LIMIT REACHED: {survival['daily_dd']:.1%}")
+            return False
+        
+        if survival['weekly_dd'] >= self.config['max_weekly_loss']:
+            self.logger.warning(f"WEEKLY LOSS LIMIT REACHED: {survival['weekly_dd']:.1%}")
+            return False
+        
+        return True
+    
+    def start(self):
+        """Start the trading bot"""
+        if self.is_running:
+            self.logger.warning("Bot is already running")
+            return
+        
+        # Check survival state
+        if not self._check_survival_state():
+            self.logger.error("Cannot start: survival limits exceeded")
+            return
+        
+        self.is_running = True
+        self.start_time = datetime.now()
+        self.logger.info(f"Starting trading bot for {self.symbol} (paper={self.paper_trading})")
+        
+        # Start threads
+        self.chart_thread = threading.Thread(target=self._chart_loop, daemon=True)
+        self.decision_thread = threading.Thread(target=self._decision_loop, daemon=True)
+        self.execution_thread = threading.Thread(target=self._execution_loop, daemon=True)
+        self.learning_thread = threading.Thread(target=self._learning_loop, daemon=True)
+        
+        self.chart_thread.start()
+        self.decision_thread.start()
+        self.execution_thread.start()
+        self.learning_thread.start()
+        
+        # Start WebSocket provider for live trading
+        if not self.paper_trading and self.ws_provider:
+            self.ws_thread = threading.Thread(target=self.ws_provider.connect, daemon=True)
+            self.ws_thread.start()
+            # Give the WebSocket a moment to connect
+            time.sleep(1)
+        
+        self.logger.info("All threads started")
+
+        self.learning_thread.start()
+        
+        # Start WebSocket provider for live trading
+        if not self.paper_trading and self.ws_provider:
+            self.ws_thread = threading.Thread(target=self.ws_provider.connect, daemon=True)
+            self.ws_thread.start()
+            # Give the WebSocket a moment to connect
+            time.sleep(1)
+        self.learning_thread = threading.Thread(target=self._learning_loop, daemon=True)
+        
+        self.chart_thread.start()
+        self.decision_thread.start()
+        self.execution_thread.start()
+        self.learning_thread.start()
+        
+        self.logger.info("All threads started")
+    
+        # Wait for threads to finish (with timeout)
+        threads = [self.chart_thread, self.decision_thread, self.execution_thread, self.learning_thread]
+        for thread in threads:
+            if thread and thread.is_alive():
+                thread.join(timeout=5.0)
+        
+        # Stop WebSocket provider for live trading
+        if self.ws_provider:
+            self.ws_provider.disconnect()
+            if self.ws_thread and self.ws_thread.is_alive():
+                self.ws_thread.join(timeout=5.0)
+        
+        # Persist final state
+    def stop(self):
+        """Stop the trading bot"""
+        self.logger.info("Stopping trading bot...")
+        self.is_running = False
+        
+        # Wait for threads to finish (with timeout)
+        threads = [self.chart_thread, self.decision_thread, self.execution_thread, self.learning_thread]
+        for thread in threads:
+            if thread and thread.is_alive():
+                thread.join(timeout=5.0)
+        
+        # Persist final state
+        self._persist_state()
+        
+        self.logger.info("Trading bot stopped")
+    
+    def _chart_loop(self):
+        """Chart Brain loop - processes market data"""
+        self.logger.info("Chart loop started")
+        
+        # In a real implementation, this would connect to a WebSocket or data feed
+        # For now, we'll simulate with periodic updates or expect bars to be put in queue
+        
+        last_bar_time = None
+        while self.is_running:
+            try:
+                # Get bar from queue (timeout to allow checking is_running)
+                try:
+                    bar = self.bar_queue.get(timeout=1.0)
+                    self.bars_processed += 1
+                except queue.Empty:
+                    # No new bar, continue loop
+                    continue
+                # Validate bar
+                if bar.timestamp <= (last_bar_time or 0):
+                    self.logger.warning(f"Received out-of-order bar: {bar.timestamp}")
+                    continue
+                
+                last_bar_time = bar.timestamp
+                
+                # Update Chart Brain
+                ctx = self.chart_brain.update(bar)
+                
+                # Put context in queue for decision brain
+                # Non-blocking put with timeout
+                try:
+                    # We'll use a separate context queue or have decision brain pull from chart brain
+                    # For simplicity, decision brain will access chart brain directly
+                    pass
+                except:
+                    pass
+                
+                # Log occasionally
+                if len(self.chart_brain.bars) % 60 == 0:  # Every 60 bars
+                    self.logger.debug(f"Chart update: {ctx.regime.value}({ctx.regime_confidence:.2f}) "
+                                    f"| {ctx.vol_regime.value} | ATR:{ctx.atr:.4f} | "
+                                    f"Trend:{ctx.trend_strength:.1f} | RSI:{ctx.rsi:.1f}")
+                
+            except Exception as e:
+                self.logger.error(f"Error in chart loop: {e}", exc_info=True)
+                time.sleep(1)  # Prevent tight error loop
+    
+    def _decision_loop(self):
+        """Decision Brain loop - makes trading decisions"""
+        self.logger.info("Decision loop started")
+        
+        last_decision_time = 0
+        decision_interval = self.config.get('decision_interval', 1)
+        
+        while self.is_running:
+            try:
+                current_time = time.time()
+                
+                # Check if it's time to make a decision
+                if current_time - last_decision_time < decision_interval:
+                    time.sleep(0.1)
+                    continue
+                
+                # Get current chart context
+                ctx = None
+                if self.chart_brain.bars:
+                    # Get latest context from chart brain
+                    # In reality, chart brain would have a method to get current context
+                    # For now, we'll update with the last bar to get context
+                    if self.chart_brain.bars:
+                        ctx = self.chart_brain.update(self.chart_brain.bars[-1])
+                
+                if ctx is None:
+                    time.sleep(0.1)
+                    continue
+                
+                # Check survival state before making decisions
+                if not self._check_survival_state():
+                    self.logger.warning("Survival limits exceeded - holding flat")
+                    # Send flattening orders if needed
+                    self._send_flattening_orders()
+                    time.sleep(decision_interval)
+                    continue
+                
+                # Make decision
+                decision = self.decision_brain.decide(ctx, self.current_positions)
+                self.decisions_made += 1
+                
+                # Log decision
+                self.logger.info(f"DECISION: {decision.rationale}")
+                
+                # Process orders
+                if decision.orders:
+                    self._process_decision(decision)
+                
+                last_decision_time = current_time
+                
+            except Exception as e:
+                self.logger.error(f"Error in decision loop: {e}", exc_info=True)
+                time.sleep(1)
+    
+    def _execution_loop(self):
+        """Execution loop - handles order submission and fill processing"""
+        self.logger.info("Execution loop started")
+        
+        while self.is_running:
+            try:
+                # Process order queue (orders to submit)
+                try:
+                    order = self.order_queue.get(timeout=1.0)
+                    self._submit_order(order)
+                except queue.Empty:
+                    pass
+                
+                # Process fill queue (order fills)
+                try:
+                    fill = self.fill_queue.get(timeout=1.0)
+                    self._process_fill(fill)
+                except queue.Empty:
+                    pass
+                
+                # Update positions (would typically come from execution module)
+                self._update_positions()
+                
+                time.sleep(0.1)  # Prevent tight loop
+                
+            except Exception as e:
+                self.logger.error(f"Error in execution loop: {e}", exc_info=True)
+                time.sleep(1)
+    
+    def _learning_loop(self):
+        """Learning loop - processes trade outcomes for learning"""
+        self.logger.info("Learning loop started")
+        
+        while self.is_running:
+            try:
+                # In a full implementation, this would wait for trade completion signals
+                # For now, we'll just persist state periodically
+                time.sleep(10.0)  # Persist every 10 seconds
+                
+                if self.config.get('enable_learning', True):
+                    self.learning_brain._persist_state()
+                
+            except Exception as e:
+                self.logger.error(f"Error in learning loop: {e}", exc_info=True)
+                time.sleep(1)
+    
+    def _process_decision(self, decision: Decision):
+        """Process a decision and generate orders"""
+        # Skip if decision is to stay flat and we're already flat
+        if decision.is_flat:
+            current_pos = self.current_positions.get(self.symbol)
+            if not current_pos or abs(current_pos.quantity) < 1e-10:
+                return  # Already flat, no action needed
+        
+        # Send orders to execution queue
+        for order in decision.orders:
+            try:
+                self.orders_generated += 1
+                self.order_queue.put(order, timeout=1.0)
+                self.logger.debug(f"Queued order: {order.side} {order.quantity} {order.symbol} {order.order_type}")
+            except queue.Full:
+                self.logger.warning("Order queue full - dropping order")
+        
+        # Log decision for audit
+        decision_log = {
+            'timestamp': int(time.time()),
+            'symbol': self.symbol,
+            'regime': decision.meta.get('regime', 'unknown'),
+            'signal': decision.meta.get('model_signal', 0.0),
+            'size': decision.meta.get('target_size', 0.0),
+            'rationale': decision.rationale,
+            'risk_metrics': decision.risk_metrics,
+            'meta': decision.meta
+        }
+        # In a full implementation, this would go to decision_log table
+        self.logger.debug(f"Decision logged: {decision_log}")
+    
+    def _submit_order(self, order: Order):
+        """Submit order to exchange (or paper trading simulator)"""
+        # Generate order ID
+        order_id = f"{self.symbol}_{int(time.time()*1000)}_{len(self.pending_orders)}"
+        
+        # In paper trading, we simulate immediate fill
+        # In live trading, this would send to exchange via API/WebSocket
+        
+        if self.paper_trading:
+            self._simulate_paper_fill(order, order_id)
+        else:
+            # Live trading - send to exchange
+            # This would call your exchange adapter (Binance, Alpaca, etc.)
+            self.logger.info(f"LIVE ORDER: {order.side} {order.quantity} {order.symbol} {order.order_type}")
+            # For now, we'll simulate anyway for safety
+            self._simulate_paper_fill(order, order_id)
+    
+    def _simulate_paper_fill(self, order: Order, order_id: str):
+        """Simulate order fill for paper trading"""
+        # Get current price from chart brain
+        current_price = self.chart_brain.get_current_price()
+        if current_price <= 0:
+            self.logger.warning("Cannot simulate fill: no price data")
+            return
+        
+        # Simulate fill with slippage
+        slippage = 0.0001  # 1 basis point slippage
+        if order.side > 0:  # Buy
+            fill_price = current_price * (1 + slippage)
+        else:  # Sell
+            fill_price = current_price * (1 - slippage)
+        
+        # Create fill
+        fill = Fill(
+            order_id=order_id,
+            symbol=order.symbol,
+            side=order.side,
+            quantity=order.quantity,
+            price=fill_price,
+            timestamp=int(time.time()),
+            commission=order.quantity * fill_price * 0.001  # 0.1% commission
+        )
+        
+        # Process fill
+        self._process_fill(fill)
+    
+    def _process_fill(self, fill: Fill):
+        """Process order fill"""
+        self.logger.info(f"FILLED: {fill.side} {fill.quantity} {fill.symbol} @ {fill.price:.4f} "
+                        f"(comm: {fill.commission:.2f})")
+        
+        # Store fill
+        self.filled_orders[fill.order_id] = fill
+        
+        # Remove from pending if it was there
+        if fill.order_id in self.pending_orders:
+            del self.pending_orders[fill.order_id]
+        
+        # In a full implementation, this would update position and trigger learning
+        # For now, we'll create a mock PnL and trigger learning
+        # The actual position tracking would be more sophisticated
+        
+        # Simple PnL calculation (would be more realistic in practice)
+        # For demo purposes, we'll simulate a small random PnL
+        import random
+        simulated_pnl = random.uniform(-10, 10)  # Simulate $10 profit/loss
+        
+        pnl = PnL(
+            realized=simulated_pnl,
+            unrealized=0.0,  # Would be calculated from position vs market price
+            timestamp=int(time.time())
+        )
+        
+        # Create a mock decision for learning (in reality, this would be the original decision)
+        mock_decision = Decision(
+            orders=[fill],  # Simplified
+            rationale="Paper trade",
+            risk_metrics={},
+            meta={
+                'regime': self.chart_brain.regime.value if self.chart_brain.bars else 'unknown',
+                'vol_regime': self.chart_brain.vol_regime.value if self.chart_brain.bars else 'normal',
+                'atr': self.chart_brain.atr if self.chart_brain.bars else 0.0,
+                'trend_strength': self.chart_brain.trend_strength if self.chart_brain.bars else 0.0,
+                'risk_per_share': 1.0,  # Simplified
+                'timestamp': fill.timestamp
+            }
+        )
+        
+        # Trigger learning if enabled
+        if self.config.get('enable_learning', True):
+            self.learning_brain.record_outcome(mock_decision, fill, pnl)
+        
+        # Update statistics
+        self.total_pnl += simulated_pnl
+        self.trade_count += 1
+        
+        self.logger.info(f"Trade PnL: {simulated_pnl:.2f} | Total: {self.total_pnl:.2f} | Trades: {self.trade_count}")
+    
+    def _update_positions(self):
+        """Update current positions based on fills"""
+        # In a full implementation, this would:
+        # 1. Track all fills per symbol
+        # 2. Calculate weighted average price
+        # 3. Calculate unrealized PnL based on current market price
+        # 4. Update Positions object
+        
+        # For now, we'll do a simplified version
+        # Group fills by symbol
+        symbol_fills = defaultdict(list)
+        for fill in self.filled_orders.values():
+            symbol_fills[fill.symbol].append(fill)
+        
+        # Calculate position for our symbol
+        if self.symbol in symbol_fills:
+            fills = symbol_fills[self.symbol]
+            if fills:
+                # Calculate weighted average price and total quantity
+                total_cost = 0.0
+                total_quantity = 0.0
+                
+                for fill in fills:
+                    # Buy increases position, sell decreases
+                    quantity = fill.quantity if fill.side > 0 else -fill.quantity
+                    total_quantity += quantity
+                    total_cost += fill.quantity * fill.price  # Always positive cost
+                
+                if abs(total_quantity) > 1e-10:
+                    avg_price = total_cost / abs(total_quantity) if total_quantity != 0 else 0
+                    
+                    # Get current market price for unrealized PnL
+                    current_price = self.chart_brain.get_current_price()
+                    if current_price > 0:
+                        unrealized_pnl = total_quantity * (current_price - avg_price)
+    def _persist_state(self):
+        """Persist bot state"""
+        try:
+            # Persist learning brain state
+            if self.config.get('enable_learning', True):
+                self.learning_brain._persist_state()
+            
+            # Persist chart brain state
+            if self.chart_brain.bars:
+                ctx = self.chart_brain.update(self.chart_brain.bars[-1])
+                self.state_store.save_chart_state(self.symbol, ctx)
+            
+            # Persist survival state (already done by learning brain)
+            # Persist positions
+            for symbol, position in self.current_positions.positions.items():
+                self.state_store.save_position(position)
+            
+            self.logger.debug("State persisted")
+        except Exception as e:
+            self.logger.error(f"Error persisting state: {e}")
+
+    def _on_ws_bar(self, bar_data: dict):
+        """Handle incoming bar from WebSocket provider"""
+        try:
+            # Convert bar_data to Bar object
+            bar = Bar(
+                symbol=bar_data["symbol"],
+                timestamp=bar_data["timestamp"],
+                open=bar_data["open"],
+                high=bar_data["high"],
+                low=bar_data["low"],
+                close=bar_data["close"],
+                volume=bar_data["volume"]
+            )
+            
+            # Put bar into queue for processing (same as simulate_bar)
+            self.bar_queue.put(bar, timeout=1.0)
+        except Exception as e:
+            self.logger.error(f"Error processing WebSocket bar: {e}")
+    def get_status(self) -> Dict[str, Any]:
+        """Get current bot status"""
+        survival = self.state_store.load_survival_state()
+        current_pos = self.current_positions.get(self.symbol)
+        
+        return {
+            "symbol": self.symbol,
+            "is_running": self.is_running,
+            "paper_trading": self.paper_trading,
+            "start_time": self.start_time.isoformat() if self.start_time else None,
+            "uptime_seconds": (datetime.now() - self.start_time).total_seconds() if self.start_time else 0,
+            "total_pnl": self.total_pnl,
+            "trade_count": self.trade_count,
+            "survival": survival,
+            "current_position": {
+                "quantity": current_pos.quantity if current_pos else 0.0,
+                "avg_price": current_pos.avg_price if current_pos else 0.0,
+                "unrealized_pnl": current_pos.unrealized_pnl if current_pos else 0.0,
+                "value": current_pos.quantity * current_pos.avg_price if current_pos else 0.0
+            } if current_pos else None,
+            "chart_state": {
+                "regime": self.chart_brain.regime.value if self.chart_brain.bars else "unknown",
+                "regime_confidence": self.chart_brain.regime_confidence,
+                "vol_regime": self.chart_brain.vol_regime.value,
+                "atr": self.chart_brain.atr if self.chart_brain.bars else 0.0,
+                "trend_strength": self.chart_brain.trend_strength if self.chart_brain.bars else 0.0,
+                "rsi": self.chart_brain.rsi if self.chart_brain.bars else 0.0,
+                "bar_count": len(self.chart_brain.bars)
+            } if self.chart_brain.bars else None,
+            "pending_orders": len(self.pending_orders),
+            "filled_orders": len(self.filled_orders),
+            "bars_processed": self.bars_processed,
+            "decisions_made": self.decisions_made,
+            "orders_generated": self.orders_generated
+        }
+
+    def _on_ws_bar(self, bar_data: dict):
+        """Handle incoming bar from WebSocket provider"""
+        try:
+            # Convert bar_data to Bar object
+            # Note: Bar does not include symbol - symbol is handled elsewhere in the bot
+            bar = Bar(
+                timestamp=bar_data["timestamp"],
+                open=bar_data["open"],
+                high=bar_data["high"],
+                low=bar_data["low"],
+                close=bar_data["close"],
+                volume=bar_data["volume"]
+            )
+            
+            # Put bar into queue for processing (same as simulate_bar)
+            self.bar_queue.put(bar, timeout=1.0)
+        except Exception as e:
+            self.logger.error(f"Error processing WebSocket bar: {e}")
+
+                'avg_price': current_pos.avg_price if current_pos else 0.0,
+                'unrealized_pnl': current_pos.unrealized_pnl if current_pos else 0.0,
+                'value': current_pos.quantity * current_pos.avg_price if current_pos else 0.0
+            } if current_pos else None,
+            'chart_state': {
+                'regime': self.chart_brain.regime.value if self.chart_brain.bars else 'unknown',
+                'regime_confidence': self.chart_brain.regime_confidence,
+                'vol_regime': self.chart_brain.vol_regime.value,
+                'atr': self.chart_brain.atr if self.chart_brain.bars else 0.0,
+                'trend_strength': self.chart_brain.trend_strength if self.chart_brain.bars else 0.0,
+                'rsi': self.chart_brain.rsi if self.chart_brain.bars else 0.0,
+                'bar_count': len(self.chart_brain.bars)
+            } if self.chart_brain.bars else None,
+            'pending_orders': len(self.pending_orders),
+            'filled_orders': len(self.filled_orders)
+        }
+    
+    def simulate_bar(self, bar: Bar):
+        """
+        Simulate receiving a bar (for testing/backtesting)
+        In live trading, this would come from the data feed
+        """
+        try:
+            self.bar_queue.put(bar, timeout=1.0)
+        except queue.Full:
+            self.logger.warning("Bar queue full - dropping bar")
+    
+    def run_backtest(self, bars: List[Bar]):
+        """
+        Run backtest on historical data
+        This is a simplified version - a full backtest would be more sophisticated
+        """
+        self.logger.info(f"Starting backtest on {len(bars)} bars")
+        
+        # Reset state for clean backtest
+        self.is_running = True
+        self.start_time = datetime.now()
+        
+        # Process each bar
+        for i, bar in enumerate(bars):
+            if not self.is_running:
+                break
+            
+            # Simulate receiving bar
+            self.simulate_bar(bar)
+            
+            # Allow time for processing
+            time.sleep(0.001)  # 1ms per bar - adjust as needed
+            
+            # Log progress
+            if (i + 1) % 1000 == 0:
+                self.logger.info(f"Processed {i+1}/{len(bars)} bars")
+        
+        # Wait for processing to finish
+        time.sleep(2.0)
+        
+        # Stop bot
+        self.stop()
+        
+        # Return results
+        return self.get_status()
+
+
+# Factory function for easy instantiation
+def create_trading_bot(symbol: str, 
+                      paper_trading: bool = True,
+                      config: Optional[Dict] = None,
+                      state_store: Optional[StateStore] = None) -> TradingBot:
+    """
+    Factory function to create a trading bot
+    
+    Args:
+        symbol: Trading symbol
+        paper_trading: Whether to use paper trading
+        config: Optional configuration
+        state_store: Optional state store instance
+    
+    Returns:
+        Configured TradingBot instance
+    """
+    return TradingBot(
+        symbol=symbol,
+        config=config,
+        paper_trading=paper_trading,
+        state_store=state_store
+    )
+if __name__ == "__main__":
+    # Example usage
+    import yaml
+    
+    # Setup logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    # Create bot
+    bot = create_trading_bot(
+        symbol="BTCUSDT",
+        paper_trading=True,
+        config={
+            'max_position_pct': 0.10,
+            'max_leverage': 2.0,
+            'enable_learning': True
+        }
+    )
+    
+    # Start bot
+    bot.start()
+    
+    try:
+        # Run for a while
+        time.sleep(30)
+        
+        # Print status
+        print("\n=== BOT STATUS ===")
+        status = bot.get_status()
+        for key, value in status.items():
+            if key not in ['chart_state', 'survival']:  # Skip complex objects for readability
+                print(f"{key}: {value}")
+        
+        print("\n=== CHART STATE ===")
+        if status['chart_state']:
+            for key, value in status['chart_state'].items():
+                print(f"  {key}: {value}")
+        
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+    finally:
+        bot.stop()

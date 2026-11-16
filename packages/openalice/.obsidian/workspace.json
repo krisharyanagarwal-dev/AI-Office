@@ -1,0 +1,85 @@
+{
+  "main": {
+    "id": "root",
+    "type": "split",
+    "children": [
+      {
+        "id": "file-explorer",
+        "type": "leaf",
+        "state": {
+          "type": "file-explorer",
+          "state": {
+            "sortOrder": "alphabetical",
+            "autoReveal": true
+          }
+        }
+      },
+      {
+        "id": "editor",
+        "type": "leaf",
+        "state": {
+          "type": "empty",
+          "state": {}
+        }
+      }
+    ],
+    "direction": "horizontal"
+  },
+  "left": {
+    "id": "sidebar-left",
+    "type": "split",
+    "children": [
+      {
+        "id": "search",
+        "type": "leaf",
+        "state": {
+          "type": "search",
+          "state": {
+            "query": "",
+            "matchingCase": false,
+            "explainSearch": false,
+            "collapseAll": false
+          }
+        }
+      },
+      {
+        "id": "tags",
+        "type": "leaf",
+        "state": {
+          "type": "tag",
+          "state": {
+            "sortOrder": "frequency"
+          }
+        }
+      }
+    ],
+    "direction": "vertical"
+  },
+  "right": {
+    "id": "sidebar-right",
+    "type": "split",
+    "children": [
+      {
+        "id": "backlinks",
+        "type": "leaf",
+        "state": {
+          "type": "backlink",
+          "state": {
+            "collapseAll": false
+          }
+        }
+      },
+      {
+        "id": "outline",
+        "type": "leaf",
+        "state": {
+          "type": "outline",
+          "state": {}
+        }
+      }
+    ],
+    "direction": "vertical"
+  },
+  "active": "editor",
+  "lastOpenFiles": []
+}

@@ -1,0 +1,17 @@
+{
+  "theme": "obsidian",
+  "baseFontSize": 14,
+  "baseFontFamily": "JetBrains Mono, -apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif",
+  "monospaceFontFamily": "JetBrains Mono, Menlo, Monaco, Consolas, monospace",
+  "textFontFamily": "JetBrains Mono, -apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif",
+  "interfaceFontFamily": "JetBrains Mono, -apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif",
+  "showLineNumber": true,
+  "showIndentGuide": true,
+  "foldHeading": true,
+  "foldIndent": true,
+  "lineWidth": 80,
+  "propertiesInDocument": "visible",
+  "showFrontmatter": true,
+  "cssTheme": "",
+  "themeOverrides": {}
+}

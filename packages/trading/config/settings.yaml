@@ -1,0 +1,425 @@
+# Alpha System Configuration
+# All settings centralized here
+
+# ============================================================
+# UNIVERSE
+# ============================================================
+universe:
+  equities:
+    - "SPY"   # S&P 500
+    - "QQQ"   # Nasdaq 100
+    - "IWM"   # Russell 2000
+    - "EFA"   # Developed Intl
+    - "EEM"   # Emerging Markets
+    - "GLD"   # Gold
+    - "TLT"   # 20Y Treasuries
+    - "DBC"   # Commodities
+    - "VNQ"   # REITs
+    - "XLE"   # Energy
+    - "XLF"   # Financials
+    - "XLK"   # Technology
+    - "XLV"   # Healthcare
+    - "XLI"   # Industrials
+    - "XLP"   # Consumer Staples
+    - "XLU"   # Utilities
+    - "XLB"   # Materials
+    - "XLRE"  # Real Estate
+  
+  crypto:
+    - "BTC-USD"
+    - "ETH-USD"
+    - "SOL-USD"
+    - "ADA-USD"
+    - "AVAX-USD"
+    - "DOT-USD"
+    - "MATIC-USD"
+    - "LINK-USD"
+    - "UNI-USD"
+    - "ATOM-USD"
+    - "NEAR-USD"
+    - "FTM-USD"
+    - "ALGO-USD"
+    - "VET-USD"
+    - "ICP-USD"
+    - "FIL-USD"
+    - "THETA-USD"
+    - "AXS-USD"
+    - "SAND-USD"
+    - "MANA-USD"
+
+  futures:
+    - "ES=F"   # S&P 500
+    - "NQ=F"   # Nasdaq
+    - "YM=F"   # Dow
+    - "RTY=F"  # Russell 2000
+    - "ZB=F"   # 30Y Bonds
+    - "ZN=F"   # 10Y Bonds
+    - "GC=F"   # Gold
+    - "CL=F"   # Crude Oil
+    - "NG=F"   # Natural Gas
+
+# ============================================================
+# DATA
+# ============================================================
+data:
+  start_date: "2020-01-01"
+  end_date: "2024-12-31"
+  frequency: "1d"  # 1d, 1h, 15m, 5m, 1m
+  adjust: true
+  cache_dir: "./data/cache"
+  providers:
+    primary: "yfinance"
+    fallback: ["alphavantage", "polygon", "binance"]
+  alternative:
+    funding_rates: true
+    open_interest: true
+    fear_greed: true
+    google_trends: false
+    whale_alerts: false
+    exchange_flows: false
+
+# ============================================================
+# FACTORS
+# ============================================================
+factors:
+  # Momentum
+  momentum:
+    lookbacks: [5, 10, 20, 60, 120, 252]
+    skip: 21  # 12-1 momentum
+    enabled: true
+  
+  # Mean Reversion
+  reversal:
+    lookbacks: [1, 5, 10, 21, 63]
+    enabled: true
+  
+  # Volatility
+  volatility:
+    lookbacks: [10, 20, 60, 120, 252]
+    realized: true
+    parkinson: true
+    garman_klass: true
+    yang_zhang: true
+    enabled: true
+  
+  # Volume
+  volume:
+    lookbacks: [5, 10, 20, 60]
+    vwap: true
+    vwap_distance: true
+    volume_trend: true
+    dollar_volume: true
+    enabled: true
+  
+  # Technical
+  technical:
+    rsi: [14, 21]
+    macd: [[12, 26, 9], [8, 21, 5]]
+    bollinger: [20, 50]
+    keltner: [20]
+    atr: [14, 21]
+    adx: [14]
+    cci: [20]
+    stoch: [14]
+    williams_r: [14]
+    enabled: true
+  
+  # Cross-sectional
+  cross_sectional:
+    rank: true
+    zscore: true
+    sector_neutral: false
+    market_neutral: true
+    enabled: true
+  
+  # Alternative
+  alternative:
+    funding_basis: true
+    oi_change: true
+    exchange_netflow: true
+    whale_score: true
+    fear_greed: true
+    google_trends: false
+    enabled: true
+
+# ============================================================
+# REGIME DETECTION
+# ============================================================
+regime:
+  method: "hmm"  # hmm, kmeans, threshold, markov
+  n_regimes: 4
+  features:
+    - "breadth"
+    - "vix"
+    - "term_spread"
+    - "credit_spread"
+    - "dollar_index"
+    - "crypto_dominance"
+  lookback: 252
+  min_duration: 10
+  transition_penalty: 0.1
+
+# ============================================================
+# MODELS
+# ============================================================
+models:
+  # Linear models
+  linear:
+    ridge:
+      alphas: [0.01, 0.1, 1.0, 10.0, 100.0]
+      enabled: true
+    lasso:
+      alphas: [0.001, 0.01, 0.1, 1.0]
+      enabled: true
+    elastic_net:
+      alphas: [0.01, 0.1, 1.0]
+      l1_ratios: [0.1, 0.5, 0.9]
+      enabled: true
+  
+  # Tree-based
+  tree:
+    lightgbm:
+      n_estimators: [100, 300, 500]
+      max_depth: [4, 6, 8]
+      learning_rate: [0.01, 0.03, 0.05]
+      subsample: [0.8, 0.9]
+      colsample_bytree: [0.8, 0.9]
+      reg_alpha: [0.0, 0.1, 1.0]
+      reg_lambda: [0.0, 0.1, 1.0]
+      early_stopping: 50
+      enabled: true
+    xgboost:
+      n_estimators: [100, 300]
+      max_depth: [4, 6]
+      learning_rate: [0.01, 0.03]
+      enabled: false
+    catboost:
+      iterations: [100, 300]
+      depth: [4, 6]
+      learning_rate: [0.01, 0.03]
+      enabled: false
+  
+  # Neural networks
+  neural:
+    mlp:
+      hidden_layers: [[64, 32], [128, 64, 32], [256, 128, 64]]
+      dropout: [0.1, 0.2, 0.3]
+      learning_rate: [0.001, 0.003]
+      batch_size: [256, 512]
+      epochs: 100
+      early_stopping: 20
+      enabled: false
+    lstm:
+      hidden_size: [64, 128]
+      num_layers: [1, 2]
+      dropout: [0.1, 0.2]
+      sequence_length: [20, 60]
+      enabled: false
+    transformer:
+      d_model: [64, 128]
+      n_heads: [4, 8]
+      n_layers: [2, 4]
+      dropout: [0.1]
+      enabled: false
+  
+  # Ensemble
+  ensemble:
+    voting: true
+    stacking: true
+    blending: true
+    weights_method: "ic_weighted"  # equal, ic_weighted, sharpe_weighted
+
+# ============================================================
+# VALIDATION
+# ============================================================
+validation:
+  method: "walkforward"  # walkforward, kfold, purged_kfold, comb_purged
+  n_splits: 12
+  train_window: 252
+  test_window: 21
+  gap: 5
+  purged: true
+  embargo_pct: 0.01
+  metrics:
+    - "ic"
+    - "rank_ic"
+    - "sharpe"
+    - "sortino"
+    - "calmar"
+    - "max_drawdown"
+    - "hit_rate"
+    - "turnover"
+
+# ============================================================
+# RISK MODEL
+# ============================================================
+risk:
+  covariance:
+    method: "ledoit_wolf"  # sample, ledoit_wolf, oracle, factor, shrinkage
+    factor_model: "pca"  # pca, fundamental, statistical
+    n_factors: 10
+    half_life: 60
+    frequency: "daily"
+  
+  # Risk budgeting
+  budgeting:
+    method: "equal_risk"  # equal_risk, risk_parity, min_var, max_div
+    max_weight: 0.15
+    min_weight: -0.15
+    max_leverage: 2.0
+    max_sector_weight: 0.3
+    max_factor_exposure: 0.2
+  
+  # Tail risk
+  tail:
+    var_confidence: 0.99
+    cvar_confidence: 0.975
+    stress_scenarios: true
+    historical_scenarios: ["2008", "2020_covid", "2022_bear"]
+
+# ============================================================
+# PORTFOLIO OPTIMIZATION
+# ============================================================
+portfolio:
+  objective: "mean_variance"  # mean_variance, max_sharpe, min_var, risk_parity, max_div, utility
+  solver: "ECOS"  # ECOS, OSQP, SCS, CLARABEL
+  
+  constraints:
+    - type: "budget"
+      value: 1.0
+    - type: "long_only"
+      enabled: false
+    - type: "max_weight"
+      value: 0.15
+    - type: "min_weight"
+      value: -0.15
+    - type: "leverage"
+      value: 2.0
+    - type: "turnover"
+      value: 0.5
+    - type: "sector"
+      max_per_sector: 0.3
+    - type: "factor"
+      max_per_factor: 0.2
+    - type: "position_limit"
+      max_positions: 50
+  
+  transaction_costs:
+    commission_bps: 5
+    slippage_bps: 3
+    spread_bps: 2
+    market_impact: "square_root"  # linear, square_root, power_law
+    impact_coeff: 0.1
+
+# ============================================================
+# BACKTEST
+# ============================================================
+backtest:
+  engine: "vectorized"  # vectorized, event_driven
+  initial_capital: 1_000_000
+  benchmark: "SPY"
+  
+  execution:
+    price: "close"  # open, close, vwap, next_open
+    delay: 1  # days
+    partial_fill: false
+    min_volume: 0
+  
+  costs:
+    commission: 0.0005
+    slippage: 0.0003
+    spread: 0.0002
+    borrow_cost: 0.0001
+  
+  reporting:
+    tear_sheet: true
+    monthly_returns: true
+    rolling_metrics: [63, 126, 252]
+    attribution: true
+    factor_exposure: true
+
+# ============================================================
+# EXECUTION
+# ============================================================
+execution:
+  mode: "paper"  # paper, live, backtest
+  broker: "interactive_brokers"  # ib, alpaca, binance, bybit
+  account: ""
+  
+  sizing:
+    method: "kelly"  # kelly, fixed_fraction, volatility_target, risk_parity
+    kelly_fraction: 0.5
+    target_vol: 0.15
+    max_leverage: 2.0
+  
+  orders:
+    type: "limit"  # market, limit, stop, stop_limit, twap, vwap
+    time_in_force: "DAY"
+    max_slippage: 0.001
+    retry_attempts: 3
+    retry_delay: 5
+  
+  risk_checks:
+    pre_trade: true
+    max_order_size: 0.1
+    max_daily_loss: 0.02
+    max_drawdown: 0.1
+    correlation_limit: 0.7
+    concentration_limit: 0.2
+
+# ============================================================
+# MONITORING
+# ============================================================
+monitoring:
+  logging:
+    level: "INFO"
+    format: "json"
+    file: "./logs/alpha.log"
+    max_size: "100MB"
+    backup_count: 10
+  
+  metrics:
+    prometheus: false
+    grafana: false
+    datadog: false
+  
+  alerts:
+    email: true
+    slack: false
+    pagerduty: false
+    thresholds:
+      drawdown: 0.05
+      daily_loss: 0.02
+      sharpe_degradation: 0.5
+      model_drift: 0.1
+      data_staleness: 3600
+  
+  dashboard:
+    enabled: true
+    port: 8080
+    refresh: 60
+
+# ============================================================
+# FEATURE STORE
+# ============================================================
+feature_store:
+  enabled: true
+  path: "./data/features"
+  format: "parquet"
+  versioning: true
+  ttl_days: 30
+
+# ============================================================
+# MODEL REGISTRY
+# ============================================================
+model_registry:
+  enabled: true
+  path: "./models/registry"
+  versioning: true
+  metadata:
+    - "train_date"
+    - "features"
+    - "hyperparameters"
+    - "metrics"
+    - "regime"
+    - "data_hash"
