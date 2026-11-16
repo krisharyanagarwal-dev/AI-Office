@@ -14,12 +14,18 @@ import glob
 import json
 import multiprocessing
 import os
+import re
 import signal
 import sys
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+
+try:
+    import argparse
+except ImportError:  # pragma: no cover
+    argparse = None
 
 sys.path.insert(0, "/Users/aryanagarwal/AI-Office/packages/office-os")
 from core.subs.cloud_orchestrator import CloudModelOrchestrator
@@ -356,8 +362,9 @@ STATE BUNDLE (ground truth — do not fabricate):
 If the STATE BUNDLE does not cover something you need, state that explicitly
 rather than inventing data. Base every claim on the bundle content.
 
-End your response with a clear verdict line: VERDICT: PASS or VERDICT: FAIL
-or VERDICT: go/no-go, followed by a one-sentence summary."""
+End your response with:
+  FINDING: one-sentence claim grounded in the STATE BUNDLE
+  VERDICT: PASS or VERDICT: FAIL or VERDICT: go/no-go"""
 
 
 def acquire_pid_lock():
@@ -498,24 +505,39 @@ def stampede_release(agent_id):
 
 
 def add_finding(agent_id, claim, evidence_ref, verdict, **kwargs):
-    """Add a finding to the store if not already present (dedupe by claim+agent)."""
+    """Add a finding to the store if not already present (dedupe by claim+agent).
+
+    Every finding starts with verification_status='pending' (O1.1).
+    A checker agent (≠ producer) must confirm it before it counts as supported.
+    """
     store = load_findings_store()
     # Dedup: same agent + same claim already exists
     for f in store["findings"]:
         if f.get("agent") == agent_id and f.get("claim") == claim:
             return False  # already exists
+    domain = kwargs.pop("domain", _domain_for_agent(agent_id))
+    requires_verification_from = kwargs.pop(
+        "requires_verification_from",
+        VERIFIER_MAP.get(domain, VERIFIER_MAP["default"])[0],
+    )
     finding = {
         "id": f"f-{uuid.uuid4().hex[:8]}",
         "agent": agent_id,
         "claim": claim,
         "evidence_ref": evidence_ref,
         "verdict": verdict,
+        "domain": domain,
+        "verification_status": "pending",
+        "requires_verification_from": requires_verification_from,
+        "verified_by": None,
+        "verified_at": None,
+        "verification_notes": None,
         "date": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     finding.update(kwargs)
     store["findings"].append(finding)
     save_findings_store(store)
-    return True
+    return finding["id"]
 
 
 def update_finding_outcome(finding_id, outcome, outcome_date=None, notes=None):
@@ -537,6 +559,570 @@ def update_finding_outcome(finding_id, outcome, outcome_date=None, notes=None):
             save_findings_store(store)
             return True
     return False
+
+
+# --- O1 Verification Layer ---
+# O1.1: producer ≠ verifier — every finding starts as "pending" and must be
+# confirmed by an independent checker agent before counting as "supported".
+# O1.3: hard gates — risk-control-verifier and strategy-acceptance-verifier
+# must confirm domain findings before they can be "supported".
+
+VERIFIER_MAP = {
+    "risk": ["strategy-acceptance-verifier", "drawdown-analyst", "exposure-analyst",
+             "risk-control-verifier"],  # last is Tier C, fallback only
+    "compliance": ["trade-journal-reviewer", "strategy-acceptance-verifier",
+                   "drawdown-analyst", "compliance-checker"],  # last is Tier C
+    "strategy": ["strategy-acceptance-verifier", "backtest-auditor",
+                 "quant-model-validator", "cost-analyst"],
+    "backtest": ["backtest-auditor", "quant-model-validator",
+                 "performance-attribution", "cost-analyst"],
+    "default": ["research-archivist", "trade-journal-reviewer", "exposure-analyst"],
+}
+
+
+# --- O2: Autonomy Tiers + Cost-per-Outcome Accounting ---
+# Tier A (autonomous): research, data, content — runs 24/7 without approval
+# Tier B (gated): writes to stores, deletions, external contact — approval queue
+# Tier C (never): money, orders, kill switch, broker anything — human only
+
+AGENT_AUTONOMY_TIERS = {
+    # Tier A — autonomous research & data (read-only, no store writes)
+    "Tier A": [
+        "data-feed-monitor",
+        "market-data-analyst",
+        "market-regime-analyst",
+        "correlation-researcher",
+        "volatility-researcher",
+        "order-book-researcher",
+        "liquidity-researcher",
+        "exposure-analyst",
+        "signal-analyst",
+        "event-driven-researcher",
+        "research-archivist",
+        "trade-log-archivist",
+        "trade-journal-reviewer",
+    ],
+    # Tier B — gated: writes to stores / analysis artifacts (needs approval flag)
+    "Tier B": [
+        "quant-researcher",
+        "quant-research-manager",
+        "backtest-auditor",
+        "quant-model-validator",
+        "position-sizing-analyst",
+        "cost-analyst",
+        "strategy-advisor",
+        "portfolio-allocation-researcher",
+        "performance-attribution",
+        "drawdown-analyst",
+        "liquidation-heatmap",
+        "perp-funding-analyst",
+    ],
+    # Tier C — never automated: risk enforcement, execution, kill switch, broker
+    "Tier C": [
+        "risk-manager",
+        "risk-control-verifier",
+        "compliance-checker",
+        "execution-strategist",
+        "execution-analyst",
+        "market-maker",
+        "portfolio-manager",
+    ],
+}
+
+# Build reverse lookup: agent_id -> autonomy tier letter
+AGENT_TIER_MAP = {}
+for tier_letter, agents in AGENT_AUTONOMY_TIERS.items():
+    letter = tier_letter.split()[-1]  # "Tier A" -> "A"
+    for a in agents:
+        AGENT_TIER_MAP[a] = letter
+
+# Cost model: provider tier -> cost units per call (relative, free providers)
+# Pro keys consume scarce quota; lite keys are abundant.
+MODEL_COST_UNITS = {
+    "pro": 3,
+    "general": 2,
+    "lite": 1,
+}
+
+# Artifact outcome value (per verified finding)
+OUTCOME_VALUE = {
+    "confirmed": 10,
+    "pending": 2,
+    "contested": -5,
+    "blocked": 0,
+}
+
+# Task ledger: in-memory record of every task's cost and outcome value.
+# Populated from Hive tasks on demand by office_pnl().
+TASK_LEDGER_PATH = "/Users/aryanagarwal/.openclaw/office_pnl.json"
+
+
+def agent_autonomy_tier(agent_id: str) -> str:
+    """Return autonomy tier letter (A/B/C) for an agent. Default B if unknown."""
+    return AGENT_TIER_MAP.get(agent_id, "B")
+
+
+def provider_cost_units(pool_tier) -> int:
+    """Return cost units for a provider pool tier (str or list of str)."""
+    if isinstance(pool_tier, list):
+        # Use the cheapest tier in the list
+        return min(MODEL_COST_UNITS.get(t, 2) for t in pool_tier)
+    return MODEL_COST_UNITS.get(pool_tier, 2)
+
+
+def load_task_ledger() -> list[dict]:
+    """Load task ledger from disk (JSON array of task records)."""
+    try:
+        with open(TASK_LEDGER_PATH) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+def save_task_ledger(ledger: list[dict]) -> None:
+    """Persist task ledger to disk."""
+    try:
+        with open(TASK_LEDGER_PATH, "w") as f:
+            json.dump(ledger, f, indent=2)
+    except OSError:  # noqa: BLE001
+        pass
+
+
+def record_task_cost(task: dict) -> None:
+    """Record a completed task's cost and outcome value into the ledger."""
+    metadata = task.get("metadata", {}) or {}
+    agent_id = task.get("agent_id", "")
+    tier_letter = agent_autonomy_tier(agent_id)
+    exec_pool = metadata.get("exec_pool", "unknown")
+    pool_info = None
+    # Try to look up pool tier from config
+    try:
+        config = load_office_config()
+        pools = config.get("provider_pools", {})
+        for pname, pinfo in pools.items():
+            if pname == exec_pool or exec_pool in str(pinfo.get("models", [])):
+                pool_info = pinfo
+                break
+    except Exception:  # noqa: BLE001
+        pass
+    cost_units = provider_cost_units(pool_info.get("tier", 2) if pool_info else 2)
+
+    # Outcome value from verification status if it's a finding task
+    verification = task.get("metadata", {}).get("verification_task")
+    if verification:
+        # Look up the finding's verification status
+        store = load_findings_store()
+        target = task.get("metadata", {}).get("verification_target")
+        outcome_val = 0
+        for f in store.get("findings", []):
+            if f.get("id") == target:
+                vs = f.get("verification_status", "pending")
+                outcome_val = OUTCOME_VALUE.get(vs, 0)
+                break
+    else:
+        # Regular task: value based on completion status
+        status = task.get("status", "error")
+        outcome_val = OUTCOME_VALUE.get("confirmed" if status == "done" else "blocked", 0)
+
+    ledger = load_task_ledger()
+    ledger.append({
+        "task_id": task.get("id", ""),
+        "agent_id": agent_id,
+        "autonomy_tier": tier_letter,
+        "status": task.get("status", "error"),
+        "cost_units": cost_units,
+        "outcome_value": outcome_val,
+        "net_value": outcome_val - cost_units,
+        "created_at": task.get("created_at", ""),
+        "source": metadata.get("source", "unknown"),
+    })
+    save_task_ledger(ledger)
+
+
+def office_pnl() -> dict:
+    """Compute office P&L: cost vs outcome value by tier and agent."""
+    ledger = load_task_ledger()
+    if not ledger:
+        return {
+            "total_cost_units": 0,
+            "total_outcome_value": 0,
+            "net_value": 0,
+            "task_count": 0,
+            "by_tier": {},
+            "by_agent": {},
+        }
+
+    total_cost = sum(t["cost_units"] for t in ledger)
+    total_value = sum(t["outcome_value"] for t in ledger)
+    by_tier: dict[str, dict] = {}
+    by_agent: dict[str, dict] = {}
+
+    for t in ledger:
+        at = t["autonomy_tier"]
+        aid = t["agent_id"]
+        by_tier.setdefault(at, {"cost": 0, "value": 0, "count": 0, "net": 0})
+        by_tier[at]["cost"] += t["cost_units"]
+        by_tier[at]["value"] += t["outcome_value"]
+        by_tier[at]["count"] += 1
+        by_tier[at]["net"] += t["net_value"]
+
+        by_agent.setdefault(aid, {"cost": 0, "value": 0, "count": 0, "net": 0, "tier": at})
+        by_agent[aid]["cost"] += t["cost_units"]
+        by_agent[aid]["value"] += t["outcome_value"]
+        by_agent[aid]["count"] += 1
+        by_agent[aid]["net"] += t["net_value"]
+
+    return {
+        "total_cost_units": total_cost,
+        "total_outcome_value": total_value,
+        "net_value": total_value - total_cost,
+        "task_count": len(ledger),
+        "by_tier": by_tier,
+        "by_agent": by_agent,
+    }
+
+
+def tier_enforcement_check(agent_id: str) -> tuple[bool, str]:
+    """O2.2/O2.3: Check if an agent's action is allowed under autonomy tiers.
+
+    Returns (allowed: bool, reason: str).
+    Tier A: always allowed.
+    Tier B: allowed but flagged needs_approval.
+    Tier C: blocked — human only.
+    """
+    tier = agent_autonomy_tier(agent_id)
+    if tier == "C":
+        return False, f"Tier C agent {agent_id} — human-only, never automated"
+    if tier == "B":
+        return True, f"Tier B agent {agent_id} — gated, needs approval"
+    return True, f"Tier A agent {agent_id} — autonomous"
+
+
+
+def _domain_for_agent(agent_id: str) -> str:
+    """Map an agent ID to a verification domain."""
+    a = agent_id.lower()
+    if "risk" in a:
+        return "risk"
+    if "compliance" in a:
+        return "compliance"
+    if "strategy" in a:
+        return "strategy"
+    if "backtest" in a:
+        return "backtest"
+    return "default"
+
+
+def get_checker_agent(producer_id: str, domain: str = "default") -> str | None:
+    """Return a checker agent for the given domain, not equal to the producer."""
+    for candidate in VERIFIER_MAP.get(domain, VERIFIER_MAP["default"]):
+        if candidate != producer_id:
+            return candidate
+    return None
+
+
+def update_finding_verification(
+    finding_id: str,
+    status: str,
+    checker_agent: str | None = None,
+    notes: str | None = None,
+) -> bool:
+    """Update a finding's verification status (O1.1 / O1.3).
+
+    status: 'pending' | 'confirmed' | 'contested'
+    """
+    store = load_findings_store()
+    for f in store["findings"]:
+        if f.get("id") == finding_id:
+            f["verification_status"] = status
+            f["verified_by"] = checker_agent
+            f["verified_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+            if notes:
+                f["verification_notes"] = notes
+            save_findings_store(store)
+            return True
+    return False
+
+
+def _dispatch_verification_task(
+    source_task_id: str,
+    finding_id: str,
+    checker_agent: str,
+    domain: str,
+    producer_agent: str,
+) -> None:
+    """O1.1 / O1.3: Create a Hive verification task for a checker agent.
+
+    The checker agent reviews the finding and confirms or contests it.
+    The task carries verification_target=finding_id so finalize_agent_result
+    knows to update the existing finding rather than create a new one.
+    """
+    verify_task_id = f"jev-{uuid.uuid4().hex[:8]}"
+    task = {
+        "id": verify_task_id,
+        "title": f"Verify finding {finding_id}: {domain}",
+        "description": (
+            f"Independent verification of finding {finding_id} produced by "
+            f"{producer_agent} (domain: {domain}). Review the evidence at "
+            f"{source_task_id} and confirm or contest the finding. "
+            f"Respond with VERDICT: confirm or VERDICT: contest, followed by "
+            f"a one-sentence rationale."
+        ),
+        "status": "pending",
+        "agent_id": checker_agent,
+        "priority": "high",
+        "user_id": "jev",
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "metadata": {
+            "tier": "pro",
+            "source": "jev-cloud-orchestrator",
+            "verification_task": True,
+            "verification_target": finding_id,
+            "verification_domain": domain,
+            "verification_producer": producer_agent,
+            "qwen_task_id": f"jev-exec-verify-{checker_agent}",
+        },
+        "result": None,
+        "error": None,
+    }
+    task_path = Path(HIVE_DIR) / f"{verify_task_id}.json"
+    with open(task_path, "w") as f:
+        json.dump(task, f, indent=2)
+    log(f"  Verification task dispatched to {checker} for finding {finding_id}")
+
+
+def verify_finding_sync(
+    finding_id: str,
+    producer_agent: str,
+    checker_agent: str,
+    domain: str,
+    config: dict,
+) -> None:
+    """O1.1: Synchronously verify a finding with an independent checker agent.
+
+    Calls the checker agent directly (not via Hive queue) so verification
+    happens before the cycle ends. Producer ≠ verifier is enforced by
+    passing a different agent_id.
+    """
+    # Look up checker agent info
+    agents = get_all_agents(config)
+    checker_info = None
+    for a in agents:
+        if a["agent_id"] == checker_agent:
+            checker_info = a
+            break
+    if not checker_info:
+        log(f"  Checker agent {checker_agent} not found in config")
+        return
+
+    # Load the finding to verify
+    store = load_findings_store()
+    finding = None
+    for f in store.get("findings", []):
+        if f.get("id") == finding_id:
+            finding = f
+            break
+    if not finding:
+        log(f"  Finding {finding_id} not found for verification")
+        return
+
+    # Build verification state bundle
+    state_bundle = (
+        f"VERIFICATION TASK — Independent review of finding {finding_id}\n"
+        f"Produced by: {producer_agent}\n"
+        f"Domain: {domain}\n"
+        f"Finding claim: {finding.get('claim', '')}\n"
+        f"Finding verdict: {finding.get('verdict', '')}\n"
+        f"Evidence ref: {finding.get('evidence_ref', '')}\n"
+        f"\nTASK: Review the finding above for accuracy and grounding. "
+        f"Respond with VERDICT: confirm (finding is well-grounded and accurate) "
+        f"or VERDICT: contest (finding is wrong, unsupported, or an echo), "
+        f"followed by a one-sentence rationale.\n"
+    )
+
+    try:
+        result = execute_agent_worker(
+            (checker_info, state_bundle, checker_info["tier"])
+        )
+    except Exception as e:
+        log(f"  Verification call failed for {checker_agent}: {e}")
+        return
+
+    exec_text = result.get("exec_text", "")
+    verdict_lower = exec_text.strip().lower()
+    if "verdict: contest" in verdict_lower:
+        update_finding_verification(
+            finding_id, "contested",
+            checker_agent=checker_agent,
+            notes=exec_text[:300],
+        )
+        log(f"  Verification CONTESTED for finding {finding_id} by {checker_agent}")
+    elif "verdict: confirm" in verdict_lower:
+        update_finding_verification(
+            finding_id, "confirmed",
+            checker_agent=checker_agent,
+            notes=exec_text[:300],
+        )
+        log(f"  Verification CONFIRMED for finding {finding_id} by {checker_agent}")
+    else:
+        log(f"  Verification by {checker_agent} had no clear confirm/contest verdict")
+
+
+# --- O1.2: Tripartite Consensus with Devil-Advisor ---
+# Major verdicts (strategy promotion, kill decisions) require 3 independent
+# agent reads plus a devil-advisor counter-case before a finding is "confirmed".
+
+TRIPARTITE_DOMAINS = {"strategy", "risk", "backtest"}  # domains needing 3-read consensus
+
+
+def _devil_advisor_for(domain: str, exclude: list[str]) -> str | None:
+    """Pick a devil-advisor agent (argues against the finding), excluded from others."""
+    candidates = VERIFIER_MAP.get(domain, VERIFIER_MAP["default"])
+    for c in candidates:
+        if c not in exclude:
+            return c
+    # Fallback: any agent not excluded
+    all_agents = get_all_agents(load_office_config())
+    for a in all_agents:
+        if a["agent_id"] not in exclude:
+            return a["agent_id"]
+    return None
+
+
+def _run_verification_call(checker_info: dict, finding: dict, domain: str,
+                           producer_agent: str, role_label: str) -> str:
+    """Run one verification call and return 'confirm' | 'contest' | 'unclear'."""
+    state_bundle = (
+        f"VERIFICATION TASK — {role_label} review of finding {finding['id']}\n"
+        f"Produced by: {producer_agent}\n"
+        f"Domain: {domain}\n"
+        f"Finding claim: {finding.get('claim', '')}\n"
+        f"Finding verdict: {finding.get('verdict', '')}\n"
+        f"Evidence ref: {finding.get('evidence_ref', '')}\n"
+        f"\nTASK: Independently review the finding above. "
+        f"Respond with VERDICT: confirm (finding is well-grounded and accurate) "
+        f"or VERDICT: contest (finding is wrong, unsupported, or an echo), "
+        f"followed by a one-sentence rationale.\n"
+    )
+    try:
+        result = execute_agent_worker(
+            (checker_info, state_bundle, checker_info["tier"])
+        )
+    except Exception as e:
+        log(f"  {role_label} call failed: {e}")
+        return "unclear"
+
+    verdict_lower = (result.get("exec_text", "") or "").strip().lower()
+    if "verdict: contest" in verdict_lower:
+        return "contest"
+    if "verdict: confirm" in verdict_lower:
+        return "confirm"
+    return "unclear"
+
+
+def verify_finding_tripartite(
+    finding_id: str,
+    producer_agent: str,
+    domain: str,
+    config: dict,
+) -> str:
+    """O1.2: Tripartite consensus with devil-advisor for major verdicts.
+
+    Returns 'confirmed' | 'contested' | 'unclear'.
+    Updates the finding's verification_status accordingly.
+    """
+    if domain not in TRIPARTITE_DOMAINS:
+        return "unclear"  # not a major-verdict domain
+
+    agents = get_all_agents(config)
+    agent_by_id = {a["agent_id"]: a for a in agents}
+
+    # --- Pick 3 independent checkers from domain verifier list, excluding producer ---
+    domain_verifiers = [
+        v for v in VERIFIER_MAP.get(domain, VERIFIER_MAP["default"])
+        if v != producer_agent
+    ]
+    if len(domain_verifiers) < 3:
+        log(f"  Tripartite: only {len(domain_verifiers)} verifiers for domain {domain}, "
+            f"need 3 — falling back to single verification")
+        return "unclear"
+
+    checkers = domain_verifiers[:3]
+
+    # --- Pick devil-advisor: different from producer and all 3 checkers ---
+    devil = _devil_advisor_for(domain, [producer_agent] + checkers)
+
+    # Load the finding
+    store = load_findings_store()
+    finding = None
+    for f in store.get("findings", []):
+        if f.get("id") == finding_id:
+            finding = f
+            break
+    if not finding:
+        log(f"  Tripartite: finding {finding_id} not found")
+        return "unclear"
+
+    log(f"  Tripartite consensus: checkers={checkers} devil={devil} "
+        f"for finding {finding_id} (domain={domain})")
+
+    # --- Run all 3 checkers ---
+    results = {}
+    for checker_id in checkers:
+        cinfo = agent_by_id.get(checker_id)
+        if not cinfo:
+            log(f"  Tripartite: checker {checker_id} not in config")
+            results[checker_id] = "unclear"
+            continue
+        r = _run_verification_call(cinfo, finding, domain, producer_agent,
+                                   f"checker-{checker_id}")
+        results[checker_id] = r
+        log(f"  Tripartite: {checker_id} -> {r}")
+
+    # --- Run devil-advisor ---
+    devil_result = "unclear"
+    if devil:
+        dinfo = agent_by_id.get(devil)
+        if dinfo:
+            devil_result = _run_verification_call(
+                dinfo, finding, domain, producer_agent,
+                f"devil-advisor-{devil}"
+            )
+            log(f"  Tripartite: devil-advisor {devil} -> {devil_result}")
+
+    # --- Consensus logic ---
+    confirms = sum(1 for r in results.values() if r == "confirm")
+    contests = sum(1 for r in results.values() if r == "contest")
+
+    if confirms == 3:
+        # Unanimous confirmation
+        status = "confirmed"
+        notes = "Tripartite: 3/3 checkers confirmed"
+    elif confirms == 2 and contests <= 1:
+        # Majority confirm; devil-advisor must not successfully overturn
+        if devil_result == "contest":
+            # Devil-advisor raised a valid counter-case -> contested
+            status = "contested"
+            notes = ("Tripartite: 2/3 confirmed but devil-advisor contests -> contested")
+        else:
+            status = "confirmed"
+            notes = "Tripartite: 2/3 confirmed, devil-advisor did not overturn"
+    elif contests >= 2:
+        status = "contested"
+        notes = "Tripartite: 2/3 checkers contested"
+    else:
+        # Split/unclear -> conservative: contested
+        status = "contested"
+        notes = "Tripartite: split/unclear verdicts -> contested (conservative)"
+
+    update_finding_verification(
+        finding_id, status,
+        checker_agent=",".join(checkers) + (f"|devil:{devil}" if devil else ""),
+        notes=notes,
+    )
+    log(f"  Tripartite result: {status} — {notes}")
+    return status
 
 
 def findings_summary():
@@ -594,6 +1180,87 @@ def verdict_gate(agent_id, exec_text, state_bundle):
             return False, "risk output does not reference risk limits from bundle"
 
     return True, "passes deterministic gate"
+
+
+# --- O0.1 Findings extraction fix -------------------------------------------
+# Old bug: claim was stored as exec_text.split("\n")[0], which is usually a
+# preamble ("1. **Analyze User Request:**") — not an actual finding. Many
+# worker responses are pure task echoes. New extraction rejects echoes and
+# captures a machine-parsable FINDING: line, with a substantive-line fallback.
+# Fallback claims are stored as needs-review (never supported).
+
+ECHO_PATTERNS = [
+    "analyze user request",
+    "the user wants me to",
+    "the user is asking",
+    "let me analyze",
+    "let me review",
+    "i need to analyze",
+    "i need to review",
+    "i need to act",
+    "i have been asked",
+    "i will analyze",
+    "**title:**",
+]
+
+FINDING_LINE_RE = re.compile(r"finding\s*:\s*(.+)$", re.IGNORECASE)
+
+CONTENT_KEYWORDS = (
+    "pass", "fail", "kill switch", "locked", "verdict", "edge",
+    "cost", "drawdown", "margin", "trade", "confirm", "verified",
+    "not_run", "available", "unavailable", "p&l", "net", "gross",
+    "clears", "excludes zero", "heatmap", "source", "audit",
+)
+
+
+def is_echo_response(text: str) -> bool:
+    """True if the text looks like the model restating the task, not doing it."""
+    if not text:
+        return False
+    head = text.strip().lower()[:250]
+    return any(p in head for p in ECHO_PATTERNS)
+
+
+def extract_finding(exec_text: str):
+    """Extract the actual finding claim from an agent response.
+
+    Returns (claim: str | None, method: str) where method is one of:
+      'finding_line'  — explicit FINDING: line (machine-parsable, best)
+      'substantive'   — most substantive content line (fallback)
+      'echo'          — response restates the task (reject)
+      'none'          — nothing extractable (reject)
+    """
+    if not exec_text or not exec_text.strip():
+        return None, "none"
+    if is_echo_response(exec_text):
+        return None, "echo"
+
+    lines = [ln.strip() for ln in exec_text.strip().splitlines() if ln.strip()]
+
+    # 1. Explicit FINDING: line (the prompt now requires one; last wins)
+    for line in reversed(lines):
+        m = FINDING_LINE_RE.search(line.replace("**", ""))
+        if m:
+            claim = m.group(1).strip()
+            if claim and not is_echo_response(claim):
+                return claim[:300], "finding_line"
+
+    # 2. Fallback: substantive line — content keyword, reasonable length, not a header
+    substantive = []
+    for line in lines:
+        low = line.lower()
+        if any(p in low for p in ECHO_PATTERNS):
+            continue
+        if not (30 <= len(line) <= 300):
+            continue
+        has_kw = any(kw in low for kw in CONTENT_KEYWORDS)
+        is_header = line.startswith(("#", "**", "-", "*"))
+        if has_kw and not is_header:
+            substantive.append(line)
+    if substantive:
+        return max(substantive, key=len)[:300], "substantive"
+
+    return None, "none"
 
 
 def log(msg):
@@ -907,12 +1574,49 @@ def finalize_agent_result(agent_info, state_bundle, tier, worker_result):
         task_path = Path(HIVE_DIR) / f"{task_id}.json"
         with open(task_path, "w") as f:
             json.dump(task, f, indent=2)
+        # O2.4: record cost for errored task
+        record_task_cost(task)
         return {"agent_id": agent_id, "status": "error", "error": worker_result["error"]}
 
     exec_text = worker_result["exec_text"]
     exec_model_used = worker_result["exec_model"]
     exec_pool_used = worker_result["exec_pool"]
     direct_exec = worker_result["direct_exec"]
+
+    # --- O1.1: Handle verification task results ---
+    # If this result is from a checker agent verifying a finding,
+    # update the target finding instead of creating a new one.
+    wf_metadata = worker_result.get("metadata", {}) or {}
+    if wf_metadata.get("verification_task"):
+        target_finding_id = wf_metadata.get("verification_target")
+        verdict_lower = exec_text.strip().lower()
+        if "verdict: contest" in verdict_lower:
+            update_finding_verification(
+                target_finding_id, "contested",
+                checker_agent=agent_id,
+                notes=exec_text[:300],
+            )
+            log(f"  Verification CONTESTED for finding {target_finding_id} by {agent_id}")
+        elif "verdict: confirm" in verdict_lower:
+            update_finding_verification(
+                target_finding_id, "confirmed",
+                checker_agent=agent_id,
+                notes=exec_text[:300],
+            )
+            log(f"  Verification CONFIRMED for finding {target_finding_id} by {agent_id}")
+        else:
+            log(f"  Verification task by {agent_id} had no clear confirm/contest verdict")
+        # O2.4: record cost for verification task
+        verify_task = {
+            "id": task_id,
+            "agent_id": agent_id,
+            "status": "done",
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "metadata": wf_metadata,
+        }
+        record_task_cost(verify_task)
+        stampede_release(agent_id)
+        return {"agent_id": agent_id, "status": "done", "task_id": task_id}
 
     # Deterministic post-execution verification for compliance agent
     compliance_issues = []
@@ -928,21 +1632,47 @@ def finalize_agent_result(agent_info, state_bundle, tier, worker_result):
 
     # Verdict gate: only write to findings store if output passes
     gate_ok, gate_reason = verdict_gate(agent_id, exec_text, state_bundle or "")
+    finding_id = None
     if gate_ok:
-        claim = exec_text.strip().split("\n")[0][:200]
-        evidence_ref = f"jev-task-{task_id}"
-        added = add_finding(
-            agent_id,
-            claim=claim,
-            evidence_ref=evidence_ref,
-            verdict="supported" if gate_ok else "needs-review",
-            source="jev-cloud-orchestrator",
-            gate_reason=gate_reason,
-        )
-        if added:
-            log(f"  Finding stored for {agent_id}: {claim[:80]}...")
+        claim, claim_method = extract_finding(exec_text)
+        # Reject echoes / non-claims: never store a preamble as a finding
+        if claim is None:
+            log(f"  Verdict gate rejected {agent_id}: extraction={claim_method}")
         else:
-            log(f"  Finding already exists for {agent_id} (deduped)")
+            evidence_ref = f"jev-task-{task_id}"
+            finding_id = add_finding(
+                agent_id,
+                claim=claim,
+                evidence_ref=evidence_ref,
+                verdict="supported",
+                source="jev-cloud-orchestrator",
+                gate_reason=gate_reason,
+                extraction_method=claim_method,
+            )
+            if finding_id:
+                log(f"  Finding stored for {agent_id}: {claim[:80]}... (verification pending)")
+                # --- O1.1/O1.2: verify with independent checker(s) ---
+                domain = _domain_for_agent(agent_id)
+                try:
+                    config = load_office_config()
+                except Exception:
+                    config = {}
+                if domain in TRIPARTITE_DOMAINS:
+                    # Major verdict: tripartite consensus + devil-advisor
+                    verify_finding_tripartite(
+                        finding_id, agent_id, domain, config
+                    )
+                else:
+                    # Standard: single independent checker
+                    checker = get_checker_agent(agent_id, domain)
+                    if checker:
+                        verify_finding_sync(
+                            finding_id, agent_id, checker, domain, config
+                        )
+                    else:
+                        log(f"  No checker available for {agent_id} (domain={domain})")
+            else:
+                log(f"  Finding already exists for {agent_id} (deduped)")
     else:
         log(f"  Verdict gate blocked {agent_id}: {gate_reason}")
 
@@ -995,6 +1725,9 @@ def finalize_agent_result(agent_info, state_bundle, tier, worker_result):
     # Save execution result file for dashboard
     save_result(qwen_task_id, exec_text, exec_model_used, exec_pool_used, "cloud")
 
+    # O2.4: record cost for completed task
+    record_task_cost(task)
+
     stampede_release(agent_id)
     return {"agent_id": agent_id, "status": "done", "task_id": task_id}
 
@@ -1020,21 +1753,32 @@ def synthesize_cycle():
     for f in findings:
         by_agent.setdefault(f["agent"], []).append(f)
 
-    # Count verdicts
+    # Count verdicts — O1.1: only confirmed findings count as "supported"
     verdict_counts = {}
+    verification_counts = {"pending": 0, "confirmed": 0, "contested": 0}
     for f in findings:
         v = f.get("verdict", "unknown")
         verdict_counts[v] = verdict_counts.get(v, 0) + 1
+        vs = f.get("verification_status", "pending")
+        verification_counts[vs] = verification_counts.get(vs, 0) + 1
 
-    # Overall verdict: if any finding is "needs-review" or "refuted",
-    # fleet is not fully supported. If all are "supported", fleet is green.
+    # Overall verdict: only confirmed findings count as supported.
+    # Pending/contested findings are not yet verified.
     total = len(findings)
-    supported = verdict_counts.get("supported", 0)
+    supported = verification_counts.get("confirmed", 0)
     blocked = verdict_counts.get("needs-review", 0) + verdict_counts.get("refuted", 0)
+    pending = verification_counts.get("pending", 0)
+    contested = verification_counts.get("contested", 0)
 
-    if blocked > 0:
+    if contested > 0:
+        overall = "CONTESTED"
+        confidence = max(0, 100 - (contested * 30))
+    elif blocked > 0:
         overall = "CAUTION"
         confidence = max(0, 100 - (blocked * 25))
+    elif pending > 0:
+        overall = "PENDING-VERIFY"
+        confidence = int(round(supported / total * 100)) if total > 0 else 0
     elif supported == total:
         overall = "ALL-CLEAR"
         confidence = 100
@@ -1055,8 +1799,12 @@ def synthesize_cycle():
     report = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "total_findings": total,
+        "supported_findings": supported,
+        "pending_findings": pending,
+        "contested_findings": contested,
         "by_agent": {a: len(fs) for a, fs in by_agent.items()},
         "verdict_counts": verdict_counts,
+        "verification_counts": verification_counts,
         "overall": overall,
         "confidence": confidence,
         "risk_agents": risk_agents,
@@ -1069,7 +1817,8 @@ def synthesize_cycle():
         json.dump(report, f, indent=2)
 
     summary = (
-        f"{overall} (confidence {confidence}%): {supported}/{total} findings supported"
+        f"{overall} (confidence {confidence}%): {supported}/{total} findings supported, "
+        f"{pending} pending, {contested} contested"
     )
     if risk_agents:
         summary += f"; risks: {', '.join(risk_agents)}"
@@ -1108,6 +1857,17 @@ def main():
         for agent_info in agents:
             agent_id = agent_info["agent_id"]
             tier = agent_info["tier"]
+
+            # --- O2.2/O2.3: Autonomy tier enforcement ---
+            allowed, tier_reason = tier_enforcement_check(agent_id)
+            if not allowed:
+                skip_results.append(
+                    {"agent_id": agent_id, "skipped": f"tier_c_blocked: {tier_reason}"}
+                )
+                log(f"  TIER-C BLOCK {agent_id}: {tier_reason}")
+                continue
+            if tier == "B":
+                log(f"  TIER-B GATE {agent_id}: {tier_reason} — approval flagged")
 
             # Skip if agent already has a pending task
             if has_pending_task(agent_id):
@@ -1217,4 +1977,25 @@ def main():
 
 
 if __name__ == "__main__":
+    if argparse and "--pnl" in sys.argv:
+        pnl = office_pnl()
+        print("=== Office P&L (Cost per Outcome) ===")
+        print(f"Tasks: {pnl['task_count']}")
+        print(f"Total cost units: {pnl['total_cost_units']}")
+        print(f"Total outcome value: {pnl['total_outcome_value']}")
+        print(f"Net value: {pnl['net_value']}")
+        print()
+        print("By autonomy tier:")
+        for tier, d in sorted(pnl["by_tier"].items()):
+            print(f"  Tier {tier}: cost={d['cost']} value={d['value']} "
+                  f"count={d['count']} net={d['net']}")
+        print()
+        print("By agent (top 10 by net value):")
+        sorted_agents = sorted(
+            pnl["by_agent"].items(), key=lambda x: x[1]["net"], reverse=True
+        )
+        for agent, d in sorted_agents[:10]:
+            print(f"  {agent:30s} tier={d['tier']} cost={d['cost']:>3} "
+                  f"value={d['value']:>4} count={d['count']:>3} net={d['net']:>4}")
+        sys.exit(0)
     main()
