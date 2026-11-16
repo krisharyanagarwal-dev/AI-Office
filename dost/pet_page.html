@@ -84,6 +84,11 @@
     padding: 0 18px; font: inherit; font-weight: 600; cursor: pointer;
   }
   .send:disabled { opacity: .5; cursor: wait; }
+  select.brain {
+    height: 40px; max-width: 150px; border: 1px solid var(--line); background: var(--dost);
+    color: var(--ink); border-radius: 12px; padding: 0 8px; font: inherit; font-size: 13px; font-weight: 600;
+  }
+  .msg .tag { font-size: 12px; font-weight: 700; color: var(--muted); margin-bottom: 4px; }
   .typing { display: none; align-self: flex-start; color: var(--muted); font-size: 14px; padding-left: 6px; }
   .typing.show { display: block; }
   @media (max-width: 380px) {
@@ -112,7 +117,11 @@
       <div class="status" id="status"><b>●</b> here with you</div>
     </div>
     <div class="controls">
-      <button class="icon" id="brainBtn" title="Who answers: Dost or OpenClaw" style="width:auto;padding:0 10px;font-size:13px;font-weight:600">Dost</button>
+      <select id="brain" class="brain" title="Who answers" aria-label="Who answers">
+        <option value="dost">Dost</option>
+        <option value="openclaw">OpenClaw</option>
+        <option value="compare">Compare models</option>
+      </select>
       <button class="icon" id="speakBtn" aria-pressed="true" title="Read replies aloud">🔊</button>
       <button class="icon" id="micBtn" title="Talk to Dost">🎙️</button>
     </div>
@@ -143,19 +152,54 @@ if (location.protocol === 'file:') { location.replace('http://127.0.0.1:8787/');
   const typing = document.getElementById('typing');
 
   let busy = false;
-  const brainBtn = document.getElementById('brainBtn');
+  const brainSel = document.getElementById('brain');
   let backend = 'dost';
+  let modelList = [];
+  const histories = {};  // per-model chat history for direct model chats
   try { backend = localStorage.getItem('dostBackend') || 'dost'; } catch (e) {}
-  function paintBrain() {
-    brainBtn.textContent = backend === 'openclaw' ? 'OpenClaw' : 'Dost';
-    brainBtn.setAttribute('aria-pressed', String(backend === 'openclaw'));
+
+  function labelOf(id) {
+    const m = modelList.find(x => x.id === id);
+    return m ? m.label : id;
   }
-  brainBtn.addEventListener('click', () => {
-    backend = backend === 'openclaw' ? 'dost' : 'openclaw';
+
+  async function loadModels() {
+    try {
+      const r = await fetch('/api/models');
+      modelList = (await r.json()).models || [];
+    } catch (e) { modelList = []; }
+    const groups = {};
+    modelList.forEach(m => { (groups[m.provider] = groups[m.provider] || []).push(m); });
+    Object.keys(groups).forEach(p => {
+      const g = document.createElement('optgroup');
+      g.label = p;
+      groups[p].forEach(m => {
+        const o = document.createElement('option');
+        o.value = m.id; o.textContent = m.label;
+        g.appendChild(o);
+      });
+      brainSel.appendChild(g);
+    });
+    if (![...brainSel.options].some(o => o.value === backend)) backend = 'dost';
+    brainSel.value = backend;
+  }
+  brainSel.addEventListener('change', () => {
+    backend = brainSel.value;
     try { localStorage.setItem('dostBackend', backend); } catch (e) {}
-    paintBrain();
+    const name = brainSel.options[brainSel.selectedIndex].textContent;
+    addMsg(backend === 'compare' ? 'Now asking several models at once.' : 'Now talking to ' + name + '.', 'sys');
   });
-  paintBrain();
+  loadModels();
+
+  // Typed shortcuts: "ask all: ..." compares; "ask nemotron: ..." picks a model by name.
+  function parseShortcut(text) {
+    const m = text.match(/^ask\s+([^:]+):\s*([\s\S]+)$/i);
+    if (!m) return null;
+    const who = m[1].trim().toLowerCase();
+    if (who === 'all' || who === 'everyone' || who === 'models') return {backend: 'compare', text: m[2]};
+    const hit = modelList.find(x => x.label.toLowerCase().includes(who) || x.id.toLowerCase().includes(who));
+    return hit ? {backend: hit.id, text: m[2]} : null;
+  }
   const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
   const canSpeak = 'speechSynthesis' in window;
   let rec = null;
@@ -189,24 +233,51 @@ if (location.protocol === 'file:') { location.replace('http://127.0.0.1:8787/');
     window.speechSynthesis.speak(u);
   }
 
+  function addModelMsg(label, text, ms) {
+    const el = addMsg('', 'dost');
+    const tag = document.createElement('div');
+    tag.className = 'tag';
+    tag.textContent = label + (ms ? ' · ' + (ms / 1000).toFixed(1) + 's' : '');
+    const body = document.createElement('div');
+    body.textContent = text;
+    el.appendChild(tag); el.appendChild(body);
+    log.scrollTop = log.scrollHeight;
+  }
+
   async function ask(text) {
     if (busy || !text.trim()) return;
+    const sc = parseShortcut(text.trim());
+    const target = sc ? sc.backend : backend;
+    const prompt = sc ? sc.text : text;
     busy = true; sendBtn.disabled = true;
     addMsg(text, 'you');
     typing.classList.add('show');
     setMood('thinking');
-    setStatus('<b>●</b> thinking…');
+    setStatus('<b>●</b> ' + (target === 'compare' ? 'asking several models…' : 'thinking…'));
     try {
+      const body = {text: prompt, backend: target};
+      if (target.includes(':')) body.history = histories[target] || [];
       const r = await fetch('/api/chat', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({text, backend})
+        body: JSON.stringify(body)
       });
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || 'request failed');
-      addMsg(data.reply, 'dost');
+      if (target === 'compare') {
+        (data.answers || []).forEach(a => addModelMsg(a.label, a.error ? 'Failed: ' + a.error : a.reply, a.ms));
+        const first = (data.answers || []).find(a => !a.error);
+        if (first) speak(first.reply);
+      } else if (target.includes(':')) {
+        addModelMsg(data.label || labelOf(target), data.reply, data.ms);
+        const h = histories[target] = histories[target] || [];
+        h.push({role: 'user', content: prompt}, {role: 'assistant', content: data.reply});
+        speak(data.reply);
+      } else {
+        addMsg(data.reply, 'dost');
+        speak(data.reply);
+      }
       setMood('happy');
       setTimeout(() => setMood('idle'), 1200);
-      speak(data.reply);
     } catch (e) {
       addMsg('Could not reach Dost: ' + e.message, 'err');
       setMood('sleepy');

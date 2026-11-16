@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from dost import MEMORY, companion_respond  # noqa: E402
 from openai_components import speech_to_text  # noqa: E402
+import models  # noqa: E402
 
 MAX_AUDIO = 15 * 1024 * 1024  # 15 MB voice clip limit
 AUDIO_EXT = {
@@ -77,6 +78,11 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path in ("/", "/index.html"):
             self._send(200, PAGE.read_bytes(), "text/html; charset=utf-8")
+        elif path == "/api/models":
+            try:
+                self._json(200, {"models": models.list_models()})
+            except Exception as e:
+                self._json(500, {"error": f"{type(e).__name__}: {str(e)[:160]}"})
         elif path == "/api/greet":
             try:
                 from datetime import datetime
@@ -136,6 +142,17 @@ class Handler(BaseHTTPRequestHandler):
             return
         backend = str(payload.get("backend", "dost"))
         try:
+            if backend == "compare":
+                ids = payload.get("models") if isinstance(payload.get("models"), list) else None
+                self._json(200, {"answers": models.compare(text, ids)})
+                return
+            if ":" in backend:  # provider:model picked in the window
+                ans = models.ask_model(backend, text, payload.get("history"))
+                if ans["error"]:
+                    self._json(502, {"error": f"{ans['label']}: {ans['error']}"})
+                else:
+                    self._json(200, {"reply": ans["reply"], "label": ans["label"], "ms": ans["ms"]})
+                return
             if backend == "openclaw":
                 reply = openclaw_reply(text)
             else:
