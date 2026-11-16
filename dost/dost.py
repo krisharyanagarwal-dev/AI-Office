@@ -200,12 +200,12 @@ def fallback_converse(task: str, context: str) -> str:
     if any(k in t for k in ["trading", "paper", "cost", "groww", "capital", "₹1", "1 lakh"]):
         return (
             "The trading desk is paper-only right now — every backtest uses real Groww costs, so nothing is overstated. "
-            "Key finding: no viable edge at ₹1 lakh + free data across 29+ strategy variants, tested in two market regimes. "
+            "Key finding: no viable edge at ₹1 lakh + free data across multiple strategy variants and market regimes. "
             "The paper engine is ready if your capital grows to ₹5L+, where naked options selling does have an edge."
         )
-    if any(k in t for k in ["fleet", "agent", "kill switch", "verification", "32"]):
+    if any(k in t for k in ["fleet", "agent", "kill switch", "verification"]):
         return (
-            "Behind the scenes, 32 agents run the fleet — all paper-only. The kill switch is locked, Tier C (risk, "
+            "Behind the scenes, the fleet runs paper-only. The kill switch is locked, Tier C (risk, "
             "execution, broker) is human-only, and no finding gets confirmed without independent verification."
         )
     if any(k in t for k in ["ops", "pnl", "health", "provider", "dashboard", "metrics"]):
@@ -320,18 +320,84 @@ def generate_daily_briefing():
     return briefing
 
 
+def _push_telegram_briefing() -> None:
+    """Generate the daily briefing and push it to Telegram (owner chat only)."""
+    import subprocess
+    from pathlib import Path
+
+    # Read bot token
+    env = {}
+    try:
+        for line in (Path.home() / ".env").read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):]
+            key, _, value = line.partition("=")
+            env[key.strip()] = value.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    token = env.get("TELEGRAM_BOT_TOKEN")
+    if not token:
+        print("TELEGRAM_BOT_TOKEN not set in ~/.env — cannot push briefing.")
+        return
+
+    # Read allowlist for owner chat_id
+    allowlist_file = Path.home() / ".openclaw" / "telegram_allowlist.json"
+    try:
+        allowlist = json.loads(allowlist_file.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        allowlist = []
+    if not allowlist:
+        print("No Telegram allowlist (owner chat) yet — start a chat with the bot first.")
+        return
+    chat_id = allowlist[0]
+
+    briefing = generate_daily_briefing()
+
+    # Dedupe: don't re-send today's briefing if already sent
+    sent_file = DOST_BRIEFINGS / ".last_sent"
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if sent_file.exists() and sent_file.read_text().strip() == today:
+        print("Briefing already sent today.")
+        return
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    proc = subprocess.run(
+        ["curl", "-s", "-X", "POST", url,
+         "-H", "Content-Type: application/json",
+         "-d", json.dumps({"chat_id": chat_id, "text": briefing, "parse_mode": "Markdown"}),
+         "--max-time", "30"],
+        capture_output=True, text=True, timeout=40,
+    )
+    try:
+        result = json.loads(proc.stdout)
+        if result.get("ok"):
+            sent_file.write_text(today)
+            print("Briefing pushed to Telegram.")
+        else:
+            print(f"Telegram push failed: {proc.stdout[:300]}")
+    except json.JSONDecodeError:
+        print(f"Telegram push failed (non-JSON): {proc.stdout[:300]}")
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="THE CLAUDE COMPANY — Dost")
     parser.add_argument("message", nargs="?")
     parser.add_argument("--department", choices=["research", "trading", "fleet", "ops", "upgrade", "assistant"])
     parser.add_argument("--briefing", action="store_true")
+    parser.add_argument("--push-telegram", action="store_true",
+                        help="Generate daily briefing and push to Telegram")
     parser.add_argument("--memory", action="store_true")
     parser.add_argument("--context", action="store_true")
     parser.add_argument("--health", action="store_true", help="Check OpenAI component availability")
     args = parser.parse_args()
 
-    if args.briefing:
+    if args.push_telegram:
+        _push_telegram_briefing()
+    elif args.briefing:
         print(generate_daily_briefing())
     elif args.memory:
         print(json.dumps(MEMORY.profile, indent=2))
@@ -344,7 +410,7 @@ def main():
     else:
         print(dost_greeting())
         print("\nI'm your dost. Tell me what you need: research, trading, code, writing, strategy.")
-        print("Commands: --briefing, --memory, --context, --health, --department X")
+        print("Commands: --briefing, --push-telegram, --memory, --context, --health, --department X")
 
 
 if __name__ == "__main__":

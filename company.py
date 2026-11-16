@@ -34,10 +34,12 @@ def cmd_dispatch(task: str, department: str | None) -> None:
 
 
 def cmd_dost(message: str | None, department: str | None, briefing: bool,
-             memory: bool, context: bool, health: bool) -> None:
+             push_telegram: bool, memory: bool, context: bool, health: bool) -> None:
     cmd = [sys.executable, str(DOST)]
     if briefing:
         cmd.append("--briefing")
+    elif push_telegram:
+        cmd.append("--push-telegram")
     elif memory:
         cmd.append("--memory")
     elif context:
@@ -119,6 +121,7 @@ def main() -> None:
     p_dost.add_argument("message", nargs="?")
     p_dost.add_argument("--department", choices=["research", "trading", "fleet", "upgrade", "ops", "assistant"])
     p_dost.add_argument("--briefing", action="store_true")
+    p_dost.add_argument("--push-telegram", action="store_true", help="Push daily briefing to Telegram")
     p_dost.add_argument("--memory", action="store_true")
     p_dost.add_argument("--context", action="store_true")
     p_dost.add_argument("--health", action="store_true", help="Check OpenAI component availability")
@@ -137,7 +140,8 @@ def main() -> None:
     if args.command == "dispatch":
         cmd_dispatch(args.task, args.department)
     elif args.command == "dost":
-        cmd_dost(args.message, args.department, args.briefing, args.memory, args.context, args.health)
+        cmd_dost(args.message, args.department, args.briefing, args.push_telegram,
+                 args.memory, args.context, args.health)
     elif args.command == "upgrade":
         cmd_upgrade(args)
     elif args.command == "pnl":

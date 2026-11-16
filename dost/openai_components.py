@@ -13,11 +13,15 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+_SAY = shutil.which("say")
+_FFMPEG = shutil.which("ffmpeg")
 
 
 def _read_env_file() -> dict:
@@ -140,37 +144,66 @@ def _curl_chat(url: str, key: str, payload: dict) -> dict:
 # 2. Whisper STT component (speech-to-text)
 # ---------------------------------------------------------------------------
 
+GROQ_STT_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+
+
 def speech_to_text(audio_path: str, model: str = "whisper-1") -> dict:
     """
-    OpenAI Whisper STT component. Transcribes an audio file.
-    Falls back: if no OpenAI key, returns a helpful error (no free Whisper
-    equivalent in the fallback pool). User can paste text instead.
+    Speech-to-text component. Transcribes an audio file.
+    Tries OpenAI Whisper first; falls back to Groq whisper-large-v3-turbo
+    (free, no key terms required).
     """
-    if not OPENAI_API_KEY:
-        return {
-            "ok": False,
-            "error": "Whisper STT requires OPENAI_API_KEY. No free Whisper equivalent in fallback pool.",
-            "text": "",
-        }
+    # Try OpenAI directly
+    if OPENAI_API_KEY:
+        try:
+            proc = subprocess.run(
+                ["curl", "-s", "-X", "POST", OPENAI_BASE_URL + "/audio/transcriptions",
+                 "-H", f"Authorization: Bearer {OPENAI_API_KEY}",
+                 "-F", f"file=@{audio_path}",
+                 "-F", f"model={model}",
+                 "--max-time", "120"],
+                capture_output=True, text=True, timeout=130,
+            )
+            if proc.returncode == 0:
+                try:
+                    data = json.loads(proc.stdout)
+                except json.JSONDecodeError:
+                    return {"ok": False, "error": f"non-JSON: {proc.stdout[:200]}", "text": ""}
+                if data.get("text"):
+                    return {"ok": True, "text": data["text"], "provider": "openai-whisper"}
+                return {"ok": False, "error": data.get("error", {}).get("message", "unknown error"), "text": ""}
+        except Exception:
+            pass  # fall through to Groq
 
-    proc = subprocess.run(
-        ["curl", "-s", "-X", "POST", OPENAI_BASE_URL + "/audio/transcriptions",
-         "-H", f"Authorization: Bearer {OPENAI_API_KEY}",
-         "-F", f"file=@{audio_path}",
-         "-F", f"model={model}",
-         "--max-time", "120"],
-        capture_output=True, text=True, timeout=130,
-    )
-    if proc.returncode != 0:
-        return {"ok": False, "error": f"curl exit {proc.returncode}", "text": ""}
-    try:
-        data = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        return {"ok": False, "error": f"non-JSON: {proc.stdout[:200]}", "text": ""}
+    # Groq fallback: whisper-large-v3-turbo (free)
+    groq_key = get_key("GROQ_API_KEY")
+    if groq_key:
+        try:
+            proc = subprocess.run(
+                ["curl", "-s", "-X", "POST", GROQ_STT_URL,
+                 "-H", f"Authorization: Bearer {groq_key}",
+                 "-F", "file=@" + str(audio_path),
+                 "-F", "model=whisper-large-v3-turbo",
+                 "--max-time", "120"],
+                capture_output=True, text=True, timeout=130,
+            )
+            if proc.returncode != 0:
+                return {"ok": False, "error": f"groq curl exit {proc.returncode}", "text": ""}
+            try:
+                data = json.loads(proc.stdout)
+            except json.JSONDecodeError:
+                return {"ok": False, "error": f"groq non-JSON: {proc.stdout[:200]}", "text": ""}
+            if data.get("text"):
+                return {"ok": True, "text": data["text"], "provider": "groq-whisper"}
+            return {"ok": False, "error": data.get("error", {}).get("message", "unknown error"), "text": ""}
+        except Exception as e:
+            return {"ok": False, "error": f"groq stt error: {e}", "text": ""}
 
-    if data.get("text"):
-        return {"ok": True, "text": data["text"], "provider": "openai-whisper"}
-    return {"ok": False, "error": data.get("error", {}).get("message", "unknown error"), "text": ""}
+    return {
+        "ok": False,
+        "error": "No STT provider available. Set OPENAI_API_KEY or GROQ_API_KEY.",
+        "text": "",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -180,33 +213,60 @@ def speech_to_text(audio_path: str, model: str = "whisper-1") -> dict:
 def text_to_speech(text: str, model: str = "tts-1", voice: str = "alloy",
                    output_path: str | None = None) -> dict:
     """
-    OpenAI TTS component. Generates an MP3 from text.
-    Falls back: if no OpenAI key, returns error (no free TTS in fallback pool).
+    Text-to-speech component. Generates an audio file from text.
+    Tries OpenAI TTS first; falls back to macOS `say` + ffmpeg (free, local).
     """
-    if not OPENAI_API_KEY:
-        return {
-            "ok": False,
-            "error": "TTS requires OPENAI_API_KEY. No free TTS equivalent in fallback pool.",
-            "path": "",
-        }
-
     if output_path is None:
         output_path = str(Path(tempfile.mkstemp(suffix=".mp3")[1]))
 
-    proc = subprocess.run(
-        ["curl", "-s", "-X", "POST", OPENAI_BASE_URL + "/audio/speech",
-         "-H", f"Authorization: Bearer {OPENAI_API_KEY}",
-         "-H", "Content-Type: application/json",
-         "-d", json.dumps({"model": model, "voice": voice, "input": text}),
-         "--output", output_path,
-         "--max-time", "120"],
-        capture_output=True, text=True, timeout=130,
-    )
-    if proc.returncode != 0:
-        return {"ok": False, "error": f"curl exit {proc.returncode}", "path": ""}
-    if Path(output_path).exists() and Path(output_path).stat().st_size > 0:
-        return {"ok": True, "path": output_path, "provider": "openai-tts"}
-    return {"ok": False, "error": proc.stderr[:300] or proc.stdout[:300], "path": ""}
+    # Try OpenAI directly
+    if OPENAI_API_KEY:
+        try:
+            proc = subprocess.run(
+                ["curl", "-s", "-X", "POST", OPENAI_BASE_URL + "/audio/speech",
+                 "-H", f"Authorization: Bearer {OPENAI_API_KEY}",
+                 "-H", "Content-Type: application/json",
+                 "-d", json.dumps({"model": model, "voice": voice, "input": text}),
+                 "--output", output_path,
+                 "--max-time", "120"],
+                capture_output=True, text=True, timeout=130,
+            )
+            if proc.returncode == 0 and Path(output_path).exists() and Path(output_path).stat().st_size > 0:
+                return {"ok": True, "path": output_path, "provider": "openai-tts"}
+        except Exception:
+            pass  # fall through to local say
+
+    # Local fallback: macOS `say` -> m4a -> ffmpeg mp3 (free, no keys)
+    if _SAY and _FFMPEG:
+        try:
+            m4a_path = output_path.rsplit(".", 1)[0] + ".m4a"
+            proc1 = subprocess.run(
+                ["say", "-v", "Alex", "-o", m4a_path, text],
+                capture_output=True, text=True, timeout=30,
+            )
+            if proc1.returncode != 0:
+                return {"ok": False, "error": f"say exit {proc1.returncode}: {proc1.stderr[:200]}", "path": ""}
+            proc2 = subprocess.run(
+                ["ffmpeg", "-y", "-loglevel", "error", "-i", m4a_path, output_path],
+                capture_output=True, text=True, timeout=30,
+            )
+            try:
+                Path(m4a_path).unlink()
+            except OSError:
+                pass
+            if proc2.returncode != 0:
+                return {"ok": False, "error": f"ffmpeg exit {proc2.returncode}: {proc2.stderr[:200]}", "path": ""}
+            if Path(output_path).exists() and Path(output_path).stat().st_size > 0:
+                return {"ok": True, "path": output_path, "provider": "local-say"}
+            return {"ok": False, "error": "tts output file empty", "path": ""}
+        except Exception as e:
+            return {"ok": False, "error": f"local tts error: {e}", "path": ""}
+
+    return {
+        "ok": False,
+        "error": "No TTS provider available. Set OPENAI_API_KEY or ensure `say` + ffmpeg are installed.",
+        "path": "",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -261,10 +321,14 @@ def dost_reason(user_message: str, context: str = "") -> dict:
 
 def provider_health() -> dict:
     """Report which OpenAI/OpenAI-compatible components are available."""
+    groq_key = bool(get_key("GROQ_API_KEY"))
     return {
         "openai_chat": bool(OPENAI_API_KEY),
         "openai_whisper": bool(OPENAI_API_KEY),
         "openai_tts": bool(OPENAI_API_KEY),
+        "groq_chat": groq_key,
+        "groq_whisper": groq_key,
+        "local_tts": bool(_SAY and _FFMPEG),
         "fallbacks_available": [
             name for name, _, key, _ in FALLBACK_ENDPOINTS if key
         ],

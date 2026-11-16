@@ -22,6 +22,7 @@ dost_respond = _dost_module.dost_respond
 dost_greeting = _dost_module.dost_greeting
 generate_daily_briefing = _dost_module.generate_daily_briefing
 provider_health = _dost_module.provider_health
+build_context = _dost_module.build_context
 MEMORY = _dost_module.MEMORY
 
 
@@ -31,18 +32,21 @@ def main():
     parser.add_argument("message", nargs="?")
     parser.add_argument("--department", choices=["research", "trading", "fleet", "ops", "upgrade", "assistant"])
     parser.add_argument("--briefing", action="store_true")
+    parser.add_argument("--push-telegram", action="store_true", help="Push daily briefing to Telegram")
     parser.add_argument("--memory", action="store_true")
     parser.add_argument("--context", action="store_true")
     parser.add_argument("--health", action="store_true", help="Check OpenAI component availability")
     args = parser.parse_args()
 
-    if args.briefing:
+    if args.push_telegram:
+        _dost_module._push_telegram_briefing()
+    elif args.briefing:
         print(generate_daily_briefing())
     elif args.memory:
         import json
         print(json.dumps(MEMORY.profile, indent=2))
     elif args.context:
-        print(MEMORY.get_context())
+        print(build_context())
     elif args.health:
         import json
         print(json.dumps(provider_health(), indent=2))
