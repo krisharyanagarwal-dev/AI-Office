@@ -13,6 +13,7 @@ import json
 import subprocess
 import sys
 import time
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -211,6 +212,16 @@ def fallback_converse(task: str, context: str) -> str:
             "execution, broker) is human-only, and no finding gets confirmed without independent verification."
         )
     if any(k in t for k in ["ops", "pnl", "health", "provider", "dashboard", "metrics"]):
+        st = _fetch_dispatcher_status()
+        if st:
+            return (
+                "Fleet is live right now: "
+                f"{st['tasks_done']}/{st['tasks_created']} tasks done "
+                f"({st['completion_rate']:.0f}% complete), error rate {st['error_rate_total']:.1f}%, "
+                f"{st['calls_today']} calls today, {st['pools_available']} provider pools available. "
+                "Run 'python dost.py --status' for the full readout, or 'python dost.py --dispatch' "
+                "to send a prompt to the fleet."
+            )
         return (
             "I track the company's health: cost-per-outcome P&L, autonomy tiers, provider health, dashboards. "
             "Run 'python company.py pnl' or 'python company.py metrics' anytime. What would you like to look at?"
@@ -301,25 +312,23 @@ COMPANION_STYLE = """Talk like a close, warm friend who also happens to run the 
 FACTS ABOUT YOURSELF (these override the rule about hiding models and plumbing;
 answer questions about yourself from these facts only, and say "I don't know"
 for anything not covered):
-- Your brain is a free hosted model, openai/gpt-oss-20b. Each message goes to
-  the first provider that answers, in this order: Groq, NVIDIA, DeepInfra.
-- You are NOT connected to OpenClaw yourself. The pet window has a
-  "Dost / OpenClaw" button; when it says OpenClaw, messages go to OpenClaw
-  instead of you.
+- Your brain is a free hosted model. Each message goes to the first provider
+  that answers.
+- You are connected to the company's fleet orchestrator. You can read live
+  fleet status and submit prompts to the fleet for execution.
 - What you can see: the research hypothesis results, the calibration ledger,
-  the office P&L summary, and the fleet task summary in the CONTEXT.
+  the office P&L summary, the fleet task summary, and live fleet status in
+  the CONTEXT.
 - What you can do: chat, run a read-only system audit when asked to "audit"
-  or "check the system", and run the research pipeline commands register,
-  gate, holdout, calibrate, report and all, only when asked by name.
+  or "check the system", run the research pipeline commands register,
+  gate, holdout, calibrate, report and all (only when asked by name), and
+  submit prompts to the fleet orchestrator.
 - What you cannot do: place trades (paper only, live orders locked), edit
   files, start or stop services, or control other systems on the computer.
-  Never claim you are "connected to everything" or "going live"."""
+  Never claim you are "going live" beyond the fleet connection."""
 
-
-AUDIT_WORDS = ("audit", "health check", "check the system", "check my system",
-               "system status", "system health", "what is broken", "what's broken",
-               "is everything ok", "is everything working", "check everything")
-OFFICE_CORE = Path("/Users/aryanagarwal/AI-Office/packages/office-os/core")
+DISPATCHER_METRICS_URL = "http://127.0.0.1:8083/metrics"
+HIVE_DIR = Path("/Users/aryanagarwal/AI-Office/packages/office-os/tasks")
 
 
 def wants_audit(task: str) -> bool:
@@ -333,6 +342,89 @@ def run_system_audit() -> list:
         sys.path.insert(0, str(OFFICE_CORE))
     import sources  # noqa: E402  (office-os read-only collectors)
     return sources.collect_all()
+
+
+def _fetch_dispatcher_status() -> dict | None:
+    """Read live fleet status from the dispatcher metrics endpoint.
+
+    Returns a dict with key status fields, or None if unreachable.
+    Read-only — never sends commands to the dispatcher.
+    """
+    try:
+        with urllib.request.urlopen(DISPATCHER_METRICS_URL, timeout=4) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        jev = data.get("jev", {})
+        pools = data.get("provider_pools", {})
+        available = sum(1 for p in pools.values() if p.get("available"))
+        total = len(pools)
+        return {
+            "tasks_created": jev.get("tasks_created", 0),
+            "tasks_done": jev.get("tasks_done", 0),
+            "completion_rate": jev.get("completion_rate", 0),
+            "error_rate": jev.get("error_rate", 0),
+            "error_rate_total": jev.get("error_rate_total", 0),
+            "tasks_per_min": jev.get("tasks_per_min", 0),
+            "calls_today": jev.get("calls_today", 0),
+            "headroom_pct": data.get("free_ceiling", {}).get("headroom_pct", 0),
+            "pools_available": f"{available}/{total}",
+        }
+    except Exception:
+        return None
+
+
+def dispatch_prompt_to_fleet(prompt: str, agent_id: str | None = None) -> dict:
+    """Submit a prompt to the fleet orchestrator by writing a task file.
+
+    The dispatcher picks up pending task files from HIVE_DIR on each cycle
+    and executes them through the cloud orchestrator. Returns the task info.
+    Read-only data write — no live orders, no trading execution.
+    """
+    import uuid
+
+    task_id = f"jev-{uuid.uuid4().hex[:8]}"
+    task = {
+        "id": task_id,
+        "title": f"Dost prompt: {prompt[:60]}",
+        "description": prompt,
+        "status": "pending",
+        "agent_id": agent_id or "strategy-advisor",
+        "priority": "normal",
+        "user_id": "dost",
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "metadata": {
+            "tier": "pro",
+            "source": "dost",
+            "qwen_task_id": f"jev-exec-dost-{task_id[:8]}",
+        },
+        "result": None,
+        "error": None,
+    }
+    try:
+        HIVE_DIR.mkdir(parents=True, exist_ok=True)
+        task_path = HIVE_DIR / f"{task_id}.json"
+        task_path.write_text(json.dumps(task, indent=2))
+        return {
+            "ok": True,
+            "task_id": task_id,
+            "agent_id": task["agent_id"],
+            "message": f"Prompt submitted to fleet (task {task_id}). The dispatcher will execute it on the next cycle.",
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def dispatcher_status_line() -> str:
+    """One-line fleet status for inclusion in dost context."""
+    st = _fetch_dispatcher_status()
+    if st is None:
+        return "Fleet status: unreachable (dispatcher may be down)."
+    return (
+        f"Fleet: {st['tasks_done']}/{st['tasks_created']} tasks done "
+        f"({st['completion_rate']:.0f}% complete), error rate {st['error_rate_total']:.1f}%, "
+        f"{st['calls_today']} calls today, {st['pools_available']} provider pools available, "
+        f"{st['headroom_pct']:.0f}% free-tier headroom."
+    )
 
 
 AUDIT_SYSTEM = """You are Dost, talking to a close friend about the health of their computer systems.
@@ -512,6 +604,10 @@ def main():
     parser.add_argument("--briefing", action="store_true")
     parser.add_argument("--push-telegram", action="store_true",
                         help="Generate daily briefing and push to Telegram")
+    parser.add_argument("--status", action="store_true",
+                        help="Show live fleet status from dispatcher metrics")
+    parser.add_argument("--dispatch", nargs="?", const="",
+                        help="Submit a prompt to the fleet orchestrator (optional prompt text)")
     parser.add_argument("--memory", action="store_true")
     parser.add_argument("--context", action="store_true")
     parser.add_argument("--health", action="store_true", help="Check OpenAI component availability")
@@ -521,6 +617,16 @@ def main():
         _push_telegram_briefing()
     elif args.briefing:
         print(generate_daily_briefing())
+    elif args.status:
+        st = _fetch_dispatcher_status()
+        if st:
+            print(json.dumps(st, indent=2))
+        else:
+            print("Fleet status: unreachable (dispatcher may be down).")
+    elif args.dispatch is not None:
+        prompt = args.dispatch if args.dispatch else input("Prompt to send to fleet: ")
+        result = dispatch_prompt_to_fleet(prompt)
+        print(json.dumps(result, indent=2))
     elif args.memory:
         print(json.dumps(MEMORY.profile, indent=2))
     elif args.context:
@@ -532,7 +638,7 @@ def main():
     else:
         print(dost_greeting())
         print("\nI'm your dost. Tell me what you need: research, trading, code, writing, strategy.")
-        print("Commands: --briefing, --push-telegram, --memory, --context, --health, --department X")
+        print("Commands: --briefing, --push-telegram, --status, --dispatch, --memory, --context, --health, --department X")
 
 
 if __name__ == "__main__":

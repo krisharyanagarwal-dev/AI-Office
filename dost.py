@@ -28,11 +28,14 @@ MEMORY = _dost_module.MEMORY
 
 def main():
     import argparse
+    import json
     parser = argparse.ArgumentParser(description="Talk to your dost")
     parser.add_argument("message", nargs="?")
     parser.add_argument("--department", choices=["research", "trading", "fleet", "ops", "upgrade", "assistant"])
     parser.add_argument("--briefing", action="store_true")
     parser.add_argument("--push-telegram", action="store_true", help="Push daily briefing to Telegram")
+    parser.add_argument("--status", action="store_true", help="Show live fleet status from dispatcher metrics")
+    parser.add_argument("--dispatch", nargs="?", const="", help="Submit a prompt to the fleet orchestrator")
     parser.add_argument("--memory", action="store_true")
     parser.add_argument("--context", action="store_true")
     parser.add_argument("--health", action="store_true", help="Check OpenAI component availability")
@@ -42,18 +45,28 @@ def main():
         _dost_module._push_telegram_briefing()
     elif args.briefing:
         print(generate_daily_briefing())
+    elif args.status:
+        st = _dost_module._fetch_dispatcher_status()
+        if st:
+            print(json.dumps(st, indent=2))
+        else:
+            print("Fleet status: unreachable (dispatcher may be down).")
+    elif args.dispatch is not None:
+        prompt = args.dispatch if args.dispatch else input("Prompt to send to fleet: ")
+        result = _dost_module.dispatch_prompt_to_fleet(prompt)
+        print(json.dumps(result, indent=2))
     elif args.memory:
-        import json
         print(json.dumps(MEMORY.profile, indent=2))
     elif args.context:
         print(build_context())
     elif args.health:
-        import json
         print(json.dumps(provider_health(), indent=2))
     elif args.message:
         print(dost_respond(args.message, args.department))
     else:
         print(dost_greeting())
+        print("\nI'm your dost. Tell me what you need: research, trading, code, writing, strategy.")
+        print("Commands: --briefing, --push-telegram, --status, --dispatch, --memory, --context, --health, --department X")
 
 
 if __name__ == "__main__":

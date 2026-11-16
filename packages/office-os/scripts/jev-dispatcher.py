@@ -1571,6 +1571,48 @@ PRIORITY: <low|normal|high|critical>"""
         }
 
 
+def finalize_user_task(task_file_path: str, worker_result: dict) -> dict:
+    """Finalize a dost-submitted task by updating the existing task file.
+
+    Unlike finalize_agent_result, this does NOT create findings, call the
+    verdict gate, or record cost — user prompts are not research findings.
+    """
+    try:
+        with open(task_file_path) as f:
+            task = json.load(f)
+    except Exception as e:
+        return {"agent_id": "dost", "status": "error", "error": f"cannot read task file: {e}"}
+
+    agent_id = task.get("agent_id", "dost")
+
+    if worker_result.get("status") == "error":
+        task["status"] = "error"
+        task["error"] = worker_result.get("error", "unknown error")
+        task["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+        try:
+            with open(task_file_path, "w") as f:
+                json.dump(task, f, indent=2)
+        except OSError:
+            pass
+        return {"agent_id": agent_id, "status": "error", "error": worker_result.get("error", "unknown")}
+
+    # Success — update with result
+    task["status"] = "done"
+    task["result"] = {
+        "source": "dost",
+        "preview": (worker_result.get("exec_text") or "")[:200],
+        "model": worker_result.get("exec_model", "?"),
+        "pool": worker_result.get("exec_pool", "?"),
+    }
+    task["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        with open(task_file_path, "w") as f:
+            json.dump(task, f, indent=2)
+    except OSError:
+        pass
+    return {"agent_id": agent_id, "status": "done", "task_id": task.get("id", "")}
+
+
 def finalize_agent_result(agent_info, state_bundle, tier, worker_result):
     """Finalize agent result in main process (shared state: findings store, Hive tasks).
 
@@ -1763,6 +1805,47 @@ def finalize_agent_result(agent_info, state_bundle, tier, worker_result):
     return {"agent_id": agent_id, "status": "done", "task_id": task_id}
 
 
+def collect_user_submitted_tasks() -> list[tuple[dict, str | None, str, str]]:
+    """Scan HIVE_DIR for pending tasks submitted by the dost (source == "dost").
+
+    Returns list of (agent_info, state_bundle, tier, task_file_path) tuples
+    ready for the worker pool. Marks each task as in_progress so it isn't
+    picked up again.
+    """
+    user_tasks = []
+    for hive_file in glob.glob(os.path.join(HIVE_DIR, "*.json")):
+        try:
+            with open(hive_file) as f:
+                task = json.load(f)
+        except Exception:
+            continue
+
+        # Only pick up dost-submitted pending tasks
+        if task.get("status") != "pending":
+            continue
+        if (task.get("metadata") or {}).get("source") != "dost":
+            continue
+
+        agent_id = task.get("agent_id", "strategy-advisor")
+        tier = "pro"  # dost-submitted tasks use pro tier
+
+        # Build agent_info for the worker
+        agent_info = {"agent_id": agent_id, "tier": tier}
+
+        # Mark as in_progress to prevent re-pickup
+        task["status"] = "in_progress"
+        task["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+        try:
+            with open(hive_file, "w") as f:
+                json.dump(task, f, indent=2)
+        except OSError:
+            pass
+
+        user_tasks.append((agent_info, None, tier, hive_file))
+
+    return user_tasks
+
+
 def synthesize_cycle():
     """Fan-in all findings into a consolidated fleet-level verdict.
 
@@ -1930,6 +2013,14 @@ def main():
 
             tasks.append((agent_info, state_bundle, tier))
 
+        # --- Pick up user-submitted tasks from the dost ---
+        user_tasks = collect_user_submitted_tasks()
+        user_task_meta = {}  # task_file_path -> (agent_info, tier) for finalization
+        for agent_info, state_bundle, tier, task_file_path in user_tasks:
+            tasks.append((agent_info, state_bundle, tier))
+            user_task_meta[task_file_path] = (agent_info, tier)
+            log(f"  User task queued for {agent_info['agent_id']}")
+
         # --- Phase 2: Execute cloud calls in parallel across all CPU cores ---
         worker_results = []
         if tasks:
@@ -1941,17 +2032,35 @@ def main():
         # to avoid concurrent writes across processes.
         results = list(skip_results)  # start with pre-computed skips
 
+        # Separate user-submitted tasks (state_bundle is None) from agent tasks
         for (agent_info, state_bundle, tier), worker_result in zip(tasks, worker_results):
             agent_id = agent_info["agent_id"]
             try:
-                r = finalize_agent_result(agent_info, state_bundle, tier, worker_result)
-                results.append(r)
-                if r.get("skipped"):
-                    log(f"  Skipped {agent_id} ({tier}) - {r['skipped']}")
-                elif r.get("status") == "done":
-                    log(f"  Done {agent_id} ({tier}) -> {r['task_id']}")
+                if state_bundle is None:
+                    # User-submitted task — update existing task file, no findings
+                    task_file_path = None
+                    for path, (info, t) in user_task_meta.items():
+                        if info["agent_id"] == agent_id:
+                            task_file_path = path
+                            break
+                    if task_file_path:
+                        r = finalize_user_task(task_file_path, worker_result)
+                    else:
+                        r = {"agent_id": agent_id, "status": "error", "error": "task file not found"}
+                    results.append(r)
+                    if r.get("status") == "done":
+                        log(f"  Done (user task) {agent_id} -> {r.get('task_id','')}")
+                    else:
+                        log(f"  Error (user task) {agent_id} - {r.get('error','unknown')}")
                 else:
-                    log(f"  Error {agent_id} ({tier}) - {r.get('error', 'unknown')}")
+                    r = finalize_agent_result(agent_info, state_bundle, tier, worker_result)
+                    results.append(r)
+                    if r.get("skipped"):
+                        log(f"  Skipped {agent_id} ({tier}) - {r['skipped']}")
+                    elif r.get("status") == "done":
+                        log(f"  Done {agent_id} ({tier}) -> {r['task_id']}")
+                    else:
+                        log(f"  Error {agent_id} ({tier}) - {r.get('error', 'unknown')}")
             except Exception as e:
                 agent_id = agent_info["agent_id"]
                 stampede_release(agent_id)

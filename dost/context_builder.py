@@ -22,6 +22,7 @@ import json
 import subprocess
 import sys
 import time
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -148,26 +149,32 @@ def monthly_report_section() -> str:
 
 
 def fleet_section() -> str:
-    """Summarize fleet health from the running dispatcher."""
+    """Summarize fleet health from the running dispatcher via live metrics."""
     lines = ["FLEET STATUS:"]
     try:
-        result = subprocess.run(
-            [sys.executable, str(DISPATCHER), "--pnl"],
-            capture_output=True, text=True, timeout=10,
+        with urllib.request.urlopen("http://127.0.0.1:8083/metrics", timeout=4) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        jev = data.get("jev", {})
+        pools = data.get("provider_pools", {})
+        available = sum(1 for p in pools.values() if p.get("available"))
+        total = len(pools)
+        pid_file = Path("/Users/aryanagarwal/.openclaw/jev-dispatcher.pid")
+        pid = pid_file.read_text().strip() if pid_file.exists() else "?"
+        lines.append(
+            f"  Dispatcher: running (PID {pid}) | {jev.get('tasks_done',0)}/{jev.get('tasks_created',0)} tasks done "
+            f"({jev.get('completion_rate',0):.0f}%) | error rate {jev.get('error_rate_total',0):.1f}% "
+            f"| {jev.get('calls_today',0)} calls today | {available}/{total} pools available "
+            f"| {data.get('free_ceiling',{}).get('headroom_pct',0):.0f}% free-tier headroom"
         )
-        output = result.stdout or result.stderr
-        if output:
-            # Take first 300 chars of pnl output
-            lines.append(f"  PnL ledger: {_truncate(output.strip(), 300)}")
-        else:
-            lines.append("  PnL ledger: empty or unreachable")
     except Exception as e:
-        lines.append(f"  PnL ledger: error ({e})")
+        lines.append(f"  Dispatcher: unreachable ({e})")
+        pid_file = Path("/Users/aryanagarwal/.openclaw/jev-dispatcher.pid")
+        pid = pid_file.read_text().strip() if pid_file.exists() else "?"
+        lines.append(f"  PID file: {pid}")
 
     # Autonomy tier counts (hardcoded from dispatcher knowledge, stable)
     lines.append("  Autonomy tiers: A=13 (autonomous), B=12 (gated), C=7 (human-only)")
     lines.append("  Kill switch: LOCKED | live_orders_allowed: false")
-    lines.append("  Dispatcher running: yes (PID 3025)")
     return "\n".join(lines)
 
 
