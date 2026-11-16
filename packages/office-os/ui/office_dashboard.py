@@ -4,7 +4,9 @@ No installs. User-based: each user sees only their own tasks.
 """
 import json
 import os
+import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, "/Users/aryanagarwal/office-os")
@@ -12,6 +14,9 @@ from core.hive import Hive
 from core.router import ProviderRouter
 
 OFFICE_ROOT = Path("/Users/aryanagarwal/office-os")
+HOME = Path.home()
+DISPATCHER_LOG = HOME / ".openclaw" / "jev-dispatcher.log"
+OFFICE_PNL = HOME / ".openclaw" / "office_pnl.json"
 
 
 def load_users():
@@ -134,8 +139,110 @@ def inbox_alerts(hive, user_id):
 def menu():
     print("  COMMANDS")
     print("  " + "-" * 76)
-    print("  [n] New task    [r] Refresh    [u] Switch user    [q] Quit")
+    print("  [n] New task    [r] Refresh    [c] Cycle stats    [a] Agent stats    [u] Switch user    [q] Quit")
     print()
+
+
+def cycle_breakdown():
+    """Per-cycle stats from the dispatcher log: done/error/skipped per cycle."""
+    print("  CYCLE BREAKDOWN (dispatcher log)")
+    print("  " + "-" * 76)
+    if not DISPATCHER_LOG.exists():
+        print("  (dispatcher log not found)")
+        print()
+        return
+
+    cycle_re = re.compile(
+        r"JEV cycle complete:\s+(\d+)\s+done,\s+(\d+)\s+error,\s+(\d+)\s+skipped"
+    )
+    cycles = []
+    try:
+        lines = DISPATCHER_LOG.read_text(errors="replace").splitlines()
+    except OSError:
+        print("  (could not read dispatcher log)")
+        print()
+        return
+
+    for ln in lines:
+        m = cycle_re.search(ln)
+        if m:
+            ts = ln[:19]
+            cycles.append({
+                "ts": ts,
+                "done": int(m.group(1)),
+                "error": int(m.group(2)),
+                "skipped": int(m.group(3)),
+            })
+
+    if not cycles:
+        print("  (no cycle records yet)")
+        print()
+        return
+
+    total_done = sum(c["done"] for c in cycles)
+    total_error = sum(c["error"] for c in cycles)
+    total_skipped = sum(c["skipped"] for c in cycles)
+    total_cycles = len(cycles)
+
+    print(f"  Cycles: {total_cycles}  |  Done: {total_done}  Error: {total_error}  Skipped: {total_skipped}")
+    if total_done + total_error > 0:
+        err_rate = total_error / (total_done + total_error) * 100
+        print(f"  Aggregate error rate: {err_rate:.1f}%")
+    print("  Last 5 cycles:")
+    for c in cycles[-5:]:
+        print(f"    {c['ts']}  done={c['done']:3d}  error={c['error']:3d}  skipped={c['skipped']:3d}")
+    print()
+
+
+def per_agent_breakdown():
+    """Per-agent cost / value / net from office_pnl.json."""
+    print("  PER-AGENT BREAKDOWN (office P&L ledger)")
+    print("  " + "-" * 76)
+    if not OFFICE_PNL.exists():
+        print("  (office P&L ledger not found)")
+        print()
+        return
+
+    try:
+        ledger = json.loads(OFFICE_PNL.read_text())
+    except (OSError, json.JSONDecodeError):
+        print("  (could not read P&L ledger)")
+        print()
+        return
+
+    if not isinstance(ledger, list) or not ledger:
+        print("  (no agent records yet)")
+        print()
+        return
+
+    # Compute per-agent aggregates from task ledger
+    by_agent = {}
+    total_cost = 0
+    total_value = 0
+    for t in ledger:
+        aid = t.get("agent_id", "?")
+        cost = t.get("cost_units", 0)
+        val = t.get("outcome_value", 0)
+        net = val - cost
+        tier = t.get("autonomy_tier", "?")
+        a = by_agent.setdefault(aid, {"tier": tier, "count": 0, "cost": 0, "value": 0, "net": 0})
+        a["count"] += 1
+        a["cost"] += cost
+        a["value"] += val
+        a["net"] += net
+        total_cost += cost
+        total_value += val
+
+    # Sort by net value descending
+    rows = sorted(by_agent.items(), key=lambda kv: kv[1]["net"], reverse=True)
+    print(f"  {'Agent':<30} {'Tier':<5} {'Tasks':>6} {'Cost':>6} {'Value':>7} {'Net':>7}")
+    for aid, info in rows[:15]:
+        print(f"  {aid:<30} {info['tier']:<5} {info['count']:>6} "
+              f"{info['cost']:>6} {info['value']:>7} {info['net']:>7}")
+    print(f"  {'TOTAL':<30} {'':<5} {len(ledger):>6} "
+          f"{total_cost:>6} {total_value:>7} {total_value - total_cost:>7}")
+    print()
+
 
 
 def run_dashboard(default_user="aryan"):
@@ -177,6 +284,12 @@ def run_dashboard(default_user="aryan"):
                 input("  Press Enter to continue...")
         elif choice == "n":
             create_task_flow(hive, users, current_user)
+        elif choice == "c":
+            cycle_breakdown()
+            input("  Press Enter to return to dashboard...")
+        elif choice == "a":
+            per_agent_breakdown()
+            input("  Press Enter to return to dashboard...")
         else:
             print("  Unknown command. Press Enter to continue.")
             input()

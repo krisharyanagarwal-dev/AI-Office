@@ -133,6 +133,32 @@ AGENT_STATE_FILES = {
     ],
 }
 
+# --- General assistant routing (non-trading tasks) ---
+# Tasks whose prompt matches these keywords are routed through the local
+# qwen_local (ollama) pool instead of the expensive cloud research path.
+# Keeps free-tier cloud quota for trading research; general admin/docs/dost
+# conversation stays cheap and local.
+GENERAL_ASSISTANT_KEYWORDS = frozenset({
+    "dost", "admin", "documentation", "doc:", " write ", "memo", "email",
+    "letter", "summary", "note:", "draft", "conversation", "chat",
+    "assistant", "proofread", "rewrite", "format",
+})
+
+
+def is_general_assistant_task(text: str) -> bool:
+    """Classify a task as general assistant (non-trading) vs trading research."""
+    t = text.lower()
+    return any(kw in t for kw in GENERAL_ASSISTANT_KEYWORDS)
+
+
+def route_through_local(prompt: str, timeout: int = 120) -> str:
+    """Route a general-assistant prompt through the local qwen_local (ollama) pool."""
+    from core.provider_client import ProviderClient
+    client = ProviderClient("qwen_local", "hauhaucs/qwen3.5-9b-uncensored-aggressive")
+    return client.complete(
+        prompt=prompt, max_tokens=500, temperature=0.7, timeout=timeout,
+    )
+
 
 def read_text_file(path, max_chars=2500):
     """Read a text/markdown file, truncating if too long."""
@@ -1433,12 +1459,17 @@ def execute_agent_worker(args):
             # --- Direct-execution path for agents with mapped state bundles ---
             exec_prompt = build_direct_exec_prompt(agent_id, tier, state_bundle_text)
             try:
-                exec_text, exec_model_used, exec_pool_used = orchestrator.call_model(
-                    *orchestrator.decide_model(agent_info, task_type="exec"),
-                    exec_prompt,
-                    task_id=f"jev-exec-{agent_id}",
-                    priority="normal",
-                )
+                if is_general_assistant_task(exec_prompt):
+                    exec_text = route_through_local(exec_prompt)
+                    exec_model_used = "hauhaucs/qwen3.5-9b-uncensored-aggressive"
+                    exec_pool_used = "qwen_local"
+                else:
+                    exec_text, exec_model_used, exec_pool_used = orchestrator.call_model(
+                        *orchestrator.decide_model(agent_info, task_type="exec"),
+                        exec_prompt,
+                        task_id=f"jev-exec-{agent_id}",
+                        priority="normal",
+                    )
             except Exception as e:
                 exec_text, exec_model_used, exec_pool_used = (
                     orchestrator._call_with_failover(
