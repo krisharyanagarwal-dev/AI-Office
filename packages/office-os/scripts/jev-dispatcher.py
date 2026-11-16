@@ -41,7 +41,7 @@ os.makedirs(RESULT_DIR, exist_ok=True)
 # --- State bundle: real trading data injected into prompts so agents reason
 # about ground truth instead of role-playing in a vacuum. ---
 
-KILL_SWITCH_PATH = "/Users/aryanagarwal/AI-Office/packages/all-files/json/trader_killswitch_status.json"
+KILL_SWITCH_PATH = "/Users/aryanagarwal/AI-Office/packages/_archive/openalice-fleet/state/trader_killswitch_status.json"
 OFFICE_CONFIG_PATH = "/Users/aryanagarwal/AI-Office/packages/office-os/config/office.json"
 POLYMARKET_RESEARCH_DIR = "/Users/aryanagarwal/Documents/polymarket/research"
 POLYMARKET_OUT_DIR = "/Users/aryanagarwal/Documents/polymarket/out"

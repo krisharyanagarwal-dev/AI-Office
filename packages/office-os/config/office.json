@@ -169,7 +169,7 @@
       "order",
       "executor"
     ],
-    "executor_enabled": true
+    "executor_enabled": false
   },
   "departments": [
     {
