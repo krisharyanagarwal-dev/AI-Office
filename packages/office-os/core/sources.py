@@ -82,14 +82,25 @@ def office_manager():
     return _result(name, not problems, age, summary, problems)
 
 
-# ---------- office-hud (:4747) ----------
+# ---------- office-hud (:4752, launchd com.aryan.office-hud-v2) ----------
+HUD = "http://127.0.0.1:4752"
+
+
 def office_hud():
     name = "office-hud"
-    health, err = _http_json("http://127.0.0.1:4747/api/health")
+    health, err = _http_json(HUD + "/api/health")
     if err:
         return _result(name, False, None, "unreachable", [f"/api/health: {err}"])
     health = health or {}
-    agents, aerr = _http_json("http://127.0.0.1:4747/api/agents")
+    # The HUD wraps office-core's health: {"office_core": {"status", "checks": [...]}}
+    core = health.get("office_core") if isinstance(health, dict) else None
+    if isinstance(core, dict):
+        health = dict(health, status=core.get("status"))
+        down = [c.get("component") for c in core.get("checks", [])
+                if isinstance(c, dict) and c.get("status") not in ("healthy", None)]
+    else:
+        down = []
+    agents, aerr = _http_json(HUD + "/api/agents")
     problems = []
     count = None
     if aerr:
@@ -99,7 +110,8 @@ def office_hud():
         count = len(items) if isinstance(items, list) else None
     status = health.get("status") if isinstance(health, dict) else None
     if status and str(status).upper() not in ("OK", "HEALTHY", "UP", "RUNNING"):
-        problems.append(f"hud health status: {status}")
+        detail = f" ({', '.join(str(d) for d in down)} not healthy)" if down else ""
+        problems.append(f"hud health status: {status}{detail}")
     return _result(name, not problems, 0.0, f"health={status} agents={count}", problems)
 
 
