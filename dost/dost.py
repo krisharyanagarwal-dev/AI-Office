@@ -146,9 +146,11 @@ Narrate this in your warm, honest voice. Ground every number in the data. Don't 
 """
 
 
-def llm_decide(task: str, context: str) -> str:
+def llm_decide(task: str, context: str, style: str = "") -> str:
     """Ask the LLM whether this is a command or conversation. Returns 'COMMAND:<name>' or natural text."""
     prompt = DECIDE_SYSTEM.format(context=context, task=task)
+    if style:
+        prompt += "\n\nSTYLE:\n" + style
     result = chat_completion(
         [
             {"role": "system", "content": prompt},
@@ -285,6 +287,126 @@ def dost_respond(task, department=None):
     response = fallback_converse(task, context)
     MEMORY.add_interaction(task, route_department(task), "Conversational response (fallback)")
     return f"{dost_greeting()}\n\n{response}\n\nIs there anything else I can help you with?"
+
+
+COMPANION_STYLE = """Talk like a close, warm friend who also happens to run the research team.
+- Keep replies short: 2-4 sentences, unless the person asks for detail.
+- Match their language and energy. A casual "hi" gets a casual reply.
+- Use their name now and then, not every line.
+- No bullet lists, headings or sign-offs unless they ask for them.
+- Never end with "anything else I can help with" or similar.
+- Be honest about losses and failures, but kind about it.
+- Ground any numbers in the CONTEXT and never invent them.
+
+FACTS ABOUT YOURSELF (these override the rule about hiding models and plumbing;
+answer questions about yourself from these facts only, and say "I don't know"
+for anything not covered):
+- Your brain is a free hosted model, openai/gpt-oss-20b. Each message goes to
+  the first provider that answers, in this order: Groq, NVIDIA, DeepInfra.
+- You are NOT connected to OpenClaw yourself. The pet window has a
+  "Dost / OpenClaw" button; when it says OpenClaw, messages go to OpenClaw
+  instead of you.
+- What you can see: the research hypothesis results, the calibration ledger,
+  the office P&L summary, and the fleet task summary in the CONTEXT.
+- What you can do: chat, run a read-only system audit when asked to "audit"
+  or "check the system", and run the research pipeline commands register,
+  gate, holdout, calibrate, report and all, only when asked by name.
+- What you cannot do: place trades (paper only, live orders locked), edit
+  files, start or stop services, or control other systems on the computer.
+  Never claim you are "connected to everything" or "going live"."""
+
+
+AUDIT_WORDS = ("audit", "health check", "check the system", "check my system",
+               "system status", "system health", "what is broken", "what's broken",
+               "is everything ok", "is everything working", "check everything")
+OFFICE_CORE = Path("/Users/aryanagarwal/AI-Office/packages/office-os/core")
+
+
+def wants_audit(task: str) -> bool:
+    t = task.lower()
+    return any(w in t for w in AUDIT_WORDS)
+
+
+def run_system_audit() -> list:
+    """Read-only survey of the office systems (same collectors the orchestrator uses)."""
+    if str(OFFICE_CORE) not in sys.path:
+        sys.path.insert(0, str(OFFICE_CORE))
+    import sources  # noqa: E402  (office-os read-only collectors)
+    return sources.collect_all()
+
+
+AUDIT_SYSTEM = """You are Dost, talking to a close friend about the health of their computer systems.
+Below is a read-only survey that just ran. Each line is one system: ok or not, and its problems.
+
+{survey}
+
+Summarise it in plain words:
+- Start with one line: how many systems are ok out of how many.
+- Then the problems, most serious first, one short line each, in everyday language.
+- Only use facts from the survey. Do not invent causes or fixes.
+- End by saying you only looked and changed nothing."""
+
+
+def audit_reply() -> str:
+    try:
+        results = run_system_audit()
+    except Exception as e:
+        return f"I tried to audit the system but the check itself failed ({type(e).__name__}: {str(e)[:120]}). I changed nothing."
+    ok = sum(1 for r in results if r.get("ok"))
+    lines = []
+    for r in results:
+        status = "OK" if r.get("ok") else "PROBLEM"
+        probs = "; ".join(r.get("problems") or []) or r.get("summary", "")
+        lines.append(f"- {r.get('name')}: {status}. {probs}")
+    survey = "\n".join(lines)
+    MEMORY.add_interaction("system audit", "ops", f"Audit: {ok}/{len(results)} ok")
+    result = chat_completion(
+        [{"role": "system", "content": AUDIT_SYSTEM.format(survey=survey)},
+         {"role": "user", "content": "How is my system doing?"}],
+        temperature=0.2, max_tokens=500,
+    )
+    text = (result.get("text") or "").strip()
+    if text:
+        return text
+    return f"{ok} of {len(results)} systems are OK.\n" + survey + "\nI only looked; I changed nothing."
+
+
+def _asked_for_command(task: str, command: str) -> bool:
+    """Only run a pipeline command when the person clearly named it."""
+    t = task.lower()
+    if command == "all":
+        return "run all" in t or "full pipeline" in t or "whole pipeline" in t
+    return command in t
+
+
+def companion_respond(task: str) -> str:
+    """Pet-style reply: no greeting or boilerplate, shorter and warmer. Same routing as dost_respond."""
+    if wants_audit(task):
+        return audit_reply()
+    context = build_context()
+    decision = llm_decide(task, context, style=COMPANION_STYLE)
+
+    if decision and decision.startswith("COMMAND:"):
+        command = decision[len("COMMAND:"):].strip()
+        if command not in RESEARCH_COMMANDS or not _asked_for_command(task, command):
+            # The model wanted to run something the person did not ask for. Reply in words instead.
+            decision = llm_decide(task, context, style=COMPANION_STYLE +
+                                  "\n- Do NOT reply with COMMAND. Answer in plain words.")
+            if decision and decision.startswith("COMMAND:"):
+                decision = ""
+        if decision.startswith("COMMAND:") and command in RESEARCH_COMMANDS:
+            output = run_research_command(command)
+            MEMORY.add_interaction(task, "research", f"Executed research command: {command}")
+            narration = llm_narrate(command, output, context)
+            return narration or fallback_narrate(command, output)
+
+    if decision and not decision.startswith("COMMAND:"):
+        MEMORY.add_interaction(task, route_department(task), "Conversational response")
+        return decision
+
+    response = fallback_converse(task, context)
+    MEMORY.add_interaction(task, route_department(task), "Conversational response (fallback)")
+    return response
 
 
 def generate_daily_briefing():

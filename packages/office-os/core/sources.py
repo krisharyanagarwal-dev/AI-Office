@@ -136,7 +136,7 @@ def dashboard_hub():
 # ---------- openalice-fleet (hive files) ----------
 def openalice_fleet():
     name = "openalice-fleet"
-    hive = HOME / "AI-Office" / "packages" / "openalice-fleet" / "hive"
+    hive = HOME / "AI-Office" / "packages" / "_archive" / "openalice-fleet" / "hive"
     summary_path = hive / "task_truth_summary.json"
     data, err = _read_json(summary_path)
     if err:

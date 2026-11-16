@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dost</title>
+<style>
+  :root {
+    --bg: #f6f3ee; --card: #ffffff; --ink: #2a2622; --muted: #8a8178;
+    --pet: #ffb86b; --pet-edge: #e89a4c; --me: #2f6fed; --me-ink: #ffffff;
+    --dost: #efe9e1; --line: #e6dfd6; --good: #3fae6a; --warn: #d9603b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #161412; --card: #201d1a; --ink: #f1ebe3; --muted: #9b9188;
+      --pet: #f2a25a; --pet-edge: #c97c38; --me: #4b82f0; --me-ink: #ffffff;
+      --dost: #2c2824; --line: #35302a; --good: #5cc684; --warn: #e97a57;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #161412; --card: #201d1a; --ink: #f1ebe3; --muted: #9b9188;
+    --pet: #f2a25a; --pet-edge: #c97c38; --me: #4b82f0; --me-ink: #ffffff;
+    --dost: #2c2824; --line: #35302a; --good: #5cc684; --warn: #e97a57;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex; justify-content: center;
+  }
+  .app {
+    width: 100%; max-width: 560px; height: 100%;
+    display: flex; flex-direction: column; background: var(--card);
+    border-left: 1px solid var(--line); border-right: 1px solid var(--line);
+  }
+  header {
+    display: flex; align-items: center; gap: 14px;
+    padding: 14px 16px; border-bottom: 1px solid var(--line);
+  }
+  .pet-wrap { position: relative; width: 84px; height: 84px; flex: 0 0 84px; }
+  .pet { width: 100%; height: 100%; transition: transform .3s ease; transform-origin: 50% 90%; }
+  .pet .body { fill: var(--pet); stroke: var(--pet-edge); stroke-width: 2; }
+  .pet .eye { fill: var(--ink); transform-origin: center; transform-box: fill-box; }
+  .pet .blush { fill: #ff7a7a; opacity: .35; }
+  .pet .mouth { fill: none; stroke: var(--ink); stroke-width: 2.5; stroke-linecap: round; }
+  .pet.idle { animation: bob 3.2s ease-in-out infinite; }
+  .pet.thinking { animation: wobble 1s ease-in-out infinite; }
+  .pet.happy { animation: hop .6s ease-out 1; }
+  .pet.sleepy .eye { transform: scaleY(.15); }
+  .pet .eye.blink { animation: blink 4.5s infinite; }
+  @keyframes bob { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
+  @keyframes wobble { 0%,100% { transform: rotate(-3deg); } 50% { transform: rotate(3deg); } }
+  @keyframes hop { 0% { transform: translateY(0); } 40% { transform: translateY(-12px); } 100% { transform: translateY(0); } }
+  @keyframes blink { 0%,94%,100% { transform: scaleY(1); } 97% { transform: scaleY(.1); } }
+  .who h1 { font-size: 20px; margin: 0; }
+  .who .status { color: var(--muted); font-size: 14px; }
+  .who .status b { color: var(--good); font-weight: 600; }
+  .controls { margin-left: auto; display: flex; gap: 8px; }
+  button.icon {
+    border: 1px solid var(--line); background: var(--dost); color: var(--ink);
+    width: 40px; height: 40px; border-radius: 12px; font-size: 18px; cursor: pointer;
+  }
+  button.icon[aria-pressed="true"] { background: var(--me); color: var(--me-ink); border-color: var(--me); }
+  button.icon:disabled { opacity: .4; cursor: not-allowed; }
+  #log {
+    flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px;
+  }
+  .msg { max-width: 82%; padding: 10px 14px; border-radius: 18px; white-space: pre-wrap; word-wrap: break-word; }
+  .msg.you { align-self: flex-end; background: var(--me); color: var(--me-ink); border-bottom-right-radius: 6px; }
+  .msg.dost { align-self: flex-start; background: var(--dost); border-bottom-left-radius: 6px; }
+  .msg.sys { align-self: center; color: var(--muted); font-size: 14px; background: none; }
+  .msg.err { align-self: center; color: var(--warn); font-size: 14px; background: none; }
+  form {
+    display: flex; gap: 8px; padding: 12px 16px 16px; border-top: 1px solid var(--line);
+  }
+  input[type=text] {
+    flex: 1; min-width: 0; font: inherit; color: var(--ink); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 14px; padding: 10px 14px;
+  }
+  input[type=text]:focus { outline: 2px solid var(--me); outline-offset: -1px; }
+  .send {
+    border: none; background: var(--me); color: var(--me-ink); border-radius: 14px;
+    padding: 0 18px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  .send:disabled { opacity: .5; cursor: wait; }
+  .typing { display: none; align-self: flex-start; color: var(--muted); font-size: 14px; padding-left: 6px; }
+  .typing.show { display: block; }
+  @media (max-width: 380px) {
+    .pet-wrap { width: 64px; height: 64px; flex-basis: 64px; }
+    .who h1 { font-size: 18px; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="pet-wrap">
+      <svg id="pet" class="pet idle" viewBox="0 0 100 100" aria-label="Dost, your pet">
+        <ellipse class="body" cx="50" cy="56" rx="38" ry="34"/>
+        <path class="body" d="M22 30 L30 12 L42 26 Z"/>
+        <path class="body" d="M78 30 L70 12 L58 26 Z"/>
+        <ellipse class="eye blink" cx="37" cy="52" rx="5.5" ry="6.5"/>
+        <ellipse class="eye blink" cx="63" cy="52" rx="5.5" ry="6.5"/>
+        <circle class="blush" cx="27" cy="63" r="5"/>
+        <circle class="blush" cx="73" cy="63" r="5"/>
+        <path id="mouth" class="mouth" d="M42 66 Q50 72 58 66"/>
+      </svg>
+    </div>
+    <div class="who">
+      <h1>Dost</h1>
+      <div class="status" id="status"><b>●</b> here with you</div>
+    </div>
+    <div class="controls">
+      <button class="icon" id="brainBtn" title="Who answers: Dost or OpenClaw" style="width:auto;padding:0 10px;font-size:13px;font-weight:600">Dost</button>
+      <button class="icon" id="speakBtn" aria-pressed="true" title="Read replies aloud">🔊</button>
+      <button class="icon" id="micBtn" title="Talk to Dost">🎙️</button>
+    </div>
+  </header>
+
+  <div id="log" aria-live="polite"></div>
+  <div class="typing" id="typing">Dost is thinking…</div>
+
+  <form id="form" autocomplete="off">
+    <input type="text" id="input" placeholder="Text Dost…" maxlength="2000" aria-label="Message">
+    <button class="send" id="send" type="submit">Send</button>
+  </form>
+</div>
+
+<script>
+// Opened as a file? The chat and mic need the local server, so go there.
+if (location.protocol === 'file:') { location.replace('http://127.0.0.1:8787/'); }
+(() => {
+  const log = document.getElementById('log');
+  const form = document.getElementById('form');
+  const input = document.getElementById('input');
+  const sendBtn = document.getElementById('send');
+  const micBtn = document.getElementById('micBtn');
+  const speakBtn = document.getElementById('speakBtn');
+  const pet = document.getElementById('pet');
+  const mouth = document.getElementById('mouth');
+  const statusEl = document.getElementById('status');
+  const typing = document.getElementById('typing');
+
+  let busy = false;
+  const brainBtn = document.getElementById('brainBtn');
+  let backend = 'dost';
+  try { backend = localStorage.getItem('dostBackend') || 'dost'; } catch (e) {}
+  function paintBrain() {
+    brainBtn.textContent = backend === 'openclaw' ? 'OpenClaw' : 'Dost';
+    brainBtn.setAttribute('aria-pressed', String(backend === 'openclaw'));
+  }
+  brainBtn.addEventListener('click', () => {
+    backend = backend === 'openclaw' ? 'dost' : 'openclaw';
+    try { localStorage.setItem('dostBackend', backend); } catch (e) {}
+    paintBrain();
+  });
+  paintBrain();
+  const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const canSpeak = 'speechSynthesis' in window;
+  let rec = null;
+  let listening = false;
+
+  function setMood(mood) {
+    pet.setAttribute('class', 'pet ' + mood);
+    if (mood === 'thinking') { mouth.setAttribute('d', 'M43 68 L57 68'); }
+    else if (mood === 'happy') { mouth.setAttribute('d', 'M40 64 Q50 78 60 64'); }
+    else if (mood === 'sleepy') { mouth.setAttribute('d', 'M44 68 Q50 66 56 68'); }
+    else { mouth.setAttribute('d', 'M42 66 Q50 72 58 66'); }
+  }
+  function setStatus(html) { statusEl.innerHTML = html; }
+
+  function addMsg(text, who) {
+    const el = document.createElement('div');
+    el.className = 'msg ' + who;
+    el.textContent = text;
+    log.appendChild(el);
+    log.scrollTop = log.scrollHeight;
+    return el;
+  }
+
+  function speak(text) {
+    if (!canSpeak || !speakBtn.getAttribute('aria-pressed') || speakBtn.getAttribute('aria-pressed') === 'false') return;
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text.slice(0, 1200));
+    u.rate = 1.02; u.pitch = 1.05;
+    u.onstart = () => setMood('happy');
+    u.onend = () => setMood('idle');
+    window.speechSynthesis.speak(u);
+  }
+
+  async function ask(text) {
+    if (busy || !text.trim()) return;
+    busy = true; sendBtn.disabled = true;
+    addMsg(text, 'you');
+    typing.classList.add('show');
+    setMood('thinking');
+    setStatus('<b>●</b> thinking…');
+    try {
+      const r = await fetch('/api/chat', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({text, backend})
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || 'request failed');
+      addMsg(data.reply, 'dost');
+      setMood('happy');
+      setTimeout(() => setMood('idle'), 1200);
+      speak(data.reply);
+    } catch (e) {
+      addMsg('Could not reach Dost: ' + e.message, 'err');
+      setMood('sleepy');
+    } finally {
+      typing.classList.remove('show');
+      setStatus('<b>●</b> here with you');
+      busy = false; sendBtn.disabled = false;
+    }
+  }
+
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const t = input.value; input.value = '';
+    ask(t);
+  });
+
+  speakBtn.addEventListener('click', () => {
+    const on = speakBtn.getAttribute('aria-pressed') !== 'true';
+    speakBtn.setAttribute('aria-pressed', String(on));
+    if (!on && canSpeak) window.speechSynthesis.cancel();
+  });
+
+  // Voice in: record with the mic, send the clip to the server, which
+  // transcribes it (Groq Whisper). Works in Chrome and in the Dost app.
+  let recorder = null;
+  let chunks = [];
+  let stopTimer = null;
+  const MAX_SECONDS = 20;
+
+  function pickMime() {
+    const options = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg'];
+    if (!window.MediaRecorder) return '';
+    for (const m of options) { if (MediaRecorder.isTypeSupported(m)) return m; }
+    return '';
+  }
+
+  function micIdle() {
+    listening = false;
+    micBtn.setAttribute('aria-pressed', 'false');
+    micBtn.textContent = '🎙️';
+    setStatus('<b>●</b> here with you');
+  }
+
+  async function startRecording() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) {
+      addMsg('This window cannot record audio. Open Dost in Chrome instead.', 'err');
+      return;
+    }
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({audio: true});
+    } catch (e) {
+      addMsg('Microphone is blocked (' + (e.name || 'error') + '). Turn it on in System Settings → Privacy & Security → Microphone, then quit and reopen this window.', 'err');
+      return;
+    }
+    const mime = pickMime();
+    recorder = mime ? new MediaRecorder(stream, {mimeType: mime}) : new MediaRecorder(stream);
+    chunks = [];
+    recorder.ondataavailable = (ev) => { if (ev.data && ev.data.size) chunks.push(ev.data); };
+    recorder.onstop = async () => {
+      stream.getTracks().forEach(t => t.stop());
+      clearTimeout(stopTimer);
+      micIdle();
+      const type = (recorder.mimeType || mime || 'audio/webm').split(';')[0];
+      const blob = new Blob(chunks, {type});
+      if (blob.size < 1000) { addMsg('Did not catch that. Hold on a little longer.', 'sys'); return; }
+      setMood('thinking');
+      setStatus('<b>●</b> listening to what you said…');
+      try {
+        const r = await fetch('/api/listen', {method: 'POST', headers: {'Content-Type': type}, body: blob});
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || 'could not transcribe');
+        const said = (data.text || '').trim();
+        if (!said) { addMsg('Did not catch any words. Try again.', 'sys'); setMood('idle'); return; }
+        ask(said);
+      } catch (e) {
+        addMsg('Voice failed: ' + e.message, 'err');
+        setMood('sleepy');
+      } finally {
+        setStatus('<b>●</b> here with you');
+      }
+    };
+    recorder.start();
+    listening = true;
+    micBtn.setAttribute('aria-pressed', 'true');
+    micBtn.textContent = '⏹';
+    setMood('thinking');
+    setStatus('<b>●</b> recording… tap ⏹ when done');
+    stopTimer = setTimeout(() => { if (recorder && recorder.state === 'recording') recorder.stop(); }, MAX_SECONDS * 1000);
+  }
+
+  micBtn.addEventListener('click', () => {
+    if (listening && recorder && recorder.state === 'recording') { recorder.stop(); return; }
+    if (busy) return;
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
+    startRecording();
+  });
+
+  fetch('/api/greet').then(r => r.json()).then(d => {
+    if (d.reply) { addMsg(d.reply, 'dost'); speak(d.reply); }
+  }).catch(() => addMsg('Dost is not running. Start pet_server.py first.', 'err'));
+
+  setMood('idle');
+  input.focus();
+})();
+</script>
+</body>
+</html>
