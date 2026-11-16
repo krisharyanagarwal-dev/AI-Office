@@ -108,7 +108,7 @@ class ProviderRouter:
         import datetime as _dt
         tomorrow = _dt.datetime.now().date() + _dt.timedelta(days=1)
         midnight = _dt.datetime.combine(tomorrow, _dt.datetime.min.time())
-        cooldown = (midnight - now).total_seconds()
+        cooldown = midnight.timestamp() - now
         with self._lock:
             self.cooldowns[pool_name] = time.time() + cooldown
         print(f"[router] {pool_name} daily quota exhausted, cooling down for {cooldown/3600:.1f}h until midnight")

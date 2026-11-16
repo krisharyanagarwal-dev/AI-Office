@@ -214,8 +214,39 @@ class ProviderClient:
                 raise RuntimeError(f"Unparseable response: {out[:200]}")
             return response
 
+        # Google Gemini wraps errors in a JSON array: [{"error": {...}}].
+        # Unwrap before the dict checks below, and classify 429 as daily quota.
+        if isinstance(d, list):
+            if d and isinstance(d[0], dict) and "error" in d[0]:
+                err = d[0]["error"]
+                code = err.get("code")
+                msg = str(err.get("message", ""))
+                if code == 429 or "quota" in msg.lower() or "rate limit" in msg.lower():
+                    raise self.DailyQuotaExceeded(
+                        f"Provider daily quota exceeded ({self.pool_name}): {msg[:200]}"
+                    )
+                raise RuntimeError(f"Provider error: {err}")
+            if d and isinstance(d[0], dict):
+                d = d[0]  # unwrap single-element array responses
+            else:
+                raise RuntimeError(f"No content in response: {out[:200]}")
+
         if "error" in d:
-            raise RuntimeError(f"Provider error: {d['error']}")
+            err = d["error"]
+            code = err.get("code") if isinstance(err, dict) else None
+            msg = str(err.get("message", "")) if isinstance(err, dict) else str(err)
+            # Daily-quota signals: HTTP 429, OpenRouter free-models-per-day,
+            # Google "exceeded your current quota". These must sleep until
+            # midnight, not churn on a 60-300s cooldown all day.
+            daily_markers = (
+                "free-models-per-day", "rate limit exceeded",
+                "exceeded your current quota", "resource_exhausted",
+            )
+            if code == 429 or any(m in msg.lower() for m in daily_markers):
+                raise self.DailyQuotaExceeded(
+                    f"Provider daily quota exceeded ({self.pool_name}): {msg[:200]}"
+                )
+            raise RuntimeError(f"Provider error: {err}")
 
         # Handle choices[0].message.content (standard OpenAI-compatible)
         try:
