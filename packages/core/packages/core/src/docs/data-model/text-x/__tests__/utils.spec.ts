@@ -1,0 +1,570 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { describe, expect, it, vi } from 'vitest';
+import type { IDocumentBody } from '../../../../types/interfaces/i-document-data';
+import type { IRetainAction } from '../action-types';
+import { Tools } from '../../../../shared/tools';
+import { BooleanNumber } from '../../../../types/enum/text-style';
+import { CustomRangeType, DocumentBlockRangeType } from '../../../../types/interfaces/i-document-data';
+import { PresetListType } from '../../preset-list-type';
+import { DataStreamTreeTokenType } from '../../types';
+import { TextXActionType } from '../action-types';
+import {
+    composeBody,
+    getBodySlice,
+    getBodySliceForTextXAction,
+    getTextRunSlice,
+    isUselessRetainAction,
+    SliceBodyType,
+} from '../utils';
+
+describe('test text-x utils', () => {
+    it.each([SliceBodyType.copy, SliceBodyType.cut])('keeps both block sentinels in complete action slices (%s)', (type) => {
+        const tokens = DataStreamTreeTokenType;
+        const body: IDocumentBody = {
+            dataStream: `A\r${tokens.BLOCK_START}B\r${tokens.BLOCK_END}C\r\n`,
+            blockRanges: [{
+                blockId: 'callout',
+                blockType: DocumentBlockRangeType.CALLOUT,
+                startIndex: 2,
+                endIndex: 5,
+            }],
+        };
+
+        expect(getBodySliceForTextXAction(body, 2, 5, false, type).blockRanges).toBeUndefined();
+        expect(getBodySliceForTextXAction(body, 3, 6, false, type).blockRanges).toBeUndefined();
+        const complete = getBodySliceForTextXAction(body, 2, 6, false, type);
+        expect(complete.blockRanges).toEqual([{
+            blockId: 'callout',
+            blockType: DocumentBlockRangeType.CALLOUT,
+            startIndex: 0,
+            endIndex: 3,
+        }]);
+        complete.blockRanges![0].blockId = 'pasted-callout';
+        expect(body.blockRanges![0].blockId).toBe('callout');
+
+        expect(getBodySlice(body, 3, 5, false, type).blockRanges).toEqual([{
+            blockId: 'callout',
+            blockType: DocumentBlockRangeType.CALLOUT,
+            startIndex: 0,
+            endIndex: 2,
+        }]);
+    });
+
+    it('keeps complete column groups in clipboard slices', () => {
+        const tokens = DataStreamTreeTokenType;
+        const columns = `${tokens.COLUMN_GROUP_START}${tokens.COLUMN_START}Alpha\r${tokens.COLUMN_END}${tokens.COLUMN_GROUP_END}`;
+        const body: IDocumentBody = {
+            dataStream: `A\r${columns}\r\n`,
+            columnGroups: [{ columnGroupId: 'columns', startIndex: 2, endIndex: columns.length + 1 }],
+        };
+
+        const slice = getBodySliceForTextXAction(body, 2, columns.length + 2, false, SliceBodyType.copy);
+
+        expect(slice.dataStream).toBe(columns);
+        expect(slice.columnGroups).toEqual([{
+            columnGroupId: 'columns',
+            startIndex: 0,
+            endIndex: columns.length - 1,
+        }]);
+    });
+
+    it('only clones text runs intersecting the requested slice', () => {
+        const body: IDocumentBody = {
+            dataStream: 'a'.repeat(10_000),
+            textRuns: Array.from({ length: 1_000 }, (_, index) => ({
+                st: index * 10,
+                ed: index * 10 + 10,
+                ts: {
+                    bl: index % 2 === 0 ? BooleanNumber.TRUE : BooleanNumber.FALSE,
+                },
+            })),
+        };
+        const deepClone = vi.spyOn(Tools, 'deepClone');
+
+        const slice = getTextRunSlice(body, 5_000, 5_010);
+
+        expect(slice).toEqual([{
+            st: 0,
+            ed: 10,
+            ts: {
+                bl: BooleanNumber.TRUE,
+            },
+        }]);
+        expect(deepClone.mock.calls.length).toBeLessThan(50);
+        deepClone.mockRestore();
+    });
+
+    it('test getBodySlice fn', () => {
+        const body: IDocumentBody = {
+            dataStream: 'hello\nworld',
+            textRuns: [
+                {
+                    st: 0,
+                    ed: 5,
+                    ts: {
+                        bl: BooleanNumber.TRUE,
+                    },
+                },
+                {
+                    st: 6,
+                    ed: 10,
+                    ts: {
+                        bl: BooleanNumber.FALSE,
+                        it: BooleanNumber.TRUE,
+                    },
+                },
+            ],
+            paragraphs: [{
+                startIndex: 5,
+                paragraphId: 'para_fixture_1049',
+            }],
+        };
+
+        const sliceBody = getBodySlice(body, 3, 8, false);
+        expect(sliceBody).toMatchObject({
+            dataStream: 'lo\nwo',
+            textRuns: [
+                {
+                    st: 0,
+                    ed: 2,
+                    ts: {
+                        bl: BooleanNumber.TRUE,
+                    },
+                },
+                {
+                    st: 3,
+                    ed: 5,
+                    ts: {
+                        bl: BooleanNumber.FALSE,
+                        it: BooleanNumber.TRUE,
+                    },
+                },
+            ],
+            paragraphs: [{
+                startIndex: 2,
+                paragraphId: 'para_fixture_1049',
+            }],
+        } as IDocumentBody);
+    });
+
+    it('test getBodySlice fn with a larger range', () => {
+        const body: IDocumentBody = {
+            dataStream: 'hello\nworld',
+            textRuns: [
+                {
+                    st: 0,
+                    ed: 3,
+                    ts: {
+                        bl: BooleanNumber.TRUE,
+                    },
+                },
+                {
+                    st: 3,
+                    ed: 5,
+                    ts: {
+                        bl: BooleanNumber.FALSE,
+                    },
+                },
+                {
+                    st: 6,
+                    ed: 10,
+                    ts: {
+                        bl: BooleanNumber.FALSE,
+                        it: BooleanNumber.TRUE,
+                    },
+                },
+            ],
+            paragraphs: [{
+                startIndex: 5,
+                paragraphId: 'para_fixture_1051',
+            }],
+        };
+
+        const sliceBody = getBodySlice(body, 2, 8, false);
+        expect(sliceBody).toMatchObject({
+            dataStream: 'llo\nwo',
+            textRuns: [
+                {
+                    st: 0,
+                    ed: 1,
+                    ts: {
+                        bl: BooleanNumber.TRUE,
+                    },
+                },
+                {
+                    st: 1,
+                    ed: 3,
+                    ts: {
+                        bl: BooleanNumber.FALSE,
+                    },
+                },
+                {
+                    st: 4,
+                    ed: 6,
+                    ts: {
+                        bl: BooleanNumber.FALSE,
+                        it: BooleanNumber.TRUE,
+                    },
+                },
+            ],
+            paragraphs: [{
+                startIndex: 3,
+                paragraphId: 'para_fixture_1051',
+            }],
+        });
+    });
+
+    it('drops a clipped outer field while preserving a fully copied nested field', () => {
+        const body: IDocumentBody = {
+            dataStream: '\u001FOld\t\u001F1\u001E\r\u001E',
+            customRanges: [{
+                startIndex: 0,
+                endIndex: 9,
+                rangeId: 'toc',
+                rangeType: CustomRangeType.FIELD,
+                wholeEntity: false,
+            }, {
+                startIndex: 5,
+                endIndex: 7,
+                rangeId: 'page-ref',
+                rangeType: CustomRangeType.FIELD,
+                wholeEntity: false,
+            }],
+        };
+
+        const copied = getBodySlice(body, 1, 9, false, SliceBodyType.copy);
+
+        expect(copied.dataStream).toBe('Old\t\u001F1\u001E\r');
+        expect(copied.customRanges).toEqual([expect.objectContaining({
+            rangeId: 'page-ref',
+            startIndex: 4,
+            endIndex: 6,
+        })]);
+    });
+
+    it('test composeBody fn with textRuns', () => {
+        const thisBody: IDocumentBody = {
+            dataStream: 'hello\nworld',
+            textRuns: [
+                {
+                    st: 0,
+                    ed: 5,
+                    ts: {
+                        bl: BooleanNumber.TRUE,
+                    },
+                },
+                {
+                    st: 6,
+                    ed: 10,
+                    ts: {
+                        bl: BooleanNumber.FALSE,
+                        it: BooleanNumber.TRUE,
+                    },
+                },
+            ],
+            paragraphs: [{
+                startIndex: 5,
+                paragraphId: 'para_fixture_1053',
+            }],
+        };
+
+        const otherBody: IDocumentBody = {
+            dataStream: '',
+            textRuns: [
+                {
+                    st: 0,
+                    ed: 3,
+                    ts: {
+                        bl: BooleanNumber.FALSE,
+                    },
+                },
+                {
+                    st: 3,
+                    ed: 5,
+                    ts: {
+                        it: BooleanNumber.TRUE,
+                    },
+                },
+            ],
+        };
+
+        const composedBody = composeBody(thisBody, otherBody);
+
+        expect(composedBody).toMatchObject({
+            dataStream: 'hello\nworld',
+            textRuns: [
+                {
+                    st: 0,
+                    ed: 3,
+                    ts: {
+                        bl: BooleanNumber.FALSE,
+                    },
+                },
+                {
+                    st: 3,
+                    ed: 5,
+                    ts: {
+                        bl: BooleanNumber.TRUE,
+                        it: BooleanNumber.TRUE,
+                    },
+                },
+                {
+                    st: 6,
+                    ed: 10,
+                    ts: {
+                        bl: BooleanNumber.FALSE,
+                        it: BooleanNumber.TRUE,
+                    },
+                },
+            ],
+            paragraphs: [{
+                startIndex: 5,
+                paragraphId: 'para_fixture_1053',
+            }],
+        });
+    });
+
+    it('test composeBody and throw error', () => {
+        const thisBody: IDocumentBody = {
+            dataStream: 'hello\nworld',
+            textRuns: [],
+        };
+        const otherBody: IDocumentBody = {
+            dataStream: 'error',
+            textRuns: [],
+        };
+
+        expect(() => {
+            composeBody(thisBody, otherBody);
+        }).toThrow();
+    });
+
+    it('test composeBody both with paragraphs', () => {
+        const thisBody: IDocumentBody = {
+            dataStream: 'hello\nworld',
+            paragraphs: [{
+                startIndex: 5,
+                paragraphId: 'para_fixture_1055',
+            }],
+        };
+
+        const otherBody: IDocumentBody = {
+            dataStream: '',
+            paragraphs: [{
+                startIndex: 5,
+                paragraphId: 'para_fixture_1056',
+                paragraphStyle: {
+                    spaceAbove: { v: 10 },
+                    lineSpacing: 2,
+                    spaceBelow: { v: 0 },
+                },
+            }],
+        };
+
+        const composedBody = composeBody(thisBody, otherBody);
+
+        expect(composedBody).toMatchObject({
+            dataStream: 'hello\nworld',
+            paragraphs: [{
+                startIndex: 5,
+                paragraphId: 'para_fixture_1056',
+                paragraphStyle: {
+                    spaceAbove: { v: 10 },
+                    lineSpacing: 2,
+                    spaceBelow: { v: 0 },
+                },
+            }],
+        });
+    });
+
+    it('test composeBody both with paragraphs and one has bullet list', () => {
+        const thisBody: IDocumentBody = {
+            dataStream: '',
+            paragraphs: [{
+                startIndex: 0,
+                paragraphId: 'para_fixture_1058',
+                paragraphStyle: {
+                    lineSpacing: 2,
+                },
+                bullet: {
+                    listType: PresetListType.BULLET_LIST,
+                    listId: 'testBullet',
+                    nestingLevel: 0,
+                    textStyle: {
+                        fs: 15,
+                    },
+                },
+            }],
+        };
+
+        const otherBody: IDocumentBody = {
+            dataStream: '',
+            paragraphs: [{
+                startIndex: 0,
+                paragraphId: 'para_fixture_1059',
+                paragraphStyle: {
+                    lineSpacing: 1,
+                    spaceBelow: {
+                        v: 20,
+                    },
+                },
+            }],
+        };
+
+        const composedBody = composeBody(thisBody, otherBody);
+
+        expect(composedBody).toMatchObject({
+            dataStream: '',
+            paragraphs: [{
+                startIndex: 0,
+                paragraphId: 'para_fixture_1059',
+                paragraphStyle: {
+                    lineSpacing: 1,
+                    spaceBelow: {
+                        v: 20,
+                    },
+                },
+                bullet: {
+                    listType: PresetListType.BULLET_LIST,
+                    listId: 'testBullet',
+                    nestingLevel: 0,
+                    textStyle: {
+                        fs: 15,
+                    },
+                },
+            }],
+        });
+    });
+
+    it('test composeBody fn both width paragraphs and from retain', () => {
+        const thisBody: IDocumentBody = {
+            dataStream: '',
+            paragraphs: [{
+                startIndex: 2,
+                paragraphId: 'para_fixture_1061',
+            }],
+        };
+
+        const otherBody: IDocumentBody = {
+            dataStream: '',
+            paragraphs: [{
+                startIndex: 5,
+                paragraphId: 'para_fixture_1062',
+                paragraphStyle: {
+                    spaceAbove: { v: 10 },
+                    lineSpacing: 2,
+                    spaceBelow: { v: 0 },
+                },
+            }],
+        };
+
+        const composedBody = composeBody(thisBody, otherBody);
+
+        expect(composedBody).toMatchObject({
+            dataStream: '',
+            paragraphs: [{
+                startIndex: 2,
+                paragraphId: 'para_fixture_1061',
+            }, {
+                startIndex: 5,
+                paragraphId: 'para_fixture_1062',
+                paragraphStyle: {
+                    spaceAbove: { v: 10 },
+                    lineSpacing: 2,
+                    spaceBelow: { v: 0 },
+                },
+            }],
+        });
+    });
+
+    it('test composeBody fn both width paragraphs and from retain 2', () => {
+        const thisBody: IDocumentBody = {
+            dataStream: '',
+            paragraphs: [{
+                startIndex: 8,
+                paragraphId: 'para_fixture_1065',
+            }],
+        };
+
+        const otherBody: IDocumentBody = {
+            dataStream: '',
+            paragraphs: [{
+                startIndex: 5,
+                paragraphId: 'para_fixture_1066',
+                paragraphStyle: {
+                    spaceAbove: { v: 10 },
+                    lineSpacing: 2,
+                    spaceBelow: { v: 0 },
+                },
+            }],
+        };
+
+        const composedBody = composeBody(thisBody, otherBody);
+
+        expect(composedBody).toMatchObject({
+            dataStream: '',
+            paragraphs: [{
+                startIndex: 5,
+                paragraphId: 'para_fixture_1066',
+                paragraphStyle: {
+                    spaceAbove: { v: 10 },
+                    lineSpacing: 2,
+                    spaceBelow: { v: 0 },
+                },
+            }, {
+                startIndex: 8,
+                paragraphId: 'para_fixture_1065',
+            }],
+        });
+    });
+
+    it('test isUselessRetainAction()', () => {
+        const action1: IRetainAction = {
+            t: TextXActionType.RETAIN,
+            len: 10,
+        };
+
+        const action2: IRetainAction = {
+            t: TextXActionType.RETAIN,
+            len: 10,
+            body: {
+                dataStream: '',
+                textRuns: [],
+            },
+        };
+
+        const action3: IRetainAction = {
+            t: TextXActionType.RETAIN,
+            len: 10,
+            body: {
+                dataStream: '',
+                textRuns: [{
+                    st: 0,
+                    ed: 10,
+                    ts: {
+                        bl: BooleanNumber.FALSE,
+                    },
+                }],
+            },
+        };
+
+        expect(isUselessRetainAction(action1)).toBe(true);
+        expect(isUselessRetainAction(action2)).toBe(false);
+        expect(isUselessRetainAction(action3)).toBe(false);
+    });
+});

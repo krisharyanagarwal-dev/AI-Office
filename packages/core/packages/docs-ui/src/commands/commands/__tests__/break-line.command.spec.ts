@@ -1,0 +1,507 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type { DocumentDataModel, ICommand, IDocumentData, Injector } from '@univerjs/core';
+import {
+    awaitTime,
+    CustomRangeType,
+    DataStreamTreeTokenType,
+    DocumentBlockRangeType,
+    DocumentFlavor,
+    ICommandService,
+    IUniverInstanceService,
+    NamedStyleType,
+    PresetListType,
+    Univer,
+    UniverInstanceType,
+} from '@univerjs/core';
+import {
+    DocSelectionManagerService,
+    DocStateChangeManagerService,
+    DocStateEmitService,
+    InsertTextCommand,
+    RichTextEditingMutation,
+    SetTextSelectionsOperation,
+    UniverDocsPlugin,
+} from '@univerjs/docs';
+import {
+    IRenderManagerService,
+    NORMAL_TEXT_SELECTION_PLUGIN_STYLE,
+    RenderManagerService,
+} from '@univerjs/engine-render';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { DocMenuStyleService } from '../../../services/doc-menu-style.service';
+import { BreakLineCommand, BreakLineInsertionMode } from '../break-line.command';
+import { createCommandTestBed } from './create-command-test-bed';
+
+it('keeps typing in the footnote after inserting a paragraph', async () => {
+    const univer = new Univer();
+    const injector = univer.__getInjector();
+    injector.add([IRenderManagerService, { useClass: RenderManagerService }]);
+    injector.add([DocSelectionManagerService]);
+    injector.add([DocStateEmitService]);
+    injector.add([DocStateChangeManagerService]);
+    injector.add([DocMenuStyleService]);
+    injector.get(DocStateChangeManagerService);
+    const doc = univer.createUnit<IDocumentData, DocumentDataModel>(UniverInstanceType.UNIVER_DOC, {
+        id: 'note-input',
+        documentStyle: { documentFlavor: DocumentFlavor.TRADITIONAL },
+        body: { dataStream: 'Body\uFFFC\r\n', paragraphs: [{ paragraphId: 'p', startIndex: 5 }], sectionBreaks: [{ sectionId: 's', startIndex: 6 }], customRanges: [{ rangeId: 'reference', rangeType: CustomRangeType.FOOTNOTE, startIndex: 4, endIndex: 4, properties: { noteId: 'note' } }] },
+        notes: { note: { type: 'footnote' as const, noteId: 'note', body: { dataStream: '\r\n', paragraphs: [{ paragraphId: 'np', startIndex: 0 }] } } },
+    });
+    injector.get(IUniverInstanceService).focusUnit(doc.getUnitId());
+    const commands = injector.get(ICommandService);
+    [RichTextEditingMutation, InsertTextCommand, BreakLineCommand]
+        .forEach((command) => commands.registerCommand(command));
+    const selections = injector.get(DocSelectionManagerService);
+    selections.__TEST_ONLY_setCurrentSelection({ unitId: 'note-input', subUnitId: 'note-input' });
+    selections.replaceSelectionInfoWithoutRefresh({
+        textRanges: [{ startOffset: 0, endOffset: 0, collapsed: true, isActive: true, segmentId: 'note' }],
+        rectRanges: [],
+        segmentId: '',
+        segmentPage: -1,
+        isEditing: true,
+        style: NORMAL_TEXT_SELECTION_PLUGIN_STYLE,
+    });
+    try {
+        const noteId = Object.keys(doc.getSnapshot().notes!)[0];
+        for (const text of ['First', ' ', 'line', '\r', 'Next', ' ', 'line']) {
+            const range = selections.getActiveTextRange()!;
+            expect(range.segmentId).toBe(noteId);
+            if (text === '\r') {
+                expect(commands.syncExecuteCommand(BreakLineCommand.id)).toBe(true);
+            } else {
+                expect(commands.syncExecuteCommand(InsertTextCommand.id, {
+                    unitId: doc.getUnitId(),
+                    range,
+                    body: { dataStream: text },
+                })).toBe(true);
+            }
+            await Promise.resolve();
+        }
+        expect(selections.getActiveTextRange()).toMatchObject({ segmentId: noteId, startOffset: 20 });
+        expect(doc.getBody()?.dataStream).toBe('Body\uFFFC\r\n');
+        expect(doc.getSnapshot().notes?.[noteId].body.dataStream).toBe('First line\rNext line\r\n');
+    } finally {
+        univer.dispose();
+    }
+});
+
+function getDocumentData(): IDocumentData {
+    return {
+        id: 'test-doc',
+        body: {
+            dataStream: 'Title\r\n',
+            textRuns: [{
+                st: 0,
+                ed: 5,
+                ts: {},
+            }],
+            paragraphs: [{ paragraphId: 'para_docs_ui_fixture_1', startIndex: 5, paragraphStyle: {
+                headingId: 'heading-1',
+                namedStyleType: NamedStyleType.HEADING_1,
+            } }],
+        },
+        documentStyle: {
+            pageSize: {
+                width: 594.3,
+                height: 840.51,
+            },
+            marginTop: 72,
+            marginBottom: 72,
+            marginRight: 90,
+            marginLeft: 90,
+        },
+    };
+}
+
+function getDocumentDataWithColumnGroup(): IDocumentData {
+    const T = DataStreamTreeTokenType;
+    const columnGroupStream = `${T.COLUMN_GROUP_START}${T.COLUMN_START}A${T.PARAGRAPH}${T.COLUMN_END}${T.COLUMN_START}B${T.PARAGRAPH}${T.COLUMN_END}${T.COLUMN_GROUP_END}`;
+
+    return {
+        id: 'test-doc',
+        body: {
+            dataStream: `Before${T.PARAGRAPH}${columnGroupStream}${T.PARAGRAPH}${T.SECTION_BREAK}`,
+            textRuns: [],
+            paragraphs: [
+                { paragraphId: 'before', startIndex: 6 },
+                { paragraphId: 'left', startIndex: 10 },
+                { paragraphId: 'right', startIndex: 14 },
+                { paragraphId: 'after', startIndex: 17 },
+            ],
+            sectionBreaks: [{ sectionId: 'section_fixture_201', startIndex: 18 }],
+            columnGroups: [{ columnGroupId: 'cg-1', startIndex: 7, endIndex: 16 }],
+        },
+        documentStyle: {
+            documentFlavor: DocumentFlavor.MODERN,
+            pageSize: {
+                width: 594.3,
+                height: 840.51,
+            },
+            marginTop: 72,
+            marginBottom: 72,
+            marginRight: 90,
+            marginLeft: 90,
+        },
+    };
+}
+
+function getStyledListDocumentData(documentFlavor: DocumentFlavor): IDocumentData {
+    const T = DataStreamTreeTokenType;
+
+    return {
+        id: 'test-doc',
+        body: {
+            dataStream: `A${T.PARAGRAPH}${T.SECTION_BREAK}`,
+            textRuns: [{
+                st: 0,
+                ed: 1,
+                ts: { fs: 24, cl: { rgb: '#00FF00' } },
+            }],
+            paragraphs: [{
+                paragraphId: 'styled-list',
+                startIndex: 1,
+                bullet: {
+                    listId: 'list-1',
+                    listType: PresetListType.BULLET_LIST,
+                    nestingLevel: 0,
+                },
+            }],
+            sectionBreaks: [{ sectionId: 'section_fixture_204', startIndex: 2 }],
+        },
+        documentStyle: {
+            documentFlavor,
+            pageSize: { width: 594.3, height: 840.51 },
+            marginTop: 72,
+            marginBottom: 72,
+            marginRight: 90,
+            marginLeft: 90,
+        },
+    };
+}
+
+function getDocumentDataWithTable(documentFlavor: DocumentFlavor): IDocumentData {
+    const T = DataStreamTreeTokenType;
+    const tableStream = `${T.TABLE_START}${T.TABLE_ROW_START}${T.TABLE_CELL_START}A${T.PARAGRAPH}${T.SECTION_BREAK}${T.TABLE_CELL_END}${T.TABLE_ROW_END}${T.TABLE_END}`;
+
+    return {
+        id: 'test-doc',
+        body: {
+            dataStream: `${tableStream}${T.PARAGRAPH}${T.SECTION_BREAK}`,
+            paragraphs: [
+                { paragraphId: 'cell', startIndex: 4 },
+                { paragraphId: 'after', startIndex: tableStream.length },
+            ],
+            sectionBreaks: [
+                { sectionId: 'cell-section', startIndex: 5 },
+                { sectionId: 'section_fixture_203', startIndex: tableStream.length + 1 },
+            ],
+            tables: [{ tableId: 'table-1', startIndex: 0, endIndex: tableStream.length }],
+        },
+        documentStyle: {
+            documentFlavor,
+            pageSize: { width: 594.3, height: 840.51 },
+            marginTop: 72,
+            marginBottom: 72,
+            marginRight: 90,
+            marginLeft: 90,
+        },
+    };
+}
+
+function getDocumentDataWithAdjacentBlocks(): IDocumentData {
+    const T = DataStreamTreeTokenType;
+
+    return {
+        id: 'test-doc',
+        body: {
+            dataStream: `${T.BLOCK_START}A${T.PARAGRAPH}${T.BLOCK_END}${T.BLOCK_START}B${T.PARAGRAPH}${T.BLOCK_END}${T.PARAGRAPH}${T.SECTION_BREAK}`,
+            paragraphs: [
+                { paragraphId: 'code-paragraph', startIndex: 2 },
+                { paragraphId: 'callout-paragraph', startIndex: 6, paragraphStyle: { indentStart: { v: 60 } } },
+                { paragraphId: 'trailing-paragraph', startIndex: 8 },
+            ],
+            sectionBreaks: [{ sectionId: 'section_fixture_202', startIndex: 9 }],
+            blockRanges: [
+                { blockId: 'code-1', blockType: DocumentBlockRangeType.CODE, startIndex: 0, endIndex: 3 },
+                { blockId: 'callout-1', blockType: DocumentBlockRangeType.CALLOUT, startIndex: 4, endIndex: 7 },
+            ],
+        },
+        documentStyle: {
+            pageSize: { width: 594.3, height: 840.51 },
+            marginTop: 72,
+            marginBottom: 72,
+            marginRight: 90,
+            marginLeft: 90,
+        },
+    };
+}
+
+describe('break line command', () => {
+    let univer: Univer;
+    let get: Injector['get'];
+    let commandService: ICommandService;
+
+    function getParagraphs() {
+        const univerInstanceService = get(IUniverInstanceService);
+        return univerInstanceService.getUnit<DocumentDataModel>('test-doc', UniverInstanceType.UNIVER_DOC)?.getBody()?.paragraphs ?? [];
+    }
+
+    function getBody() {
+        const univerInstanceService = get(IUniverInstanceService);
+        return univerInstanceService.getUnit<DocumentDataModel>('test-doc', UniverInstanceType.UNIVER_DOC)?.getBody();
+    }
+
+    function setupWithColumnGroup() {
+        univer.dispose();
+        const testBed = createCommandTestBed(getDocumentDataWithColumnGroup());
+        univer = testBed.univer;
+        get = testBed.get;
+        commandService = get(ICommandService);
+        commandService.registerCommand(BreakLineCommand);
+        commandService.registerCommand(SetTextSelectionsOperation);
+        commandService.registerCommand(RichTextEditingMutation as unknown as ICommand);
+
+        const selectionManager = get(DocSelectionManagerService);
+        selectionManager.__TEST_ONLY_setCurrentSelection({
+            unitId: 'test-doc',
+            subUnitId: 'test-doc',
+        });
+
+        return selectionManager;
+    }
+
+    function setupWithAdjacentBlocks() {
+        univer.dispose();
+        const testBed = createCommandTestBed(getDocumentDataWithAdjacentBlocks());
+        univer = testBed.univer;
+        get = testBed.get;
+        commandService = get(ICommandService);
+        commandService.registerCommand(BreakLineCommand);
+        commandService.registerCommand(SetTextSelectionsOperation);
+        commandService.registerCommand(RichTextEditingMutation as unknown as ICommand);
+
+        const selectionManager = get(DocSelectionManagerService);
+        selectionManager.__TEST_ONLY_setCurrentSelection({
+            unitId: 'test-doc',
+            subUnitId: 'test-doc',
+        });
+
+        return selectionManager;
+    }
+
+    function setupWithTable(documentFlavor: DocumentFlavor) {
+        univer.dispose();
+        const testBed = createCommandTestBed(getDocumentDataWithTable(documentFlavor));
+        univer = testBed.univer;
+        get = testBed.get;
+        commandService = get(ICommandService);
+        commandService.registerCommand(BreakLineCommand);
+        commandService.registerCommand(SetTextSelectionsOperation);
+        commandService.registerCommand(RichTextEditingMutation as unknown as ICommand);
+
+        const selectionManager = get(DocSelectionManagerService);
+        selectionManager.__TEST_ONLY_setCurrentSelection({
+            unitId: 'test-doc',
+            subUnitId: 'test-doc',
+        });
+
+        return selectionManager;
+    }
+
+    async function executeBreakLineAndApplyRenderedSelection(selectionManager: DocSelectionManagerService) {
+        await commandService.executeCommand(BreakLineCommand.id);
+        await awaitTime(0);
+        if (selectionManager.getActiveTextRange() == null) {
+            throw new Error('BreakLineCommand did not preserve an active text range');
+        }
+    }
+
+    beforeEach(() => {
+        const testBed = createCommandTestBed(getDocumentData());
+        univer = testBed.univer;
+        get = testBed.get;
+
+        commandService = get(ICommandService);
+        commandService.registerCommand(BreakLineCommand);
+        commandService.registerCommand(SetTextSelectionsOperation);
+        commandService.registerCommand(RichTextEditingMutation as unknown as ICommand);
+
+        const selectionManager = get(DocSelectionManagerService);
+        selectionManager.__TEST_ONLY_setCurrentSelection({
+            unitId: 'test-doc',
+            subUnitId: 'test-doc',
+        });
+        selectionManager.__TEST_ONLY_add([{ startOffset: 5, endOffset: 5, collapsed: true, isActive: true, segmentId: '', style: null as never }]);
+    });
+
+    afterEach(() => univer.dispose());
+
+    it('splits a heading paragraph and resets heading style for the new paragraph', async () => {
+        await commandService.executeCommand(BreakLineCommand.id);
+
+        await awaitTime(0);
+
+        expect(getParagraphs()).toHaveLength(2);
+        expect(getParagraphs()[0].paragraphStyle?.namedStyleType).toBe(NamedStyleType.HEADING_1);
+        expect(getParagraphs()[1].paragraphStyle?.namedStyleType).toBeUndefined();
+        expect(getParagraphs()[1].paragraphStyle?.headingId).toBeUndefined();
+    });
+
+    it.each([
+        DocumentFlavor.MODERN,
+        DocumentFlavor.TRADITIONAL,
+    ])('keeps the current text style on an empty list paragraph in %s docs', async (documentFlavor) => {
+        univer.dispose();
+        const testBed = createCommandTestBed(getStyledListDocumentData(documentFlavor));
+        univer = testBed.univer;
+        get = testBed.get;
+        commandService = get(ICommandService);
+        commandService.registerCommand(BreakLineCommand);
+        commandService.registerCommand(SetTextSelectionsOperation);
+        commandService.registerCommand(RichTextEditingMutation as unknown as ICommand);
+
+        const selectionManager = get(DocSelectionManagerService);
+        selectionManager.__TEST_ONLY_setCurrentSelection({
+            unitId: 'test-doc',
+            subUnitId: 'test-doc',
+        });
+        selectionManager.__TEST_ONLY_add([{ startOffset: 1, endOffset: 1, collapsed: true, isActive: true, segmentId: '' }]);
+
+        await commandService.executeCommand(BreakLineCommand.id);
+        await awaitTime(0);
+
+        const body = getBody();
+        const emptyParagraph = body?.paragraphs?.[1];
+        const emptyParagraphTextRun = body?.textRuns?.find(({ st, ed }) =>
+            emptyParagraph != null && st <= emptyParagraph.startIndex && ed > emptyParagraph.startIndex
+        );
+
+        expect(emptyParagraph?.bullet?.listType).toBe(PresetListType.BULLET_LIST);
+        expect(emptyParagraphTextRun?.ts).toEqual({ fs: 24, cl: { rgb: '#00FF00' } });
+    });
+
+    it('keeps the cursor fixed for explicit gap insertion mode', async () => {
+        const selectionManager = get(DocSelectionManagerService);
+
+        await commandService.executeCommand(BreakLineCommand.id, { insertionMode: BreakLineInsertionMode.InsertGap });
+        await awaitTime(0);
+
+        expect(selectionManager.getActiveTextRange()).toMatchObject({ startOffset: 5, endOffset: 5 });
+    });
+
+    it('keeps column groups when breaking a blank paragraph below a column group', async () => {
+        const selectionManager = setupWithColumnGroup();
+        selectionManager.__TEST_ONLY_add([{ startOffset: 17, endOffset: 17, collapsed: true, isActive: true, segmentId: '', style: null as never }]);
+
+        await executeBreakLineAndApplyRenderedSelection(selectionManager);
+
+        expect(getBody()?.columnGroups).toEqual([{ columnGroupId: 'cg-1', startIndex: 7, endIndex: 16 }]);
+        expect(getBody()?.dataStream).toContain(DataStreamTreeTokenType.COLUMN_GROUP_END);
+        expect(selectionManager.getActiveTextRange()?.startOffset).toBe(18);
+
+        await executeBreakLineAndApplyRenderedSelection(selectionManager);
+
+        expect(selectionManager.getActiveTextRange()?.startOffset).toBe(19);
+    });
+
+    it('keeps column groups wrapped when breaking at the closing column boundary', async () => {
+        const selectionManager = setupWithColumnGroup();
+        selectionManager.__TEST_ONLY_add([{ startOffset: 16, endOffset: 16, collapsed: true, isActive: true, segmentId: '', style: null as never }]);
+
+        await commandService.executeCommand(BreakLineCommand.id);
+        await awaitTime(0);
+
+        expect(getBody()?.columnGroups).toEqual([{ columnGroupId: 'cg-1', startIndex: 7, endIndex: 17 }]);
+        expect(getBody()?.dataStream[17]).toBe(DataStreamTreeTokenType.COLUMN_GROUP_END);
+    });
+
+    it('inserts a paragraph between adjacent block ranges without corrupting either range', async () => {
+        const selectionManager = setupWithAdjacentBlocks();
+        selectionManager.__TEST_ONLY_add([{ startOffset: 4, endOffset: 4, collapsed: true, isActive: true, segmentId: '', style: null as never }]);
+
+        await executeBreakLineAndApplyRenderedSelection(selectionManager);
+
+        const T = DataStreamTreeTokenType;
+        expect(getBody()?.dataStream).toBe(`${T.BLOCK_START}A${T.PARAGRAPH}${T.BLOCK_END}${T.PARAGRAPH}${T.BLOCK_START}B${T.PARAGRAPH}${T.BLOCK_END}${T.PARAGRAPH}${T.SECTION_BREAK}`);
+        expect(getBody()?.blockRanges).toEqual([
+            { blockId: 'code-1', blockType: DocumentBlockRangeType.CODE, startIndex: 0, endIndex: 3 },
+            { blockId: 'callout-1', blockType: DocumentBlockRangeType.CALLOUT, startIndex: 5, endIndex: 8 },
+        ]);
+        expect(getBody()?.paragraphs?.find((paragraph) => paragraph.startIndex === 4)?.paragraphStyle).toBeUndefined();
+        expect(getBody()?.paragraphs?.find((paragraph) => paragraph.paragraphId === 'callout-paragraph')?.paragraphStyle).toEqual({ indentStart: { v: 60 } });
+        expect(selectionManager.getActiveTextRange()?.startOffset).toBe(4);
+
+        await executeBreakLineAndApplyRenderedSelection(selectionManager);
+
+        expect(selectionManager.getActiveTextRange()?.startOffset).toBe(5);
+    });
+
+    it.each<{ name: string; documentFlavor: DocumentFlavor }>([
+        { name: 'modern', documentFlavor: DocumentFlavor.MODERN },
+        { name: 'traditional', documentFlavor: DocumentFlavor.TRADITIONAL },
+    ])('moves the cursor after repeated Enter below a table in $name docs', async ({ documentFlavor }) => {
+        const selectionManager = setupWithTable(documentFlavor);
+        const tableEnd = getBody()?.tables?.[0].endIndex ?? 0;
+        selectionManager.__TEST_ONLY_add([{ startOffset: tableEnd, endOffset: tableEnd, collapsed: true, isActive: true, segmentId: '' }]);
+
+        await executeBreakLineAndApplyRenderedSelection(selectionManager);
+        expect(selectionManager.getActiveTextRange()?.startOffset).toBe(tableEnd + 1);
+
+        await executeBreakLineAndApplyRenderedSelection(selectionManager);
+        expect(selectionManager.getActiveTextRange()?.startOffset).toBe(tableEnd + 2);
+    });
+});
+
+it.each([
+    NamedStyleType.HEADING_1,
+    NamedStyleType.NORMAL_TEXT,
+    NamedStyleType.TITLE,
+    NamedStyleType.SUBTITLE,
+].flatMap((namedStyleType) => [2, 3].map((offset) => ({ namedStyleType, offset }))))(
+    'allows Enter at $offset when a snapshot retains a fold flag on named style $namedStyleType',
+    ({ namedStyleType, offset }) => {
+        const univer = new Univer();
+        const injector = univer.__getInjector();
+        injector.add([IRenderManagerService, { useClass: RenderManagerService }]);
+        univer.registerPlugin(UniverDocsPlugin);
+        injector.add([DocMenuStyleService]);
+        const model = univer.createUnit<IDocumentData, DocumentDataModel>(UniverInstanceType.UNIVER_DOC, {
+            id: 'fold-enter',
+            documentStyle: { documentFlavor: DocumentFlavor.MODERN },
+            body: { dataStream: 'One\rText\r\n', paragraphs: [
+                { paragraphId: 'one', startIndex: 3, headingCollapsed: true, paragraphStyle: { namedStyleType, headingId: 'heading-one' } },
+                { paragraphId: 'text', startIndex: 8 },
+            ] },
+        });
+        try {
+            injector.get(IUniverInstanceService).focusUnit(model.getUnitId());
+            const commands = injector.get(ICommandService);
+            commands.registerCommand(BreakLineCommand);
+            const selections = injector.get(DocSelectionManagerService);
+            selections.__TEST_ONLY_setCurrentSelection({ unitId: model.getUnitId(), subUnitId: model.getUnitId() });
+            selections.__TEST_ONLY_add([{ startOffset: offset, endOffset: offset, collapsed: true, isActive: true }]);
+            expect(commands.syncExecuteCommand(BreakLineCommand.id)).toBe(true);
+            expect(model.getBody()?.dataStream).toBe(offset === 3 ? 'One\r\rText\r\n' : 'On\re\rText\r\n');
+            if (namedStyleType === NamedStyleType.HEADING_1) {
+                expect(model.getBody()?.paragraphs?.some((paragraph) => paragraph.headingCollapsed === true)).toBe(false);
+            }
+        } finally {
+            univer.dispose();
+        }
+    }
+);

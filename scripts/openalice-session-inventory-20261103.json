@@ -1,0 +1,802 @@
+[
+  {
+    "id": "ses_e7318e67bffejNWLsrYMIHBNEd",
+    "title": "Propt all active opencode sessions",
+    "updated": 1793656515773,
+    "created": 1793365318026,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e67831777ffeCUnH6e4aZnK81v",
+    "title": "Dashboard endpoint verification",
+    "updated": 1793656515056,
+    "created": 1793559685257,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e67831817ffe90i9KZn3QTHZBn",
+    "title": "Provider health review",
+    "updated": 1793656514924,
+    "created": 1793559685099,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e678142ffffebiN3EoQsHQU2nV",
+    "title": "Dirty path integrity check",
+    "updated": 1793656514745,
+    "created": 1793559805185,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e67822dbaffeGhaA1q2KJnach9",
+    "title": "Daemon log audit and classification",
+    "updated": 1793656514602,
+    "created": 1793559745095,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e67822d1fffe8O3gBtQFhBsijT",
+    "title": "mac mini health check",
+    "updated": 1793656514481,
+    "created": 1793559745249,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e678143e1ffe7CA2oG8wOsZOC4",
+    "title": "Audit 10k compliance register",
+    "updated": 1793656514357,
+    "created": 1793559804960,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e730b4b1effej4WsQUBWvgnqH6",
+    "title": "System 24/7 plan",
+    "updated": 1793656506638,
+    "created": 1793366209771,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_ef26d1f20ffemRnHXB2ExXFmp4",
+    "title": "Greeting",
+    "updated": 1793656455594,
+    "created": 1791229092063,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e730ad7c5ffehqion8lmHHBNTL",
+    "title": "Work quality assurance",
+    "updated": 1793656437556,
+    "created": 1793366239297,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e7154cea4ffeZMxKXbcsgnMs1R",
+    "title": "ORG-LEAD-ENG",
+    "updated": 1793656436395,
+    "created": 1793394946397,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_f64e6f428ffeXTO0fZq0V2Yt5M",
+    "title": "Parameter count question",
+    "updated": 1793656435364,
+    "created": 1789308505047,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e731e57e6ffeSYOsmGkryxU2qH",
+    "title": "Openlaw session history",
+    "updated": 1793656426977,
+    "created": 1793364961330,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e6d93db5dffeViz3Brii7W0Hpf",
+    "title": "mac mini health check",
+    "updated": 1793656424398,
+    "created": 1793457923235,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e6d9c16f7ffeGW9kmDaT3Fyr2p",
+    "title": "Daemon log audit and classification",
+    "updated": 1793656423857,
+    "created": 1793457383689,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e6d987587ffefgwkAmqcciyAe7",
+    "title": "Greeting",
+    "updated": 1793656423311,
+    "created": 1793457621629,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e6cd4d036ffe1PoOM1ocMuSfsK",
+    "title": "Audit register gate compliance",
+    "updated": 1793656420519,
+    "created": 1793470443466,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e6c9bf72fffeDavEk14Wox90WY",
+    "title": "Git status and log check",
+    "updated": 1793656418574,
+    "created": 1793474169042,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e6e38e7ebffeHsBMpOK4pG9a9F",
+    "title": "mac mini health check",
+    "updated": 1793656418030,
+    "created": 1793447106581,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e6e440b7dffeMxbH9Yu2xUMRuH",
+    "title": "Audit 10k compliance register",
+    "updated": 1793656411947,
+    "created": 1793446376579,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e731acbd7ffe99b8WOJ5Jkzrio",
+    "title": "Orchestrato task",
+    "updated": 1793564883752,
+    "created": 1793365193773,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e732501d7ffey4lyG7KhHXjQNp",
+    "title": "MCP integration",
+    "updated": 1793564647549,
+    "created": 1793364524596,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e72fb56e2ffeDmpMIxoPEYyJiY",
+    "title": "Greeting",
+    "updated": 1793561470535,
+    "created": 1793367255332,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e731bdab9ffeSMYKrS3rR1VG1N",
+    "title": "UI work",
+    "updated": 1793488630234,
+    "created": 1793365124432,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e8da411d1ffeVGuxCNlhvLBD4H",
+    "title": "Protocol health check",
+    "updated": 1793485204687,
+    "created": 1792919989807,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e8dba9b88ffelq0zv13f4zPDfl",
+    "title": "Key acceptance confirmation",
+    "updated": 1793483819870,
+    "created": 1792918512759,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e8dcafc31ffe1xgA7y0uaUbbvj",
+    "title": "Reply request",
+    "updated": 1793483575807,
+    "created": 1792917439438,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e72534e77ffeDosBpGv0V4Uz4k",
+    "title": "Dashboard - Fleet Monitor",
+    "updated": 1793483478592,
+    "created": 1793378267528,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e6e2bb395ffeckg7K8krNraVP2",
+    "title": "Session discovery and history audit",
+    "updated": 1793472261025,
+    "created": 1793447971949,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e6ea1557dffe3vUPlVY5HORYKQ",
+    "title": "Reply exactly ok",
+    "updated": 1793466876017,
+    "created": 1793440262789,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e731bbf56ffela3AXmFjeA51Qu",
+    "title": "Sync work",
+    "updated": 1793466868769,
+    "created": 1793365131449,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e6e337058ffe4mjJ4A5uLfcdwT",
+    "title": "Provider health review",
+    "updated": 1793466866626,
+    "created": 1793447464872,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e8cd95282ffeou2HEWhdX3qhP9",
+    "title": "Request: FINAL_OK",
+    "updated": 1793459142723,
+    "created": 1792933277054,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e727015b6ffeDVIDLelaZVvEnF",
+    "title": "test probe",
+    "updated": 1793459141240,
+    "created": 1793376381518,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e6e4320cfffetPXVM7KGIYkLFF",
+    "title": "Daemon log audit and classification",
+    "updated": 1793459130143,
+    "created": 1793446436657,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e72534efcffeRPqt7MGjpkumkg",
+    "title": "Dashboard - API Server",
+    "updated": 1793459126332,
+    "created": 1793378267397,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e6e354332ffeTyw3Pr4utcpylr",
+    "title": "Git status and log check",
+    "updated": 1793459095201,
+    "created": 1793447345358,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e6e9ed6e0ffe317bICyXpWVOYa",
+    "title": "OK command",
+    "updated": 1793459094753,
+    "created": 1793440426273,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e6ea232c2ffe9O9mEi6d4y2plp",
+    "title": "OK command",
+    "updated": 1793459094743,
+    "created": 1793440206144,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e77068e42ffeVDTa7DChjW78H3",
+    "title": "NIM request",
+    "updated": 1793459094310,
+    "created": 1793299411390,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e6ea81a28ffeymv122hbrMYlLh",
+    "title": "Mempalace STATUS query",
+    "updated": 1793459093527,
+    "created": 1793439819226,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e7321b943ffevkmvdsbo6Dk8IV",
+    "title": "OpenAI configuration",
+    "updated": 1793459092282,
+    "created": 1793364739783,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_f307ee96cffevjl90KaiWw718R",
+    "title": "Connecting to mac ini",
+    "updated": 1793459091084,
+    "created": 1790187738772,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e6e52a6c7ffeAGL7QhVtI13BDr",
+    "title": "OK",
+    "updated": 1793459064759,
+    "created": 1793445419321,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e6e3f563cffeQvby07loUMjPMV",
+    "title": "OK command",
+    "updated": 1793458999084,
+    "created": 1793446685124,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e6e31c243ffeAhK0pDOUOsBzgV",
+    "title": "OK",
+    "updated": 1793458999040,
+    "created": 1793447574973,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e6e52b07cffefHXJIHhr2plBiL",
+    "title": "OK request",
+    "updated": 1793458998993,
+    "created": 1793445416836,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e6e52a776ffe945zusjJJ51uZU",
+    "title": "OK command",
+    "updated": 1793458998808,
+    "created": 1793445419146,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e6dce7d32ffexI3HjAl0pUkOST",
+    "title": "Dashboard endpoint verification",
+    "updated": 1793458998367,
+    "created": 1793454080718,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e6e3cb65effeCEN3QCl2HDS3LU",
+    "title": "Dashboard endpoint verification",
+    "updated": 1793457277098,
+    "created": 1793446857122,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e6e2cb1efffevpiDVw75IkrMs6",
+    "title": "OK",
+    "updated": 1793457275778,
+    "created": 1793447906833,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e6ea5309dffeTJqhDdTw0O3TnM",
+    "title": "Exact OK reply",
+    "updated": 1793455411876,
+    "created": 1793440010084,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e730cb7c8ffe3AXSuBg7yBTRHr",
+    "title": "Configuration required",
+    "updated": 1793455411757,
+    "created": 1793366116410,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e6ea007c5ffeWg6T1tjuv7F1Nr",
+    "title": "Greeting",
+    "updated": 1793455411722,
+    "created": 1793440348221,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e6ea4af58ffe1hoLMDBlLXISIG",
+    "title": "OK command",
+    "updated": 1793455411416,
+    "created": 1793440043178,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e7154cbeaffeeWFEVTbNGY7cAc",
+    "title": "ORG-W-ENG-2",
+    "updated": 1793443582821,
+    "created": 1793394947094,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e7154cf44ffeGIeV1tQUS3p8aA",
+    "title": "ORG-CEO",
+    "updated": 1793443569350,
+    "created": 1793394946238,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e7154cc9dffe2sGxaxOL7nvV8C",
+    "title": "ORG-W-ENG-1",
+    "updated": 1793443542209,
+    "created": 1793394946915,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e7154c9cfffewKpcfptBJmi1iz",
+    "title": "ORG-W-OPS-1",
+    "updated": 1793443070863,
+    "created": 1793394947634,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e7154c8a3ffe24ZJ8BdDN1Y1mH",
+    "title": "ORG-W-OPS-2",
+    "updated": 1793443060124,
+    "created": 1793394947934,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e7154cd53ffemh0cj1oa20XEtB",
+    "title": "ORG-LEAD-OPS",
+    "updated": 1793442993518,
+    "created": 1793394946733,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e7154ca7fffeVQHKN1fktj0JRq",
+    "title": "ORG-W-RSRCH-2",
+    "updated": 1793442986807,
+    "created": 1793394947457,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e8dba6f9cffe2Cb9nZEG7A2TCk",
+    "title": "Prompt instruction enforcement",
+    "updated": 1793442259817,
+    "created": 1792918524003,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e7154cb34ffexACOXvf8jQwEFu",
+    "title": "ORG-W-RSRCH-1",
+    "updated": 1793415067945,
+    "created": 1793394947277,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e73261a3bffemLg2j6lqozeXFP",
+    "title": "Add mcp",
+    "updated": 1793402880074,
+    "created": 1793364452813,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e72534e21ffeGvFXsSnCDMApso",
+    "title": "Dashboard - Config Manager",
+    "updated": 1793401783585,
+    "created": 1793378267615,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e8dba402dffeUaNWoFlYpel5Nb",
+    "title": "Keyword verification",
+    "updated": 1793400643532,
+    "created": 1792918536146,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e72534e4cffeBY41pa1RScRRLD",
+    "title": "Dashboard - Alert Engine",
+    "updated": 1793396669825,
+    "created": 1793378267571,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e7154ce09ffeLNVB7kFag12B6j",
+    "title": "ORG-LEAD-RSRCH",
+    "updated": 1793395855589,
+    "created": 1793394946552,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e72534ecdffe4HxOnXA6SXEGGv",
+    "title": "Dashboard - Web UI",
+    "updated": 1793394876380,
+    "created": 1793378267442,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e72534ea2ffe6XCZ3patjE1KzS",
+    "title": "Dashboard - Metrics Collector",
+    "updated": 1793394876032,
+    "created": 1793378267485,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e73142511ffei0VhzfGyHbQZw5",
+    "title": "Office tasks",
+    "updated": 1793394815854,
+    "created": 1793365629720,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e770894fdffeVWG41o1QESDDfk",
+    "title": "BRIDGE_OK exact reply",
+    "updated": 1793394815381,
+    "created": 1793299278598,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e725d2f12ffesArPotQZFb0Y40",
+    "title": "nvidia test",
+    "updated": 1793394815043,
+    "created": 1793377620207,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e8db9d445ffepfGr1xrCUwHXy7",
+    "title": "OK",
+    "updated": 1793394212335,
+    "created": 1792918563770,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e8db9c633ffeL5vJB7w9WnU4et",
+    "title": "CONTROL OK",
+    "updated": 1793378180961,
+    "created": 1792918567372,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e726bdc79ffeBwCi3A694fGMo7",
+    "title": "post-restart test",
+    "updated": 1793378149546,
+    "created": 1793376658312,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e8dba13a4ffehEnPFY6Sqxe8x0",
+    "title": "Prompt labeling",
+    "updated": 1793376526095,
+    "created": 1792918547547,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e7311cc51ffe4QKrQ250Jc0dNl",
+    "title": "Office - session foreman",
+    "updated": 1793376316051,
+    "created": 1793365783471,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e8dd2818dffeAqHe9LGhHWbUzY",
+    "title": "GLM response",
+    "updated": 1793366110658,
+    "created": 1792916946546,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e738ed581ffeLm6k9x2frinn0C",
+    "title": "Greeting",
+    "updated": 1793366110521,
+    "created": 1793357589118,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_eed23270dffef0YRpAehSQ8xXC",
+    "title": "Hu work status",
+    "updated": 1793366110469,
+    "created": 1791317825779,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_e731bf5a5ffeRQ8otNNeiFFp54",
+    "title": "Trading workflow",
+    "updated": 1793365465804,
+    "created": 1793365117636,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_eed246235ffeXSz3E975pGb6eG",
+    "title": "Greeting",
+    "updated": 1791744729493,
+    "created": 1791317745098,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_eed5bfad7ffexCh16515TdBY9t",
+    "title": "New session - 2026-10-06T19:15:01.544Z",
+    "updated": 1791744609301,
+    "created": 1791314101544,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_ee3c98230ffe8pu8ylw0Oig5Zj",
+    "title": "Greeting",
+    "updated": 1791725847495,
+    "created": 1791474695631,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_eef47aa4dffeM1sficDuUGVx8u",
+    "title": "Greeting message",
+    "updated": 1791716972956,
+    "created": 1791281878450,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_eed0618baffetdU8K4EutjJsBr",
+    "title": "Audit HUD with dosts example",
+    "updated": 1791716770471,
+    "created": 1791319729989,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_eed1cd404ffeCV6G68D4kqniIl",
+    "title": "HUD audit",
+    "updated": 1791716728596,
+    "created": 1791318240252,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_eed18cce6ffesdqcBV6itona7r",
+    "title": "Audit HUD work with other agents",
+    "updated": 1791716727299,
+    "created": 1791318504218,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_edfcfc507ffeZtqsRlfS2eZPRL",
+    "title": "Quick check-in query",
+    "updated": 1791699124350,
+    "created": 1791541394168,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_ee20b7cb1ffeL08uHDFBbcuTA6",
+    "title": "Greeting",
+    "updated": 1791503991897,
+    "created": 1791503926094,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_eed1eb90dffeKUJRsTdWnjKDnW",
+    "title": "Greeting message",
+    "updated": 1791456296826,
+    "created": 1791318116083,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_f02307bd2ffe2emiMi92iNdeYi",
+    "title": "Committing work efficiently",
+    "updated": 1791228226332,
+    "created": 1790964630573,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_efe4be08cffeQOalBAOyjC9Oyh",
+    "title": "Committing on mac mini terminals",
+    "updated": 1791228136935,
+    "created": 1791029944179,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_f0200f991ffeU1nAHk7j7peRGS",
+    "title": "Revive terminal and prompt",
+    "updated": 1791228125842,
+    "created": 1790967744110,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_f305c9e96ffez0kt70E9j1svqd",
+    "title": "Merge all sessions into one",
+    "updated": 1790963230444,
+    "created": 1790189986153,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_f2a229cb5ffe35WVFwiXUV28c2",
+    "title": "Verify mini canonical files before sync",
+    "updated": 1790963168901,
+    "created": 1790294451018,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_f2a7e4f17ffeBFIIbwSb9Cqb3c",
+    "title": "Stop MacBook sync reverting mini model fixes",
+    "updated": 1790963103648,
+    "created": 1790288441576,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  },
+  {
+    "id": "ses_f2fb80dacffeNOIWeaYciot4bm",
+    "title": "OpenAlice Fleet task completion summary",
+    "updated": 1790962940828,
+    "created": 1790200771156,
+    "projectId": "febc79f3a6b989f9d70e7579e2e0855748f74699",
+    "directory": "/Users/aryanagarwal"
+  }
+]

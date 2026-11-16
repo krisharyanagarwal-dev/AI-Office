@@ -1,0 +1,32 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type { IShortcutItem } from '@univerjs/ui';
+import type { IInsertFunctionOperationParams } from '../../commands/operations/insert-function.operation';
+import { whenSheetEditorFocused } from '@univerjs/sheets-ui';
+import { KeyCode, MetaKeys } from '@univerjs/ui';
+import { InsertFunctionOperation } from '../../commands/operations/insert-function.operation';
+
+export const QuickSumShortcut: IShortcutItem<IInsertFunctionOperationParams> = {
+    id: InsertFunctionOperation.id,
+    binding: MetaKeys.ALT | KeyCode.EQUAL,
+    preconditions: whenSheetEditorFocused,
+    mac: MetaKeys.CTRL_COMMAND | MetaKeys.ALT | KeyCode.EQUAL,
+    staticParameters: { value: 'SUM' },
+    description: 'sheets-formula-ui.shortcut.quick-sum',
+    group: '4_sheet-edit',
+    groupTitle: 'sheets-ui.shortcut.sheet-edit',
+};

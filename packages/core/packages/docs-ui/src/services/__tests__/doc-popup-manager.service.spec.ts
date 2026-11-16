@@ -1,0 +1,740 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type { DocumentDataModel, IDocumentData } from '@univerjs/core';
+import type { IBoundRectNoAngle, RenderUnit } from '@univerjs/engine-render';
+import type { IPopup } from '@univerjs/ui';
+import {
+    BooleanNumber,
+    DocumentFlavor,
+    EventSubject,
+    ICommandService,
+    Injector,
+    IUniverInstanceService,
+    RANGE_DIRECTION,
+    Univer,
+    UniverInstanceType,
+} from '@univerjs/core';
+import { DocLayoutExecutorService, DocSkeletonManagerService, RichTextEditingMutation } from '@univerjs/docs';
+import {
+    CanvasColorService,
+    Documents,
+    ICanvasColorService,
+    IRenderManagerService,
+    Rect,
+    RenderManagerService,
+    Viewport,
+} from '@univerjs/engine-render';
+import { CanvasPopupService, ICanvasPopupService } from '@univerjs/ui';
+import { animationFrameScheduler, firstValueFrom, Subject, throttleTime } from 'rxjs';
+import { describe, expect, it, vi } from 'vitest';
+import { VIEWPORT_KEY } from '../../basics/docs-view-key';
+import { SetDocZoomRatioOperation } from '../../commands/operations/set-doc-zoom-ratio.operation';
+import {
+    DocCanvasPopupLayoutInteractionController,
+} from '../../controllers/render-controllers/doc-canvas-popup-layout-interaction.controller';
+import { calcDocGlyphPosition } from '../doc-event-manager.service';
+import { DocLayoutInteractionService } from '../doc-layout-interaction.service';
+import {
+    calcDocRangePositions,
+    DocCanvasPopManagerService,
+    transformBound2OffsetBound,
+    transformOffset2Bound,
+    transformPosition2Offset,
+} from '../doc-popup-manager.service';
+import { NodePositionConvertToCursor } from '../selection/convert-text-range';
+
+describe('popup anchors with real document layout', () => {
+    it('lets an object toolbar follow layout transforms without holding a document layout lock', async () => {
+        const context = new Proxy({}, { get: () => () => {} });
+        vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(context as never);
+        const univer = new Univer();
+        try {
+            const injector = univer.__getInjector();
+            injector.add([IRenderManagerService, { useClass: RenderManagerService }]);
+            injector.add([ICanvasColorService, { useClass: CanvasColorService }]);
+            injector.add([ICanvasPopupService, { useClass: CanvasPopupService }]);
+            injector.add([DocCanvasPopManagerService]);
+            const model = univer.createUnit<IDocumentData, DocumentDataModel>(UniverInstanceType.UNIVER_DOC, {
+                id: 'object-popup-test',
+                body: { dataStream: '\r\n' },
+            });
+            const render = injector.get(IRenderManagerService).createRender(model.getUnitId()) as RenderUnit;
+            render.deactivate();
+            render.engine.resizeBySize(300, 400);
+            const canvas = render.engine.getCanvasElement()!;
+            canvas.style.width = '300px';
+            vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 300, 400));
+            render.addRenderDependencies([[DocLayoutInteractionService], [DocCanvasPopupLayoutInteractionController]]);
+            render.with(DocCanvasPopupLayoutInteractionController);
+            const interaction = render.with(DocLayoutInteractionService);
+            const shape = new Rect('note-image', { left: 20, top: 300, width: 100, height: 40 });
+            render.scene.addObject(shape);
+            const popupManager = injector.get(DocCanvasPopManagerService);
+            const popup = popupManager.attachPopupToObject(shape, {
+                componentKey: 'object-toolbar',
+                requiresStableLayout: false,
+            }, model.getUnitId());
+            const popupService = injector.get(ICanvasPopupService);
+            const anchors: unknown[] = [];
+            let completed = false;
+            const subscription = popupService.popups[0][1].anchorRect$.subscribe({
+                next: (anchor) => anchors.push(anchor),
+                complete: () => { completed = true; },
+            });
+            expect(interaction.isActive).toBe(false);
+            shape.transformByState({ top: 280, width: 150, height: 60 });
+            await vi.waitFor(() => expect(anchors[anchors.length - 1]).toMatchObject({ left: 20, right: 170, top: 280, bottom: 340 }));
+            expect(interaction.isActive).toBe(false);
+            popup.dispose();
+            expect(completed).toBe(true);
+            const count = anchors.length;
+            shape.transformByState({ top: 260 });
+            expect(anchors).toHaveLength(count);
+            expect(popupService.popups).toHaveLength(0);
+            subscription.unsubscribe();
+        } finally {
+            univer.dispose();
+            vi.restoreAllMocks();
+        }
+    });
+
+    it.each([
+        { startOffset: 1, length: 0 },
+        { startOffset: 1, length: 1 },
+        { startOffset: 1, length: 3 },
+        { startOffset: 5, length: 0 },
+        { startOffset: 6, length: 0 },
+    ])('anchors a $length-character range at $startOffset, including paragraph-end and empty carets', async ({ startOffset, length }) => {
+        const context = new Proxy({
+            font: '',
+            webkitBackingStorePixelRatio: 1,
+            measureText: (text: string) => ({
+                width: text.length * 8,
+                actualBoundingBoxAscent: 8,
+                actualBoundingBoxDescent: 2,
+                fontBoundingBoxAscent: 8,
+                fontBoundingBoxDescent: 2,
+            }),
+        }, { get: (target, key) => key in target ? Reflect.get(target, key) : () => {} });
+        vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(context as never);
+        const univer = new Univer();
+        try {
+            const injector = univer.__getInjector();
+            injector.add([IRenderManagerService, { useClass: RenderManagerService }]);
+            injector.add([ICanvasColorService, { useClass: CanvasColorService }]);
+            injector.add([DocLayoutExecutorService]);
+            const model = univer.createUnit<IDocumentData, DocumentDataModel>(UniverInstanceType.UNIVER_DOC, {
+                id: 'popup-anchor-test',
+                body: {
+                    dataStream: 'A目CDZ\r\r\n',
+                    paragraphs: [
+                        { startIndex: 5, paragraphId: 'paragraph-1' },
+                        { startIndex: 6, paragraphId: 'paragraph-2' },
+                    ],
+                    sectionBreaks: [{ startIndex: 7, sectionId: 'body' }],
+                },
+                documentStyle: {
+                    documentFlavor: DocumentFlavor.TRADITIONAL,
+                    autoHyphenation: BooleanNumber.FALSE,
+                    pageSize: { width: 300, height: 400 },
+                    marginTop: 20,
+                    marginBottom: 20,
+                    marginLeft: 20,
+                    marginRight: 20,
+                },
+            });
+            const render = injector.get(IRenderManagerService).createRender(model.getUnitId()) as RenderUnit;
+            render.deactivate();
+            render.engine.resizeBySize(300, 400);
+            const canvas = render.engine.getCanvasElement()!;
+            vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 300, 400));
+            render.addRenderDependencies([[DocSkeletonManagerService]]);
+            const skeleton = render.with(DocSkeletonManagerService).getSkeleton();
+            const documents = new Documents('popup-anchor-document', skeleton);
+            render.mainComponent = documents;
+            render.scene.addObject(documents);
+            const bounds = calcDocRangePositions({ startOffset, endOffset: startOffset + length, collapsed: length === 0 }, render)!;
+            injector.add([ICanvasPopupService, { useClass: CanvasPopupService }]);
+            injector.add([DocCanvasPopManagerService]);
+            const pendingRange = { startOffset: 1000, endOffset: 1001, collapsed: false };
+            const pendingPopup = injector.get(DocCanvasPopManagerService).attachPopupToRange(pendingRange, {
+                componentKey: 'pending-selection-toolbar',
+                rangeAnchor: 'selection-end',
+                requiresStableLayout: false,
+            }, model.getUnitId());
+            const popupService = injector.get(ICanvasPopupService);
+            expect(popupService.popups).toHaveLength(0);
+            pendingRange.startOffset = 1;
+            pendingRange.endOffset = 2;
+            skeleton.calculate();
+            expect(popupService.popups).toHaveLength(1);
+            expect(popupService.popups[0][1].anchorRect).toEqual(expect.objectContaining({ right: expect.any(Number) }));
+            pendingRange.startOffset = 1000;
+            pendingRange.endOffset = 1001;
+            skeleton.calculate();
+            expect(popupService.popups).toHaveLength(0);
+            pendingPopup.dispose();
+            const lastGlyph = skeleton.findNodeByCharIndex(startOffset + Math.max(0, length - 1))!;
+            const lastGlyphBounds = calcDocGlyphPosition(lastGlyph, documents, skeleton)!;
+            expect(bounds).toHaveLength(1);
+            if (length === 0) {
+                expect(bounds[0].right).toBe(bounds[0].left);
+                expect(bounds[0].left).toBeCloseTo(lastGlyphBounds.left);
+            } else {
+                expect(bounds[0].right).toBeCloseTo(lastGlyphBounds.right);
+                expect(bounds[0].right).toBeGreaterThan(bounds[0].left);
+            }
+
+            const viewport = new Viewport(VIEWPORT_KEY.VIEW_MAIN, render.scene);
+            const popup = injector.get(DocCanvasPopManagerService).attachPopupToRange({
+                startOffset,
+                endOffset: startOffset + length,
+                collapsed: length === 0,
+            }, { componentKey: 'zoom-range-popup', requiresStableLayout: false }, model.getUnitId());
+            const anchors: IBoundRectNoAngle[] = [];
+            const subscription = popupService.popups[0][1].anchorRect$.pipe(
+                throttleTime(0, animationFrameScheduler)
+            ).subscribe((anchor) => anchors.push(anchor));
+            const exclusions: IBoundRectNoAngle[][] = [];
+            const exclusionSubscription = popupService.popups[0][1].excludeRects$!.pipe(
+                throttleTime(0, animationFrameScheduler)
+            ).subscribe((bounds) => exclusions.push(bounds));
+            render.scene.scale(0.7, 0.7);
+            documents.translate(240, 35);
+            await vi.waitFor(() => expect(anchors[anchors.length - 1].left)
+                .toBeCloseTo((bounds[0].left + 240 - viewport.viewportScrollX) * 0.7));
+            const after = anchors[anchors.length - 1];
+            expect(after.left).toBeCloseTo((bounds[0].left + 240 - viewport.viewportScrollX) * 0.7);
+            expect(after.right).toBeCloseTo((bounds[0].right + 240 - viewport.viewportScrollX) * 0.7);
+            expect(after.top).toBeCloseTo((bounds[0].top + 35 - viewport.viewportScrollY) * 0.7);
+            expect(after.bottom).toBeCloseTo((bounds[0].bottom + 35 - viewport.viewportScrollY) * 0.7);
+            await vi.waitFor(() => expect(exclusions[exclusions.length - 1][0]).toEqual(after));
+            popup.dispose();
+            const count = anchors.length;
+            documents.translate(300, 50);
+            expect(anchors).toHaveLength(count);
+            subscription.unsubscribe();
+            exclusionSubscription.unsubscribe();
+        } finally {
+            univer.dispose();
+            vi.restoreAllMocks();
+        }
+    });
+});
+
+class TestCanvasPopupService {
+    activePopupId = '';
+    readonly popups = new Map<string, IPopup>();
+    readonly removedIds: string[] = [];
+    private _nextId = 1;
+
+    addPopup(param: IPopup) {
+        const id = `popup-${this._nextId}`;
+        this._nextId++;
+        this.activePopupId = id;
+        this.popups.set(id, param);
+        return id;
+    }
+
+    removePopup(id: string) {
+        this.removedIds.push(id);
+        this.popups.delete(id);
+        if (this.activePopupId === id) {
+            this.activePopupId = '';
+        }
+    }
+}
+
+class TestRenderManagerService {
+    scale = 1;
+    hasViewport = true;
+    throwOnGetOffsetConfig = false;
+    viewportScrollX = 0;
+    viewportScrollY = 0;
+    isMainScene: boolean | undefined = true;
+    canvasElement: { getBoundingClientRect: () => { left: number; top: number; width: number }; style: { width: string } } | null = {
+        getBoundingClientRect: () => ({ left: 10, top: 20, width: 1000 }),
+        style: { width: '1000px' },
+    };
+
+    popupInjector = new Injector();
+    scopedPopupService = new TestCanvasPopupService();
+    getInjector = vi.fn(() => this.popupInjector);
+    readonly onTransformChange$ = new EventSubject();
+    readonly onDocumentTransformChange$ = new EventSubject();
+    readonly onScrollAfter$ = new EventSubject();
+    readonly afterRender$ = new Subject();
+
+    constructor() {
+        this.popupInjector.add([ICanvasPopupService, { useValue: this.scopedPopupService as never }]);
+    }
+
+    getRenderUnitById(unitId: string) {
+        if (unitId === 'missing-doc') {
+            return undefined;
+        }
+        const skeleton = {
+            findNodePositionByCharIndex: (index: number) => ({ glyph: index }),
+        };
+
+        return {
+            unitId,
+            isMainScene: this.isMainScene,
+            engine: {
+                getCanvasElement: () => this.canvasElement,
+            },
+            getInjector: this.getInjector,
+            mainComponent: {
+                onTransformChange$: this.onDocumentTransformChange$,
+                getOffsetConfig: () => {
+                    if (this.throwOnGetOffsetConfig) {
+                        throw new TypeError("Cannot read properties of null (reading 'clone')");
+                    }
+
+                    return {
+                        docsLeft: 0,
+                        docsTop: 0,
+                    };
+                },
+            },
+            scene: this.getScene(),
+            with: (token: unknown) => {
+                if (token === DocSkeletonManagerService) {
+                    return {
+                        getSkeleton: () => skeleton,
+                    };
+                }
+                throw new Error(`Unexpected render dependency: ${String(token)}`);
+            },
+        };
+    }
+
+    getScene() {
+        return {
+            getAncestorScale: () => ({ scaleX: this.scale, scaleY: this.scale }),
+            getViewport: () => this.hasViewport
+                ? ({
+                    onScrollAfter$: this.onScrollAfter$,
+                    viewportScrollX: this.viewportScrollX,
+                    viewportScrollY: this.viewportScrollY,
+                })
+                : undefined,
+            onTransformChange$: this.onTransformChange$,
+            afterRender$: this.afterRender$,
+        };
+    }
+}
+
+class TestUniverInstanceService {
+    embeddedUnitIds = new Set<string>();
+
+    getUnit(unitId: string) {
+        return unitId === 'missing-doc-data' ? undefined : {};
+    }
+
+    getUnitCreateOptions(unitId: string) {
+        return this.embeddedUnitIds.has(unitId) ? { embeddedRender: true } : undefined;
+    }
+}
+
+class TestCommandService {
+    private readonly _listeners: Array<(commandInfo: { id: string; params?: unknown }) => void> = [];
+
+    onCommandExecuted(listener: (commandInfo: { id: string; params?: unknown }) => void) {
+        this._listeners.push(listener);
+        return {
+            dispose: () => {
+                const index = this._listeners.indexOf(listener);
+                if (index > -1) {
+                    this._listeners.splice(index, 1);
+                }
+            },
+        };
+    }
+
+    emit(commandId: string, params?: unknown) {
+        for (const listener of this._listeners) {
+            listener({ id: commandId, params });
+        }
+    }
+}
+
+function createService() {
+    const injector = new Injector();
+    injector.add([ICanvasPopupService, { useClass: TestCanvasPopupService as never }]);
+    injector.add([IRenderManagerService, { useClass: TestRenderManagerService as never }]);
+    injector.add([IUniverInstanceService, { useClass: TestUniverInstanceService as never }]);
+    injector.add([ICommandService, { useClass: TestCommandService as never }]);
+    injector.add([DocCanvasPopManagerService]);
+
+    return {
+        injector,
+        service: injector.get(DocCanvasPopManagerService),
+        popupService: injector.get(ICanvasPopupService) as unknown as TestCanvasPopupService,
+        renderManagerService: injector.get(IRenderManagerService) as unknown as TestRenderManagerService,
+        univerInstanceService: injector.get(IUniverInstanceService) as unknown as TestUniverInstanceService,
+        commandService: injector.get(ICommandService) as unknown as TestCommandService,
+    };
+}
+
+describe('DocCanvasPopManagerService', () => {
+    it('keeps passive hover popups mounted without pausing layout or releasing an active menu lock', () => {
+        const { injector, service, popupService } = createService();
+        injector.add([DocLayoutInteractionService]);
+        injector.add([DocCanvasPopupLayoutInteractionController, {
+            useFactory: () => injector.createInstance(DocCanvasPopupLayoutInteractionController, { unitId: 'doc-1' }),
+        }]);
+        injector.get(DocCanvasPopupLayoutInteractionController);
+        const interaction = injector.get(DocLayoutInteractionService);
+        const rect = { left: 10, right: 110, top: 20, bottom: 40 };
+        const hover = service.attachPopupToRect(rect, {
+            componentKey: 'passive-hover',
+            requiresStableLayout: false,
+        }, 'doc-1');
+
+        expect(popupService.popups.size).toBe(1);
+        expect(interaction.isActive).toBe(false);
+        const menu = service.attachPopupToRect(rect, { componentKey: 'active-menu' }, 'doc-1');
+        expect(interaction.isActive).toBe(true);
+        hover.dispose();
+        hover.dispose();
+        expect(interaction.isActive).toBe(true);
+        menu.dispose();
+        expect(interaction.isActive).toBe(false);
+        injector.dispose();
+    });
+
+    it('converts between document bounds and viewport offsets with scroll and scale', () => {
+        const renderManagerService = new TestRenderManagerService();
+        renderManagerService.scale = 2;
+        renderManagerService.viewportScrollX = 25;
+        renderManagerService.viewportScrollY = 40;
+        const scene = renderManagerService.getScene();
+
+        expect(transformPosition2Offset(125, 90, scene as never)).toEqual({ x: 200, y: 100 });
+        expect(transformOffset2Bound(200, 100, scene as never)).toEqual({ x: 125, y: 90 });
+        expect(transformBound2OffsetBound({ left: 125, right: 225, top: 90, bottom: 140 }, scene as never)).toEqual({
+            left: 200,
+            right: 400,
+            top: 100,
+            bottom: 200,
+        });
+    });
+
+    it('keeps document coordinates unchanged when the render scene has no viewport', () => {
+        const renderManagerService = new TestRenderManagerService();
+        renderManagerService.hasViewport = false;
+        const scene = renderManagerService.getScene();
+
+        expect(transformPosition2Offset(125, 90, scene as never)).toEqual({ x: 125, y: 90 });
+        expect(transformOffset2Bound(200, 100, scene as never)).toEqual({ x: 200, y: 100 });
+    });
+
+    it('refreshes rect popup positions after scene scale changes', async () => {
+        const { service, popupService, renderManagerService } = createService();
+
+        service.attachPopupToRect({ left: 10, right: 110, top: 20, bottom: 40 }, { componentKey: 'test' }, 'doc-1');
+        const popup = popupService.popups.get('popup-1');
+
+        expect(popup?.anchorRect).toEqual({ left: 20, right: 120, top: 40, bottom: 60 });
+
+        renderManagerService.scale = 1.5;
+        renderManagerService.onTransformChange$.emitEvent({} as never);
+
+        expect(await firstValueFrom(popup!.anchorRect$)).toEqual({ left: 25, right: 175, top: 50, bottom: 80 });
+    });
+
+    it('keeps main-scene popups global and routes embedded render popups to the render scope', () => {
+        const { service, popupService, renderManagerService } = createService();
+
+        service.attachPopupToRect({ left: 10, right: 110, top: 20, bottom: 40 }, { componentKey: 'normal-popup' }, 'doc-1');
+        expect(popupService.popups.get('popup-1')?.connectorInjector).toBeUndefined();
+        expect(renderManagerService.getInjector).not.toHaveBeenCalled();
+
+        renderManagerService.isMainScene = false;
+        service.attachPopupToRect({ left: 10, right: 110, top: 20, bottom: 40 }, { componentKey: 'embed-popup' }, 'doc-1');
+        expect(popupService.popups.size).toBe(1);
+        expect(renderManagerService.scopedPopupService.popups.get('popup-1')?.componentKey).toBe('embed-popup');
+        expect(renderManagerService.scopedPopupService.popups.get('popup-1')?.connectorInjector).toBe(renderManagerService.popupInjector);
+        expect(renderManagerService.getInjector).toHaveBeenCalledTimes(1);
+    });
+
+    it('publishes popup ownership until the last popup for a document is disposed', () => {
+        const { service } = createService();
+        const popupUnits: string[][] = [];
+        const subscription = service.popupUnits$.subscribe((units) => {
+            popupUnits.push(Array.from(units).sort());
+        });
+
+        const first = service.attachPopupToRect(
+            { left: 10, right: 110, top: 20, bottom: 40 },
+            { componentKey: 'first-popup' },
+            'doc-1'
+        );
+        const second = service.attachPopupToRect(
+            { left: 10, right: 110, top: 20, bottom: 40 },
+            { componentKey: 'second-popup' },
+            'doc-1'
+        );
+        const other = service.attachPopupToRect(
+            { left: 10, right: 110, top: 20, bottom: 40 },
+            { componentKey: 'other-popup' },
+            'doc-2'
+        );
+
+        first.dispose();
+        expect(popupUnits.at(-1)).toEqual(['doc-1', 'doc-2']);
+        second.dispose();
+        expect(popupUnits.at(-1)).toEqual(['doc-2']);
+        other.dispose();
+        expect(popupUnits.at(-1)).toEqual([]);
+
+        subscription.unsubscribe();
+    });
+
+    it('uses embedded unit creation metadata when the render has no scene ownership flag', () => {
+        const { service, popupService, renderManagerService, univerInstanceService } = createService();
+        renderManagerService.isMainScene = undefined;
+        univerInstanceService.embeddedUnitIds.add('doc-1');
+
+        service.attachPopupToRect({ left: 10, right: 110, top: 20, bottom: 40 }, { componentKey: 'embed-popup' }, 'doc-1');
+
+        expect(popupService.popups.size).toBe(0);
+        expect(renderManagerService.scopedPopupService.popups.get('popup-1')?.componentKey).toBe('embed-popup');
+    });
+
+    it('refreshes business-owned rect anchors only when explicitly notified after paint', async () => {
+        const { service, popupService, renderManagerService, commandService } = createService();
+        const rect = { left: 10, right: 110, top: 20, bottom: 40 };
+
+        const positionChanges$ = new Subject<void>();
+        const disposable = service.attachPopupToRect(() => rect, { componentKey: 'dynamic-rect', positionChanges$ }, 'doc-1');
+        const popup = popupService.popups.get('popup-1');
+        const anchorRect$ = popup!.anchorRect$;
+        const anchors: unknown[] = [];
+        const subscription = anchorRect$.subscribe((anchor) => anchors.push(anchor));
+
+        renderManagerService.viewportScrollX = 20;
+        renderManagerService.viewportScrollY = 30;
+        renderManagerService.onScrollAfter$.emitEvent({} as never);
+        await vi.waitFor(() => expect(anchors[anchors.length - 1]).toEqual({ left: 0, right: 100, top: 10, bottom: 30 }));
+
+        rect.left = 30;
+        rect.right = 130;
+        commandService.emit(RichTextEditingMutation.id);
+        await vi.waitFor(() => expect(anchors[anchors.length - 1]).toEqual({ left: 20, right: 120, top: 10, bottom: 30 }));
+
+        rect.left = 60;
+        rect.right = 160;
+        renderManagerService.afterRender$.next(null);
+        await new Promise(requestAnimationFrame);
+        await new Promise(requestAnimationFrame);
+        expect(anchors).toHaveLength(3);
+        positionChanges$.next();
+        await vi.waitFor(() => expect(anchors[anchors.length - 1]).toEqual({ left: 50, right: 150, top: 10, bottom: 30 }));
+        expect(anchors).toHaveLength(4);
+        positionChanges$.next();
+        positionChanges$.next();
+        await new Promise(requestAnimationFrame);
+        await new Promise(requestAnimationFrame);
+        expect(anchors).toHaveLength(4);
+        disposable.dispose();
+        rect.left = 90;
+        positionChanges$.next();
+        await new Promise(requestAnimationFrame);
+        await new Promise(requestAnimationFrame);
+        expect(anchors[anchors.length - 1]).toEqual({ left: 50, right: 150, top: 10, bottom: 30 });
+        expect(anchors).toHaveLength(4);
+        subscription.unsubscribe();
+    });
+
+    it('does not refresh rect popup anchors for rich text changes from another document', async () => {
+        const { service, popupService, commandService } = createService();
+        const rect = { left: 10, right: 110, top: 20, bottom: 40 };
+        const getRect = vi.fn(() => rect);
+
+        service.attachPopupToRect(getRect, { componentKey: 'dynamic-rect' }, 'doc-1');
+        const popup = popupService.popups.get('popup-1');
+
+        rect.left = 30;
+        rect.right = 130;
+        commandService.emit(RichTextEditingMutation.id, { unitId: 'slide-shape-editor' });
+
+        expect(getRect).toHaveBeenCalledTimes(1);
+        expect(await firstValueFrom(popup!.anchorRect$)).toEqual({ left: 20, right: 120, top: 40, bottom: 60 });
+    });
+
+    it('keeps the last rect popup anchor when a stale dynamic rect throws during refresh', async () => {
+        const { service, popupService, commandService } = createService();
+        let stale = false;
+        const getRect = vi.fn(() => {
+            if (stale) {
+                throw new TypeError('Cannot read properties of null (reading clone)');
+            }
+
+            return { left: 10, right: 110, top: 20, bottom: 40 };
+        });
+
+        service.attachPopupToRect(getRect, { componentKey: 'stale-dynamic-rect' }, 'doc-1');
+        const popup = popupService.popups.get('popup-1');
+
+        stale = true;
+
+        expect(() => commandService.emit(RichTextEditingMutation.id, { unitId: 'doc-1' })).not.toThrow();
+        expect(await firstValueFrom(popup!.anchorRect$)).toEqual({ left: 20, right: 120, top: 40, bottom: 60 });
+    });
+
+    it('ignores stale rect popup updates after the render canvas is released', async () => {
+        const { service, popupService, renderManagerService, commandService } = createService();
+
+        service.attachPopupToRect({ left: 10, right: 110, top: 20, bottom: 40 }, { componentKey: 'stale-rect' }, 'doc-1');
+        const popup = popupService.popups.get('popup-1');
+
+        renderManagerService.canvasElement = null;
+
+        expect(() => commandService.emit(RichTextEditingMutation.id)).not.toThrow();
+        expect(await firstValueFrom(popup!.anchorRect$)).toEqual({ left: 20, right: 120, top: 40, bottom: 60 });
+    });
+
+    it('updates object anchored popups after zoom commands and removes popup on dispose', async () => {
+        const { service, popupService, commandService } = createService();
+        const targetObject = new Rect('popup-target', { left: 30, top: 40, width: 50, height: 60 });
+
+        const disposable = service.attachPopupToObject(targetObject, { componentKey: 'object-menu' }, 'doc-1');
+        const popup = popupService.popups.get('popup-1');
+        expect(popup?.anchorRect).toEqual({ left: 40, right: 90, top: 60, bottom: 120 });
+        expect(disposable.canDispose()).toBe(false);
+
+        targetObject.transformByState({ left: 60, top: 80 });
+        commandService.emit(SetDocZoomRatioOperation.id);
+        expect(await firstValueFrom(popup!.anchorRect$)).toEqual({ left: 70, right: 120, top: 100, bottom: 160 });
+
+        popupService.activePopupId = 'another-popup';
+        expect(disposable.canDispose()).toBe(true);
+        disposable.dispose();
+        expect(popupService.removedIds).toEqual(['popup-1']);
+        expect(popupService.popups.has('popup-1')).toBe(false);
+    });
+
+    it('reports missing renders when a popup cannot be anchored', () => {
+        const { service } = createService();
+
+        expect(() => service.attachPopupToRect({ left: 0, right: 1, top: 0, bottom: 1 }, { componentKey: 'missing' }, 'missing-doc'))
+            .toThrow('Current render not found, unitId: missing-doc');
+    });
+
+    it('reports missing documents and renders before attaching range popups', () => {
+        const { service } = createService();
+        const range = { startOffset: 0, endOffset: 1, collapsed: false };
+
+        expect(() => service.attachPopupToRange(range, { componentKey: 'missing-doc-data' }, 'missing-doc-data'))
+            .toThrow('Document not found, unitId: missing-doc-data');
+        expect(() => service.attachPopupToRange(range, { componentKey: 'missing-render' }, 'missing-doc'))
+            .toThrow('Current render not found, unitId: missing-doc');
+    });
+
+    it('anchors range popups to text bounds and updates them after rich text changes', async () => {
+        const { service, popupService, commandService } = createService();
+        let borderBoxPointGroup = [
+            [{ x: 10, y: 10 }, { x: 40, y: 10 }, { x: 40, y: 20 }, { x: 10, y: 20 }],
+            [{ x: 12, y: 30 }, { x: 70, y: 30 }, { x: 70, y: 40 }, { x: 12, y: 40 }],
+        ];
+        const rangeSpy = vi.spyOn(NodePositionConvertToCursor.prototype, 'getRangePointData').mockImplementation(() => ({
+            borderBoxPointGroup,
+        }) as never);
+        const emittedAnchors: unknown[] = [];
+
+        const disposable = service.attachPopupToRange(
+            { startOffset: 0, endOffset: 4, collapsed: false },
+            { componentKey: 'range-menu', direction: 'top', multipleDirection: 'bottom' },
+            'doc-1'
+        );
+        const popup = popupService.popups.get('popup-1');
+        const anchorSubscription = popup?.anchorRect$?.subscribe((anchor) => {
+            emittedAnchors.push(anchor);
+        });
+
+        expect(popup?.anchorRect).toEqual({ left: 20, right: 50, top: 30, bottom: 40 });
+        expect(popup?.excludeRects).toEqual([
+            { left: 20, right: 50, top: 30, bottom: 40 },
+            { left: 22, right: 80, top: 50, bottom: 60 },
+        ]);
+        expect(popup?.direction).toBe('bottom');
+        expect(emittedAnchors.at(-1)).toEqual({ left: 20, right: 50, top: 30, bottom: 40 });
+
+        borderBoxPointGroup = [
+            [{ x: 20, y: 60 }, { x: 90, y: 60 }, { x: 90, y: 80 }, { x: 20, y: 80 }],
+        ];
+        commandService.emit(RichTextEditingMutation.id, { unitId: 'doc-1' });
+
+        await vi.waitFor(() => expect(emittedAnchors.at(-1)).toEqual({ left: 30, right: 100, top: 80, bottom: 100 }));
+
+        anchorSubscription?.unsubscribe();
+        disposable.dispose();
+        rangeSpy.mockRestore();
+        expect(popupService.removedIds).toContain('popup-1');
+    });
+
+    it.each([RANGE_DIRECTION.FORWARD, RANGE_DIRECTION.BACKWARD])('anchors at the %s selection focus while preserving all exclusion bounds', (direction) => {
+        const { service, popupService } = createService();
+        const rangeSpy = vi.spyOn(NodePositionConvertToCursor.prototype, 'getRangePointData').mockReturnValue({
+            borderBoxPointGroup: [
+                [{ x: 10, y: 10 }, { x: 40, y: 10 }, { x: 40, y: 20 }, { x: 10, y: 20 }],
+                [{ x: 12, y: 30 }, { x: 70, y: 30 }, { x: 70, y: 40 }, { x: 12, y: 40 }],
+            ],
+        } as never);
+        const disposable = service.attachPopupToRange(
+            { startOffset: 0, endOffset: 4, collapsed: false, direction },
+            { componentKey: 'focus-menu', direction: 'top-left', rangeAnchor: 'selection-end' },
+            'doc-1'
+        );
+        const popup = popupService.popups.get('popup-1');
+        expect(popup?.anchorRect).toEqual(direction === 'backward'
+            ? { left: 20, right: 20, top: 30, bottom: 40 }
+            : { left: 80, right: 80, top: 50, bottom: 60 });
+        expect(popup?.excludeRects).toHaveLength(2);
+        disposable.dispose();
+        rangeSpy.mockRestore();
+    });
+
+    it('keeps the last range popup anchor when its render is stale during refresh', () => {
+        const { service, popupService, renderManagerService, commandService } = createService();
+        const rangeSpy = vi.spyOn(NodePositionConvertToCursor.prototype, 'getRangePointData').mockImplementation(() => ({
+            borderBoxPointGroup: [
+                [{ x: 10, y: 10 }, { x: 40, y: 10 }, { x: 40, y: 20 }, { x: 10, y: 20 }],
+            ],
+        }) as never);
+
+        const disposable = service.attachPopupToRange(
+            { startOffset: 0, endOffset: 4, collapsed: false },
+            { componentKey: 'stale-range' },
+            'doc-1'
+        );
+        const popup = popupService.popups.get('popup-1');
+        const emittedAnchors: unknown[] = [];
+        const anchorSubscription = popup?.anchorRect$?.subscribe((anchor) => emittedAnchors.push(anchor));
+
+        renderManagerService.throwOnGetOffsetConfig = true;
+
+        expect(() => commandService.emit(RichTextEditingMutation.id, { unitId: 'doc-1' })).not.toThrow();
+        expect(emittedAnchors.at(-1)).toEqual({ left: 20, right: 50, top: 30, bottom: 40 });
+
+        anchorSubscription?.unsubscribe();
+        disposable.dispose();
+        rangeSpy.mockRestore();
+    });
+});

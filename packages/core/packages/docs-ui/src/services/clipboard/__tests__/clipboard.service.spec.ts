@@ -1,0 +1,2364 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type { IDocumentBody, IDocumentData } from '@univerjs/core';
+import type { IRichTextEditingMutationParams } from '@univerjs/docs';
+import type { IDocImage } from '@univerjs/docs-drawing';
+import type { IRectRangeWithStyle, ITextRangeWithStyle } from '@univerjs/engine-render';
+import {
+    BooleanNumber,
+    createInternalEditorID,
+    CustomDecorationType,
+    CustomRangeType,
+    DataStreamTreeTokenType,
+    DOC_RANGE_TYPE,
+    DOCS_COMMENT_EDITOR_UNIT_ID_KEY,
+    DocumentBlockRangeType,
+    DocumentDataModel,
+    DrawingTypeEnum,
+    EDITOR_ACTIVATED,
+    FOCUSING_SHAPE_TEXT_EDITOR,
+    ICommandService,
+    IContextService,
+    ImageSourceType,
+    IPermissionService,
+    IUndoRedoService,
+    IUniverInstanceService,
+    ObjectRelativeFromH,
+    ObjectRelativeFromV,
+    PositionedObjectLayoutType,
+    RedoCommand,
+    SliceBodyType,
+    Tools,
+    UndoCommand,
+    Univer,
+    UniverInstanceType,
+    validateDocBodyStructure,
+    validateDocumentStructure,
+} from '@univerjs/core';
+import {
+    DocSelectionManagerService,
+    getDocumentParagraphPermissionObjectId,
+    RichTextEditingMutation,
+    setDocumentPermissionValue,
+    SetTextSelectionsOperation,
+    UniverDocsPlugin,
+} from '@univerjs/docs';
+import { IRenderManagerService, RenderManagerService } from '@univerjs/engine-render';
+import { UnitAction } from '@univerjs/protocol';
+import { IClipboardInterfaceService } from '@univerjs/ui';
+import { firstValueFrom } from 'rxjs';
+import { describe, expect, it, vi } from 'vitest';
+import type { IDocClipboardPasteAdapter } from '../doc-paste-mutation-adapter.service';
+import { createCommandTestBed } from '../../../commands/commands/__tests__/create-command-test-bed';
+import { CutContentCommand, InnerPasteCommand } from '../../../commands/commands/clipboard.inner.command';
+import { DocMenuStyleService } from '../../doc-menu-style.service';
+import {
+    convertClipboardHtmlToDocumentData,
+    DocClipboardService,
+    getTableClipboardBodySlice,
+    IDocClipboardService,
+    removeClipboardHtmlImages,
+} from '../clipboard.service';
+import {
+    DocClipboardPasteAdapterService,
+    IDocClipboardPasteAdapterService,
+} from '../doc-paste-mutation-adapter.service';
+import { HtmlToUDMService } from '../html-to-udm/converter';
+import {
+    createInternalClipboardDocData,
+    createInternalClipboardFragment,
+    DOC_INTERNAL_FRAGMENT_MIME,
+    parseInternalClipboardFragment,
+} from '../internal-fragment';
+import { getBodySliceHtml } from '../udm-to-html/convertor';
+import { DocHtmlExportService } from '../udm-to-html/doc-html-export.service';
+
+class TestClipboardInterfaceService {
+    readonly writes: Array<{ text: string; html: string; custom?: Record<string, string> }> = [];
+
+    get supportClipboard(): boolean {
+        return true;
+    }
+
+    async writeText(): Promise<void> {}
+    async write(text: string, html: string, custom?: Record<string, string>): Promise<void> {
+        this.writes.push({ text, html, custom });
+    }
+
+    async readText(): Promise<string> { return ''; }
+    async read(): Promise<ClipboardItem[]> { return []; }
+}
+
+class RejectingClipboardInterfaceService extends TestClipboardInterfaceService {
+    override async write(): Promise<void> {
+        throw new Error('clipboard write failed');
+    }
+}
+
+describe('clipboard HTML helpers', () => {
+    it('creates a standalone rich-text document that can be opened by shape editors', () => {
+        const documentData = convertClipboardHtmlToDocumentData('<p><strong>Rich</strong> text</p>');
+        const body = documentData.body!;
+
+        expect(body.dataStream).toBe('Rich text\r\n');
+        expect(body.paragraphs?.some((paragraph) => paragraph.startIndex === body.dataStream.length - 2)).toBe(true);
+        expect(body.sectionBreaks?.some((sectionBreak) => sectionBreak.startIndex === body.dataStream.length - 1)).toBe(true);
+        expect(body.textRuns).toContainEqual(expect.objectContaining({ st: 0, ed: 4 }));
+    });
+
+    it('creates structurally valid quote and code blocks for shape editors', () => {
+        const documentData = convertClipboardHtmlToDocumentData(`
+            <blockquote><p>Quoted documentation</p></blockquote>
+            <pre><code>const value = 1;</code></pre>
+        `);
+
+        expect(validateDocBodyStructure(documentData.body!)).toEqual([]);
+    });
+
+    it('falls back to plain text when converted HTML metadata is structurally invalid', () => {
+        const convert = vi.spyOn(HtmlToUDMService.prototype, 'convert').mockReturnValue({
+            id: 'invalid-html',
+            body: {
+                dataStream: 'Readable content',
+                blockRanges: [{
+                    blockId: 'broken-block',
+                    blockType: DocumentBlockRangeType.QUOTE,
+                    startIndex: 0,
+                    endIndex: 15,
+                }],
+            },
+            documentStyle: {},
+        });
+
+        try {
+            const documentData = convertClipboardHtmlToDocumentData('<blockquote>Readable content</blockquote>');
+
+            expect(documentData.body?.dataStream).toBe('Readable content\r\n');
+            expect(documentData.body?.blockRanges).toBeUndefined();
+            expect(validateDocBodyStructure(documentData.body!)).toEqual([]);
+        } finally {
+            convert.mockRestore();
+        }
+    });
+
+    it('ignores HTML content hidden from the source page', () => {
+        const documentData = convertClipboardHtmlToDocumentData(`
+            <p>Visible content</p>
+            <p aria-hidden="true">ARIA hidden</p>
+            <p class="sr-only">Screen reader only</p>
+            <p hidden>Hidden attribute</p>
+            <p style="display: none !important">Display none</p>
+            <p style="visibility: hidden">Visibility hidden</p>
+        `);
+
+        expect(documentData.body?.dataStream).toContain('Visible content');
+        expect(documentData.body?.dataStream).not.toMatch(/ARIA hidden|Screen reader only|Hidden attribute|Display none|Visibility hidden/);
+    });
+
+    it('removes image elements without dropping Word style metadata', () => {
+        const html = '<html><head><style>.word { font-weight: bold; }</style></head><body><p class="word">Text<img src="data:image/png;base64,AA=="></p></body></html>';
+        const sanitized = removeClipboardHtmlImages(html);
+
+        expect(sanitized).toContain('.word { font-weight: bold; }');
+        expect(sanitized).toContain('<p class="word">Text</p>');
+        expect(sanitized).not.toContain('<img');
+    });
+
+    it('keeps HTML fragments as fragments when removing images', () => {
+        expect(removeClipboardHtmlImages('<b>Text</b><img src="data:image/png;base64,AA==">')).toBe('<b>Text</b>');
+    });
+});
+
+describe('DocClipboardService table copy helpers', () => {
+    it('should keep table metadata when copying an entire selected docs table', () => {
+        const tokens = DataStreamTreeTokenType;
+        const tableStream = `${tokens.TABLE_START}${tokens.TABLE_ROW_START}${tokens.TABLE_CELL_START}A\r\n${tokens.TABLE_CELL_END}${tokens.TABLE_CELL_START}B\r\n${tokens.TABLE_CELL_END}${tokens.TABLE_ROW_END}${tokens.TABLE_END}`;
+        const dataStream = `Intro\r${tableStream}Tail\r`;
+        const tableStart = 'Intro\r'.length;
+        const tableEnd = tableStart + tableStream.length;
+        const body: IDocumentBody = {
+            dataStream,
+            paragraphs: [
+                { paragraphId: 'para_docs_ui_fixture_46', startIndex: 5 },
+                { paragraphId: 'para_docs_ui_fixture_47', startIndex: tableStart + tokens.TABLE_START.length + tokens.TABLE_ROW_START.length + tokens.TABLE_CELL_START.length + 1 },
+                { paragraphId: 'para_docs_ui_fixture_48', startIndex: tableStart + tokens.TABLE_START.length + tokens.TABLE_ROW_START.length + tokens.TABLE_CELL_START.length + 'A\r\n'.length + tokens.TABLE_CELL_END.length + tokens.TABLE_CELL_START.length + 1 },
+                { paragraphId: 'para_docs_ui_fixture_49', startIndex: dataStream.length - 1 },
+            ],
+            sectionBreaks: [],
+            tables: [{
+                startIndex: tableStart,
+                endIndex: tableEnd,
+                tableId: 'table-1',
+            }],
+        };
+        const range: IRectRangeWithStyle = {
+            startOffset: tableStart,
+            endOffset: tableEnd,
+            collapsed: false,
+            rangeType: DOC_RANGE_TYPE.RECT,
+            tableId: 'table-1',
+            startRow: 0,
+            endRow: 0,
+            startColumn: 0,
+            endColumn: 1,
+            spanEntireRow: true,
+            spanEntireColumn: true,
+            spanEntireTable: true,
+        };
+
+        const slice = getTableClipboardBodySlice(body, range);
+
+        expect(slice.dataStream).toBe(tableStream);
+        expect(slice.tables).toEqual([{
+            startIndex: 0,
+            endIndex: tableStream.length,
+            tableId: 'table-1',
+        }]);
+    });
+
+    it('wraps a copied table cell as a standalone table fragment', () => {
+        const tokens = DataStreamTreeTokenType;
+        const tableStream = `${tokens.TABLE_START}${tokens.TABLE_ROW_START}${tokens.TABLE_CELL_START}A\r\n${tokens.TABLE_CELL_END}${tokens.TABLE_CELL_START}B\r\n${tokens.TABLE_CELL_END}${tokens.TABLE_ROW_END}${tokens.TABLE_END}`;
+        const dataStream = `Intro\r${tableStream}Tail\r`;
+        const cellStart = 'Intro\r'.length + tokens.TABLE_START.length + tokens.TABLE_ROW_START.length + tokens.TABLE_CELL_START.length;
+        const body: IDocumentBody = {
+            dataStream,
+            paragraphs: [
+                { paragraphId: 'para_docs_ui_clipboard_table_fixture_1', startIndex: cellStart + 1 },
+                { paragraphId: 'para_docs_ui_clipboard_table_fixture_2', startIndex: dataStream.length - 1 },
+            ],
+            sectionBreaks: [],
+            textRuns: [{ st: cellStart, ed: cellStart + 1, ts: { bl: BooleanNumber.TRUE } }],
+            tables: [{
+                startIndex: 'Intro\r'.length,
+                endIndex: 'Intro\r'.length + tableStream.length,
+                tableId: 'table-1',
+            }],
+        };
+        const slice = getTableClipboardBodySlice(body, {
+            startOffset: cellStart,
+            endOffset: cellStart + 1,
+            collapsed: false,
+            rangeType: DOC_RANGE_TYPE.RECT,
+            tableId: 'table-1',
+            startRow: 0,
+            endRow: 0,
+            startColumn: 0,
+            endColumn: 0,
+            spanEntireRow: false,
+            spanEntireColumn: false,
+            spanEntireTable: false,
+        });
+
+        expect(slice.dataStream).toBe(`${tokens.TABLE_START}${tokens.TABLE_ROW_START}${tokens.TABLE_CELL_START}A\r\n${tokens.TABLE_CELL_END}${tokens.TABLE_ROW_END}${tokens.TABLE_END}`);
+        expect(slice.textRuns?.[0]).toMatchObject({ st: 3, ed: 4, ts: { bl: BooleanNumber.TRUE } });
+        expect(slice.paragraphs?.[0].startIndex).toBe(4);
+    });
+
+    it('preserves hyperlinks and inline images in a copied cell and its clipboard exports', () => {
+        const tokens = DataStreamTreeTokenType;
+        const prefix = `Intro\r${tokens.TABLE_START}${tokens.TABLE_ROW_START}${tokens.TABLE_CELL_START}`;
+        const cellStart = prefix.length;
+        const cellContent = `link${tokens.CUSTOM_BLOCK}\r\n`;
+        const body: IDocumentBody = {
+            dataStream: `${prefix}${cellContent}${tokens.TABLE_CELL_END}${tokens.TABLE_CELL_START}Other\r\n${tokens.TABLE_CELL_END}${tokens.TABLE_ROW_END}${tokens.TABLE_END}`,
+            paragraphs: [{ paragraphId: 'linked-cell', startIndex: cellStart + 5 }],
+            sectionBreaks: [{ sectionId: 'linked-cell-section', startIndex: cellStart + 6 }],
+            customRanges: [{
+                rangeId: 'cell-link',
+                rangeType: CustomRangeType.HYPERLINK,
+                startIndex: cellStart,
+                endIndex: cellStart + 3,
+                properties: { url: 'https://univer.ai/' },
+            }],
+            customBlocks: [{ blockId: 'cell-image', startIndex: cellStart + 4 }],
+            customDecorations: [{ id: 'cell-comment', type: CustomDecorationType.COMMENT, startIndex: cellStart, endIndex: cellStart + 3 }],
+        };
+        const original = Tools.deepClone(body);
+        const slice = getTableClipboardBodySlice(body, {
+            startOffset: cellStart,
+            endOffset: cellStart + 5,
+            collapsed: false,
+            rangeType: DOC_RANGE_TYPE.RECT,
+            tableId: 'table-1',
+            startRow: 0,
+            endRow: 0,
+            startColumn: 0,
+            endColumn: 0,
+            spanEntireRow: false,
+            spanEntireColumn: false,
+            spanEntireTable: false,
+        });
+        const image: IDocImage = {
+            drawingId: 'cell-image',
+            unitId: 'copied-cell',
+            subUnitId: '',
+            drawingType: DrawingTypeEnum.DRAWING_IMAGE,
+            imageSourceType: ImageSourceType.URL,
+            source: 'https://univer.ai/image.png',
+            layoutType: PositionedObjectLayoutType.INLINE,
+            docTransform: {
+                size: { width: 20, height: 10 },
+                angle: 0,
+                positionH: { relativeFrom: ObjectRelativeFromH.CHARACTER, posOffset: 0 },
+                positionV: { relativeFrom: ObjectRelativeFromV.LINE, posOffset: 0 },
+            },
+        };
+        const doc: IDocumentData = {
+            id: 'copied-cell',
+            body: slice,
+            documentStyle: {},
+            drawings: { 'cell-image': image },
+        };
+
+        expect(slice.customRanges?.[0]).toMatchObject({ startIndex: 3, endIndex: 6 });
+        expect(slice.customBlocks?.[0].startIndex).toBe(7);
+        expect(slice.dataStream[slice.customBlocks![0].startIndex]).toBe(tokens.CUSTOM_BLOCK);
+        expect(slice.customDecorations?.[0]).toMatchObject({ startIndex: 3, endIndex: 6 });
+        expect(slice.sectionBreaks?.[0].startIndex).toBe(9);
+        expect(slice.dataStream[slice.sectionBreaks![0].startIndex]).toBe('\n');
+
+        const html = new DOMParser().parseFromString(getBodySliceHtml(doc, 3, 8), 'text/html');
+        expect(html.querySelector('a')?.getAttribute('href')).toBe('https://univer.ai/');
+        expect(html.querySelector('a')?.textContent).toBe('link');
+        expect(html.body.textContent?.trim()).toBe('link');
+        expect(html.querySelector('img')?.getAttribute('src')).toBe('https://univer.ai/image.png');
+
+        const internalDoc = parseInternalClipboardFragment(createInternalClipboardFragment(createInternalClipboardDocData(doc)));
+        expect(internalDoc?.body?.customRanges?.[0]).toMatchObject({ startIndex: 3, endIndex: 6 });
+        expect(internalDoc?.body?.customBlocks?.[0].startIndex).toBe(7);
+        expect(internalDoc?.drawings?.[internalDoc.body!.customBlocks![0].blockId]).toMatchObject({ source: 'https://univer.ai/image.png' });
+        expect(body).toEqual(original);
+    });
+
+    it('keeps structural and imported metadata anchored to the wrapped cell content', () => {
+        const tokens = DataStreamTreeTokenType;
+        const prefix = `${tokens.TABLE_START}${tokens.TABLE_ROW_START}${tokens.TABLE_CELL_START}`;
+        const cellContent = `${tokens.BLOCK_START}${tokens.COLUMN_GROUP_START}${tokens.COLUMN_START}${tokens.CUSTOM_BLOCK}${tokens.PAGE_BREAK}\r${tokens.COLUMN_END}${tokens.COLUMN_GROUP_END}${tokens.BLOCK_END}\r\n`;
+        const cellStart = prefix.length;
+        const body: IDocumentBody = {
+            dataStream: `${prefix}${cellContent}${tokens.TABLE_CELL_END}${tokens.TABLE_ROW_END}${tokens.TABLE_END}`,
+            blockRanges: [{ blockId: 'quote', blockType: DocumentBlockRangeType.QUOTE, startIndex: cellStart, endIndex: cellStart + 8 }],
+            columnGroups: [{ columnGroupId: 'columns', startIndex: cellStart + 1, endIndex: cellStart + 7 }],
+            docxRawCustomBlocks: [{ blockId: 'opaque-run', startIndex: cellStart + 3, docxRawXml: '<w:r/>' }],
+            docxRawBlocks: [{ startIndex: cellStart + 3, xml: '<w:p/>' }],
+            docxExportExcludedRanges: [{ start: cellStart + 3, end: cellStart + 4 }],
+            renderedPageBreaks: [cellStart + 4],
+        };
+        const slice = getTableClipboardBodySlice(body, {
+            startOffset: cellStart,
+            endOffset: cellStart + cellContent.length - 2,
+            collapsed: false,
+            rangeType: DOC_RANGE_TYPE.RECT,
+            tableId: 'table-1',
+            startRow: 0,
+            endRow: 0,
+            startColumn: 0,
+            endColumn: 0,
+            spanEntireRow: false,
+            spanEntireColumn: false,
+            spanEntireTable: false,
+        });
+
+        expect(slice.blockRanges?.[0]).toMatchObject({ startIndex: 3, endIndex: 11 });
+        expect(slice.dataStream[slice.blockRanges![0].startIndex]).toBe(tokens.BLOCK_START);
+        expect(slice.dataStream[slice.blockRanges![0].endIndex]).toBe(tokens.BLOCK_END);
+        expect(slice.columnGroups?.[0]).toMatchObject({ startIndex: 4, endIndex: 10 });
+        expect(slice.dataStream[slice.columnGroups![0].startIndex]).toBe(tokens.COLUMN_GROUP_START);
+        expect(slice.dataStream[slice.columnGroups![0].endIndex]).toBe(tokens.COLUMN_GROUP_END);
+        expect(slice.docxRawCustomBlocks?.[0]).toMatchObject({ startIndex: 6, docxRawXml: '<w:r/>' });
+        expect(slice.dataStream[slice.docxRawCustomBlocks![0].startIndex]).toBe(tokens.CUSTOM_BLOCK);
+        expect(slice.docxRawBlocks?.[0]).toEqual({ startIndex: 6, xml: '<w:p/>' });
+        expect(slice.docxExportExcludedRanges).toEqual([{ start: 6, end: 7 }]);
+        expect(slice.renderedPageBreaks).toEqual([7]);
+        expect(slice.dataStream[slice.renderedPageBreaks![0]]).toBe(tokens.PAGE_BREAK);
+    });
+
+    it('copies the selected document text as plain text, html, and internal clipboard data', async () => {
+        const documentData: IDocumentData = {
+            id: 'copy-doc',
+            body: {
+                dataStream: 'Alpha\r\n',
+                paragraphs: [{ paragraphId: 'para_docs_ui_clipboard_fixture_2', startIndex: 5 }],
+                sectionBreaks: [],
+                customBlocks: [],
+                textRuns: [],
+            },
+            documentStyle: {},
+        };
+        const testBed = createCommandTestBed(documentData, [
+            [IClipboardInterfaceService, { useClass: TestClipboardInterfaceService }],
+            [IDocClipboardService, { useClass: DocClipboardService }],
+        ]);
+        const selectionManager = testBed.get(DocSelectionManagerService);
+        selectionManager.__TEST_ONLY_setCurrentSelection({ unitId: 'copy-doc', subUnitId: '' });
+        selectionManager.__TEST_ONLY_add([{
+            startOffset: 0,
+            endOffset: 5,
+            collapsed: false,
+            isActive: true,
+            segmentId: '',
+        }]);
+
+        const service = testBed.get(IDocClipboardService);
+        const copied = await service.copy();
+        const clipboard = testBed.get(IClipboardInterfaceService) as unknown as TestClipboardInterfaceService;
+        const internalDoc = parseInternalClipboardFragment(clipboard.writes[0].custom?.[DOC_INTERNAL_FRAGMENT_MIME]);
+
+        expect(copied).toBe(true);
+        expect(clipboard.writes[0].text).toBe('Alpha');
+        expect(clipboard.writes[0].html).toContain('data-copy-id=');
+        expect(clipboard.writes[0].html).toContain('<!--univer-doc-fragment:');
+        expect(internalDoc?.body?.dataStream).toBe('Alpha');
+
+        testBed.univer.dispose();
+    });
+
+    it.each([5, 6])('pastes copied text with or without its paragraph mark and preserves history (end=%i)', async (endOffset) => {
+        const documentData: IDocumentData = {
+            id: 'partial-paragraph-paste',
+            body: {
+                dataStream: 'Alpha\rBeta\r\n',
+                paragraphs: [
+                    { startIndex: 5, paragraphId: 'source-paragraph', paragraphStyle: { spaceAbove: { v: 12 } } },
+                    { startIndex: 10, paragraphId: 'target-paragraph', paragraphStyle: { spaceAbove: { v: 3 } } },
+                ],
+                textRuns: [{ st: 0, ed: 5, ts: { bl: BooleanNumber.TRUE } }],
+            },
+            documentStyle: {},
+        };
+        const testBed = createCommandTestBed(documentData, [
+            [IClipboardInterfaceService, { useClass: TestClipboardInterfaceService }],
+            [IDocClipboardService, { useClass: DocClipboardService }],
+        ]);
+        try {
+            const commandService = testBed.get(ICommandService);
+            [InnerPasteCommand, RichTextEditingMutation, SetTextSelectionsOperation]
+                .forEach((command) => commandService.registerCommand(command));
+            const selectionManager = testBed.get(DocSelectionManagerService);
+            selectionManager.__TEST_ONLY_setCurrentSelection({ unitId: documentData.id, subUnitId: '' });
+            selectionManager.__TEST_ONLY_add([{
+                startOffset: 0,
+                endOffset,
+                collapsed: false,
+                isActive: true,
+                segmentId: '',
+            }]);
+            const service = testBed.get(IDocClipboardService);
+            expect(await service.copy()).toBe(true);
+            const clipboard = testBed.get(IClipboardInterfaceService) as unknown as TestClipboardInterfaceService;
+            const copied = clipboard.writes[0];
+            const model = testBed.get(IUniverInstanceService).getUnit<DocumentDataModel>(documentData.id)!;
+            const readContent = () => {
+                const body = model.getBody()!;
+                return Tools.deepClone({
+                    dataStream: body.dataStream,
+                    textRuns: body.textRuns,
+                    paragraphs: body.paragraphs?.map(({ paragraphId, ...paragraph }) => paragraph),
+                });
+            };
+            const before = Tools.deepClone(model.getBody());
+            const beforeContent = readContent();
+            selectionManager.__TEST_ONLY_add([{
+                startOffset: 7,
+                endOffset: 7,
+                collapsed: true,
+                isActive: true,
+                segmentId: '',
+            }]);
+            expect(await service.legacyPaste({ html: copied.html, text: copied.text, files: [] })).toBe(true);
+            const after = Tools.deepClone(model.getBody())!;
+            expect(after.dataStream).toBe(`Alpha\rB${'Alpha\r'.slice(0, endOffset)}eta\r\n`);
+            expect(validateDocBodyStructure(after)).toEqual([]);
+            expect(after.textRuns).toContainEqual(expect.objectContaining({ st: 7, ed: 12, ts: { bl: BooleanNumber.TRUE } }));
+            expect(after.paragraphs?.find((paragraph) => paragraph.startIndex === 10 + endOffset)?.paragraphStyle)
+                .toEqual(before?.paragraphs?.[1].paragraphStyle);
+            const afterContent = readContent();
+            expect(await commandService.executeCommand(UndoCommand.id)).toBe(true);
+            expect(readContent()).toEqual(beforeContent);
+            expect(validateDocBodyStructure(model.getBody()!)).toEqual([]);
+            expect(await commandService.executeCommand(RedoCommand.id)).toBe(true);
+            expect(readContent()).toEqual(afterContent);
+            expect(validateDocBodyStructure(model.getBody()!)).toEqual([]);
+        } finally {
+            testBed.univer.dispose();
+        }
+    });
+
+    it.each([SliceBodyType.copy, SliceBodyType.cut])('copies cell text without a partial table resource (%s)', async (sliceType) => {
+        const tokens = DataStreamTreeTokenType;
+        const tableStream = `${tokens.TABLE_START}${tokens.TABLE_ROW_START}${tokens.TABLE_CELL_START}Alpha\r\n${tokens.TABLE_CELL_END}${tokens.TABLE_ROW_END}${tokens.TABLE_END}`;
+        const documentData: IDocumentData = {
+            id: 'copy-cell-text',
+            body: {
+                dataStream: `${tableStream}\r\n`,
+                paragraphs: [{ paragraphId: 'cell-alpha', startIndex: 8 }],
+                tables: [{ startIndex: 0, endIndex: tableStream.length, tableId: 'source-table' }],
+                textRuns: [{ st: 3, ed: 8, ts: { bl: BooleanNumber.TRUE } }],
+            },
+            documentStyle: {},
+        };
+        const testBed = createCommandTestBed(documentData, [
+            [IClipboardInterfaceService, { useClass: TestClipboardInterfaceService }],
+            [IDocClipboardService, { useClass: DocClipboardService }],
+        ]);
+        try {
+            const service = testBed.get(IDocClipboardService);
+            const clipboard = testBed.get(IClipboardInterfaceService) as unknown as TestClipboardInterfaceService;
+            expect(await service.copy(sliceType, [{
+                startOffset: 3,
+                endOffset: 8,
+                collapsed: false,
+                segmentId: '',
+            }])).toBe(true);
+            const fragment = parseInternalClipboardFragment(clipboard.writes[0].custom?.[DOC_INTERNAL_FRAGMENT_MIME]);
+            expect(clipboard.writes[0].text).toBe('Alpha');
+            expect(fragment?.body?.dataStream).toBe('Alpha');
+            expect(fragment?.body?.tables ?? []).toEqual([]);
+            expect(fragment?.tableSource).toBeUndefined();
+            expect(fragment?.body?.textRuns).toEqual([{ st: 0, ed: 5, ts: { bl: BooleanNumber.TRUE } }]);
+
+            expect(await service.copy(sliceType, [{
+                startOffset: 0,
+                endOffset: tableStream.length,
+                collapsed: false,
+                segmentId: '',
+            }])).toBe(true);
+            const wholeTable = parseInternalClipboardFragment(clipboard.writes[1].custom?.[DOC_INTERNAL_FRAGMENT_MIME]);
+            expect(wholeTable?.body?.tables).toEqual(documentData.body!.tables);
+        } finally {
+            testBed.univer.dispose();
+        }
+    });
+
+    it.each([SliceBodyType.copy, SliceBodyType.cut])('copies column text without recreating its containing group (%s)', async (sliceType) => {
+        const tokens = DataStreamTreeTokenType;
+        const columnStream = `${tokens.COLUMN_GROUP_START}${tokens.COLUMN_START}Alpha\r${tokens.COLUMN_END}${tokens.COLUMN_GROUP_END}`;
+        const documentData: IDocumentData = {
+            id: 'copy-column-text',
+            documentStyle: {},
+            body: {
+                dataStream: `${columnStream}\r\n`,
+                paragraphs: [{ paragraphId: 'column-alpha', startIndex: 7 }],
+                columnGroups: [{ columnGroupId: 'columns', startIndex: 0, endIndex: columnStream.length - 1 }],
+            },
+        };
+        const testBed = createCommandTestBed(documentData, [
+            [IClipboardInterfaceService, { useClass: TestClipboardInterfaceService }],
+            [IDocClipboardService, { useClass: DocClipboardService }],
+        ]);
+        try {
+            const service = testBed.get(IDocClipboardService);
+            const clipboard = testBed.get(IClipboardInterfaceService) as unknown as TestClipboardInterfaceService;
+            expect(await service.copy(sliceType, [{
+                startOffset: 2,
+                endOffset: 7,
+                collapsed: false,
+                segmentId: '',
+            }])).toBe(true);
+            const fragment = parseInternalClipboardFragment(clipboard.writes[0].custom?.[DOC_INTERNAL_FRAGMENT_MIME]);
+            expect(fragment?.body?.dataStream).toBe('Alpha');
+            expect(fragment?.body?.columnGroups ?? []).toEqual([]);
+        } finally {
+            testBed.univer.dispose();
+        }
+    });
+
+    it('returns false when writing copied content to the clipboard fails', async () => {
+        const documentData: IDocumentData = {
+            id: 'failed-copy-doc',
+            body: {
+                dataStream: 'Alpha\r\n',
+                paragraphs: [{ paragraphId: 'para_docs_ui_clipboard_fixture_failed_copy', startIndex: 5 }],
+                sectionBreaks: [],
+                customBlocks: [],
+                textRuns: [],
+            },
+            documentStyle: {},
+        };
+        const testBed = createCommandTestBed(documentData, [
+            [IClipboardInterfaceService, { useClass: RejectingClipboardInterfaceService }],
+            [IDocClipboardService, { useClass: DocClipboardService }],
+        ]);
+        const selectionManager = testBed.get(DocSelectionManagerService);
+        selectionManager.__TEST_ONLY_setCurrentSelection({ unitId: 'failed-copy-doc', subUnitId: '' });
+        selectionManager.__TEST_ONLY_add([{
+            startOffset: 0,
+            endOffset: 5,
+            collapsed: false,
+            isActive: true,
+            segmentId: '',
+        }]);
+
+        expect(await testBed.get(IDocClipboardService).copy()).toBe(false);
+
+        testBed.univer.dispose();
+    });
+
+    it('does not expose document content when Unit Copy permission is denied', async () => {
+        const documentData: IDocumentData = {
+            id: 'denied-copy-doc',
+            body: {
+                dataStream: 'Secret\r\n',
+                paragraphs: [{ paragraphId: 'denied-copy-paragraph', startIndex: 6 }],
+                sectionBreaks: [],
+                customBlocks: [],
+                textRuns: [],
+            },
+            documentStyle: {},
+        };
+        const testBed = createCommandTestBed(documentData, [
+            [IClipboardInterfaceService, { useClass: TestClipboardInterfaceService }],
+            [IDocClipboardService, { useClass: DocClipboardService }],
+        ]);
+        const selectionManager = testBed.get(DocSelectionManagerService);
+        selectionManager.__TEST_ONLY_setCurrentSelection({ unitId: documentData.id, subUnitId: '' });
+        selectionManager.__TEST_ONLY_add([{
+            startOffset: 0,
+            endOffset: 6,
+            collapsed: false,
+            isActive: true,
+            segmentId: '',
+        }]);
+        setDocumentPermissionValue(
+            testBed.get(IPermissionService),
+            documentData.id,
+            documentData.id,
+            UnitAction.Copy,
+            false
+        );
+
+        expect(await testBed.get(IDocClipboardService).copy()).toBe(false);
+        expect((testBed.get(IClipboardInterfaceService) as unknown as TestClipboardInterfaceService).writes).toEqual([]);
+
+        testBed.univer.dispose();
+    });
+
+    it('copies multiple selected text ranges in document order', async () => {
+        const documentData: IDocumentData = {
+            id: 'multi-copy-doc',
+            body: {
+                dataStream: 'Alpha Beta\r\n',
+                paragraphs: [{ paragraphId: 'para_docs_ui_clipboard_fixture_8', startIndex: 10 }],
+                sectionBreaks: [],
+                customBlocks: [],
+                textRuns: [],
+            },
+            documentStyle: {},
+        };
+        const testBed = createCommandTestBed(documentData, [
+            [IClipboardInterfaceService, { useClass: TestClipboardInterfaceService }],
+            [IDocClipboardService, { useClass: DocClipboardService }],
+        ]);
+        const ranges: ITextRangeWithStyle[] = [
+            {
+                startOffset: 0,
+                endOffset: 5,
+                collapsed: false,
+                rangeType: DOC_RANGE_TYPE.TEXT,
+                segmentId: '',
+            },
+            {
+                startOffset: 6,
+                endOffset: 10,
+                collapsed: false,
+                rangeType: DOC_RANGE_TYPE.TEXT,
+                segmentId: '',
+            },
+        ];
+        const service = testBed.get(IDocClipboardService);
+
+        expect(await service.copy(undefined, ranges)).toBe(true);
+
+        const clipboard = testBed.get(IClipboardInterfaceService) as unknown as TestClipboardInterfaceService;
+        const internalDoc = parseInternalClipboardFragment(clipboard.writes[0].custom?.[DOC_INTERNAL_FRAGMENT_MIME]);
+
+        expect(clipboard.writes[0].text).toBe('Alpha\nBeta');
+        expect(internalDoc?.body?.dataStream).toBe('AlphaBeta');
+
+        testBed.univer.dispose();
+    });
+
+    it('leaves the document and clipboard unchanged when cut has no selected content', async () => {
+        const documentData: IDocumentData = {
+            id: 'empty-cut-doc',
+            body: {
+                dataStream: 'Keep me\r\n',
+                paragraphs: [{ paragraphId: 'para_docs_ui_clipboard_fixture_9', startIndex: 7 }],
+                sectionBreaks: [],
+                customBlocks: [],
+                textRuns: [],
+            },
+            documentStyle: {},
+        };
+        const testBed = createCommandTestBed(documentData, [
+            [IClipboardInterfaceService, { useClass: TestClipboardInterfaceService }],
+            [IDocClipboardService, { useClass: DocClipboardService }],
+        ]);
+        const service = testBed.get(IDocClipboardService);
+
+        expect(await service.cut([])).toBe(false);
+
+        const clipboard = testBed.get(IClipboardInterfaceService) as unknown as TestClipboardInterfaceService;
+        const univerInstanceService = testBed.get(IUniverInstanceService);
+        const documentModel = univerInstanceService.getUnit<DocumentDataModel>('empty-cut-doc', UniverInstanceType.UNIVER_DOC)!;
+
+        expect(clipboard.writes).toEqual([]);
+        expect(documentModel.getBody()?.dataStream).toBe('Keep me\r\n');
+
+        testBed.univer.dispose();
+    });
+
+    it('cuts the selected text and places that text on the clipboard', async () => {
+        const documentData: IDocumentData = {
+            id: 'cut-doc',
+            body: {
+                dataStream: 'Cut me now\r\n',
+                paragraphs: [{ paragraphId: 'para_docs_ui_clipboard_fixture_5', startIndex: 10 }],
+                sectionBreaks: [],
+                customBlocks: [],
+                textRuns: [],
+            },
+            documentStyle: {},
+        };
+        const testBed = createCommandTestBed(documentData, [
+            [IClipboardInterfaceService, { useClass: TestClipboardInterfaceService }],
+            [IDocClipboardService, { useClass: DocClipboardService }],
+        ]);
+        const commandService = testBed.get(ICommandService);
+        commandService.registerCommand(CutContentCommand);
+        commandService.registerCommand(RichTextEditingMutation);
+        commandService.registerCommand(SetTextSelectionsOperation);
+        const selectionManager = testBed.get(DocSelectionManagerService);
+        selectionManager.__TEST_ONLY_setCurrentSelection({ unitId: 'cut-doc', subUnitId: '' });
+        const ranges: ITextRangeWithStyle[] = [{
+            startOffset: 0,
+            endOffset: 3,
+            collapsed: false,
+            isActive: true,
+            segmentId: '',
+            rangeType: DOC_RANGE_TYPE.TEXT,
+        }];
+        selectionManager.__TEST_ONLY_add(ranges);
+
+        const service = testBed.get(IDocClipboardService);
+        expect(await service.cut(ranges)).toBe(true);
+
+        const clipboard = testBed.get(IClipboardInterfaceService) as unknown as TestClipboardInterfaceService;
+        const univerInstanceService = testBed.get(IUniverInstanceService);
+        const documentModel = univerInstanceService.getUnit<DocumentDataModel>('cut-doc', UniverInstanceType.UNIVER_DOC)!;
+
+        expect(clipboard.writes[0].text).toBe('Cut');
+        expect(documentModel.getBody()?.dataStream).toBe(' me now\r\n');
+
+        testBed.univer.dispose();
+    });
+
+    it.each(['switch', 'readonly', 'dispose'] as const)('keeps a pending cut bound to its source during %s', async (action) => {
+        const source: IDocumentData = {
+            id: 'pending-cut-source',
+            body: {
+                dataStream: 'Source text\r\n',
+                paragraphs: [{ paragraphId: 'source-paragraph', startIndex: 11 }],
+                sectionBreaks: [],
+                customBlocks: [],
+                textRuns: [],
+            },
+            documentStyle: {},
+        };
+        let releaseWrite!: () => void;
+        const pendingWrite = new Promise<void>((resolve) => {
+            releaseWrite = resolve;
+        });
+        const clipboard = new TestClipboardInterfaceService();
+        vi.spyOn(clipboard, 'write').mockImplementation(async (text, html) => {
+            clipboard.writes.push({ text, html });
+            await pendingWrite;
+        });
+        const testBed = createCommandTestBed(source, [
+            [IClipboardInterfaceService, { useValue: clipboard }],
+            [IDocClipboardService, { useClass: DocClipboardService }],
+        ]);
+        try {
+            const commands = testBed.get(ICommandService);
+            commands.registerCommand(CutContentCommand);
+            commands.registerCommand(RichTextEditingMutation);
+            commands.registerCommand(SetTextSelectionsOperation);
+            const selection = testBed.get(DocSelectionManagerService);
+            selection.__TEST_ONLY_setCurrentSelection({ unitId: source.id, subUnitId: '' });
+            const ranges: ITextRangeWithStyle[] = [{
+                startOffset: 0,
+                endOffset: 6,
+                collapsed: false,
+                isActive: true,
+                segmentId: '',
+                rangeType: DOC_RANGE_TYPE.TEXT,
+            }];
+            selection.__TEST_ONLY_add(ranges);
+            const cut = testBed.get(IDocClipboardService).cut(ranges);
+            await vi.waitFor(() => expect(clipboard.writes).toHaveLength(1));
+            const instances = testBed.get(IUniverInstanceService);
+            const peer = testBed.univer.createUnit<IDocumentData, DocumentDataModel>(UniverInstanceType.UNIVER_DOC, {
+                id: 'pending-cut-peer',
+                body: { dataStream: 'Peer unchanged\r\n', paragraphs: [{ paragraphId: 'peer-paragraph', startIndex: 14 }] },
+                documentStyle: {},
+            });
+            instances.focusUnit(peer.getUnitId());
+            if (action === 'readonly') {
+                setDocumentPermissionValue(testBed.get(IPermissionService), source.id, source.id, UnitAction.Edit, false);
+            } else if (action === 'dispose') {
+                instances.disposeUnit(source.id);
+            }
+            releaseWrite();
+            await expect(cut).resolves.toBe(action === 'switch');
+            expect(peer.getBody()?.dataStream).toBe('Peer unchanged\r\n');
+            expect(clipboard.writes[0].text).toBe('Source');
+            const sourceModel = instances.getUnit<DocumentDataModel>(source.id, UniverInstanceType.UNIVER_DOC);
+            if (action === 'switch') {
+                expect(sourceModel?.getBody()?.dataStream).toBe(' text\r\n');
+            } else if (action === 'readonly') {
+                expect(sourceModel?.getBody()?.dataStream).toBe('Source text\r\n');
+            } else {
+                expect(sourceModel).toBeNull();
+            }
+        } finally {
+            releaseWrite();
+            testBed.univer.dispose();
+        }
+    });
+
+    it('does not write to the clipboard when Cut lacks Unit Edit permission', async () => {
+        const documentData: IDocumentData = {
+            id: 'copy-only-cut-doc',
+            body: {
+                dataStream: 'Keep me\r\n',
+                paragraphs: [{ paragraphId: 'copy-only-cut-paragraph', startIndex: 7 }],
+                sectionBreaks: [],
+                customBlocks: [],
+                textRuns: [],
+            },
+            documentStyle: {},
+        };
+        const clipboard = new TestClipboardInterfaceService();
+        const testBed = createCommandTestBed(documentData, [
+            [IClipboardInterfaceService, { useValue: clipboard }],
+            [IDocClipboardService, { useClass: DocClipboardService }],
+        ]);
+        const selectionManager = testBed.get(DocSelectionManagerService);
+        selectionManager.__TEST_ONLY_setCurrentSelection({ unitId: documentData.id, subUnitId: '' });
+        const ranges: ITextRangeWithStyle[] = [{
+            startOffset: 0,
+            endOffset: 4,
+            collapsed: false,
+            isActive: true,
+            segmentId: '',
+            rangeType: DOC_RANGE_TYPE.TEXT,
+        }];
+        selectionManager.__TEST_ONLY_add(ranges);
+        setDocumentPermissionValue(
+            testBed.get(IPermissionService),
+            documentData.id,
+            documentData.id,
+            UnitAction.Edit,
+            false
+        );
+
+        expect(await testBed.get(IDocClipboardService).cut(ranges)).toBe(false);
+        expect(clipboard.writes).toEqual([]);
+        expect(testBed.get(IUniverInstanceService)
+            .getUnit<DocumentDataModel>(documentData.id, UniverInstanceType.UNIVER_DOC)
+            ?.getBody()
+            ?.dataStream).toBe('Keep me\r\n');
+
+        testBed.univer.dispose();
+    });
+
+    it('does not delete selected text when writing cut content to the clipboard fails', async () => {
+        const documentData: IDocumentData = {
+            id: 'failed-cut-doc',
+            body: {
+                dataStream: 'Keep me\r\n',
+                paragraphs: [{ paragraphId: 'failed-cut-paragraph', startIndex: 7 }],
+                sectionBreaks: [],
+                customBlocks: [],
+                textRuns: [],
+            },
+            documentStyle: {},
+        };
+        const testBed = createCommandTestBed(documentData, [
+            [IClipboardInterfaceService, { useClass: RejectingClipboardInterfaceService }],
+            [IDocClipboardService, { useClass: DocClipboardService }],
+        ]);
+        const commandService = testBed.get(ICommandService);
+        commandService.registerCommand(CutContentCommand);
+        commandService.registerCommand(RichTextEditingMutation);
+        commandService.registerCommand(SetTextSelectionsOperation);
+        const selectionManager = testBed.get(DocSelectionManagerService);
+        selectionManager.__TEST_ONLY_setCurrentSelection({ unitId: documentData.id, subUnitId: '' });
+        const ranges: ITextRangeWithStyle[] = [{
+            startOffset: 0,
+            endOffset: 4,
+            collapsed: false,
+            isActive: true,
+            segmentId: '',
+            rangeType: DOC_RANGE_TYPE.TEXT,
+        }];
+        selectionManager.__TEST_ONLY_add(ranges);
+
+        expect(await testBed.get(IDocClipboardService).cut(ranges)).toBe(false);
+        expect(testBed.get(IUniverInstanceService)
+            .getUnit<DocumentDataModel>(documentData.id, UniverInstanceType.UNIVER_DOC)!
+            .getBody()
+            ?.dataStream).toBe('Keep me\r\n');
+
+        testBed.univer.dispose();
+    });
+
+    it('pastes browser html clipboard content into the active document', async () => {
+        const documentData: IDocumentData = {
+            id: 'html-clipboard-doc',
+            body: {
+                dataStream: 'Body\r\n',
+                paragraphs: [{ paragraphId: 'para_docs_ui_clipboard_fixture_13', startIndex: 4 }],
+                sectionBreaks: [],
+                customBlocks: [],
+                textRuns: [],
+            },
+            documentStyle: {},
+        };
+        const testBed = createCommandTestBed(documentData, [
+            [IClipboardInterfaceService, { useClass: TestClipboardInterfaceService }],
+            [IDocClipboardService, { useClass: DocClipboardService }],
+        ]);
+        const commandService = testBed.get(ICommandService);
+        commandService.registerCommand(InnerPasteCommand);
+        commandService.registerCommand(RichTextEditingMutation);
+        commandService.registerCommand(SetTextSelectionsOperation);
+        const selectionManager = testBed.get(DocSelectionManagerService);
+        selectionManager.__TEST_ONLY_setCurrentSelection({ unitId: 'html-clipboard-doc', subUnitId: '' });
+        selectionManager.__TEST_ONLY_add([{
+            startOffset: 4,
+            endOffset: 4,
+            collapsed: true,
+            isActive: true,
+            segmentId: '',
+        }]);
+        const clipboardItem = {
+            types: ['text/html', 'text/plain'],
+            presentationStyle: 'unspecified',
+            getType: async (type: string) => new Blob([
+                type === 'text/html' ? '<p>HTML clipboard</p>' : 'Plain clipboard',
+            ], { type }),
+        } as ClipboardItem;
+        const service = testBed.get(IDocClipboardService);
+
+        expect(await service.paste([clipboardItem])).toBe(true);
+
+        const univerInstanceService = testBed.get(IUniverInstanceService);
+        const documentModel = univerInstanceService.getUnit<DocumentDataModel>('html-clipboard-doc', UniverInstanceType.UNIVER_DOC)!;
+        expect(documentModel.getBody()?.dataStream).toContain('HTML clipboard');
+
+        testBed.univer.dispose();
+    });
+
+    it('keeps plain text pasted after a block range separate from the following paragraph', async () => {
+        const tokens = DataStreamTreeTokenType;
+        const blockStream = `${tokens.BLOCK_START}Callout${tokens.PARAGRAPH}${tokens.BLOCK_END}`;
+        const documentData: IDocumentData = {
+            id: 'block-boundary-paste-doc',
+            body: {
+                dataStream: `${blockStream}Quote${tokens.PARAGRAPH}${tokens.SECTION_BREAK}`,
+                paragraphs: [
+                    { paragraphId: 'para_docs_ui_clipboard_fixture_block', startIndex: blockStream.length - 2 },
+                    { paragraphId: 'para_docs_ui_clipboard_fixture_quote', startIndex: blockStream.length + 5 },
+                ],
+                blockRanges: [{
+                    blockId: 'callout-1',
+                    blockType: DocumentBlockRangeType.CALLOUT,
+                    startIndex: 0,
+                    endIndex: blockStream.length - 1,
+                }],
+                sectionBreaks: [],
+                customBlocks: [],
+                textRuns: [],
+            },
+            documentStyle: {},
+        };
+        const testBed = createCommandTestBed(documentData, [
+            [IClipboardInterfaceService, { useClass: TestClipboardInterfaceService }],
+            [IDocClipboardService, { useClass: DocClipboardService }],
+        ]);
+        const commandService = testBed.get(ICommandService);
+        commandService.registerCommand(InnerPasteCommand);
+        commandService.registerCommand(RichTextEditingMutation);
+        commandService.registerCommand(SetTextSelectionsOperation);
+        const selectionManager = testBed.get(DocSelectionManagerService);
+        selectionManager.__TEST_ONLY_setCurrentSelection({ unitId: 'block-boundary-paste-doc', subUnitId: '' });
+        selectionManager.__TEST_ONLY_add([{
+            startOffset: blockStream.length,
+            endOffset: blockStream.length,
+            collapsed: true,
+            isActive: true,
+            segmentId: '',
+        }]);
+
+        expect(await testBed.get(IDocClipboardService).legacyPaste({ text: 'Pasted', files: [] })).toBe(true);
+
+        const documentModel = testBed.get(IUniverInstanceService).getUnit<DocumentDataModel>('block-boundary-paste-doc', UniverInstanceType.UNIVER_DOC)!;
+        expect(documentModel.getBody()?.dataStream).toBe(`${blockStream}Pasted${tokens.PARAGRAPH}Quote${tokens.PARAGRAPH}${tokens.SECTION_BREAK}`);
+
+        testBed.univer.dispose();
+    });
+
+    it.each([false, true])('keeps collaboration structure valid when pasting callout content into code (paragraph: %s)', async (includeParagraph) => {
+        const tokens = DataStreamTreeTokenType;
+        const code = `${tokens.BLOCK_START}Code${tokens.PARAGRAPH}${tokens.BLOCK_END}`;
+        const callout = `${tokens.BLOCK_START}Callout${tokens.PARAGRAPH}${tokens.BLOCK_END}`;
+        const clipboardInterface = new TestClipboardInterfaceService();
+        const testBed = createCommandTestBed({
+            id: 'callout-into-code',
+            documentStyle: {},
+            body: {
+                dataStream: `${code}${callout}\r\n`,
+                customBlocks: [],
+                customDecorations: [],
+                customRanges: [],
+                paragraphs: [
+                    { startIndex: code.length - 2, paragraphId: 'code-paragraph' },
+                    { startIndex: code.length + callout.length - 2, paragraphId: 'callout-paragraph' },
+                    { startIndex: code.length + callout.length, paragraphId: 'root-paragraph' },
+                ],
+                sectionBreaks: [{ startIndex: code.length + callout.length + 1, sectionId: 'root-section' }],
+                blockRanges: [
+                    { startIndex: 0, endIndex: code.length - 1, blockId: 'code', blockType: DocumentBlockRangeType.CODE },
+                    { startIndex: code.length, endIndex: code.length + callout.length - 1, blockId: 'callout', blockType: DocumentBlockRangeType.CALLOUT },
+                ],
+            },
+        }, [
+            [IClipboardInterfaceService, { useValue: clipboardInterface }],
+            [IDocClipboardService, { useClass: DocClipboardService }],
+        ]);
+        const before = Tools.deepClone(testBed.doc.getSnapshot());
+        const remote = new DocumentDataModel(Tools.deepClone(before));
+        const commands = testBed.get(ICommandService);
+        const listener = commands.onMutationExecutedForCollab((command) => {
+            if (command.id === RichTextEditingMutation.id) {
+                remote.apply((command.params as IRichTextEditingMutationParams).actions);
+            }
+        });
+        try {
+            [InnerPasteCommand, RichTextEditingMutation, SetTextSelectionsOperation]
+                .forEach((command) => commands.registerCommand(command));
+            const selections = testBed.get(DocSelectionManagerService);
+            selections.__TEST_ONLY_setCurrentSelection({ unitId: testBed.doc.getUnitId(), subUnitId: '' });
+            const clipboard = testBed.get(IDocClipboardService);
+            expect(validateDocumentStructure(testBed.doc.getSnapshot())).toEqual([]);
+            expect(await clipboard.copy(SliceBodyType.copy, [{
+                startOffset: code.length + 1,
+                endOffset: code.length + callout.length - (includeParagraph ? 1 : 2),
+                collapsed: false,
+                segmentId: '',
+            }])).toBe(true);
+            const copied = parseInternalClipboardFragment(clipboardInterface.writes[0].custom?.[DOC_INTERNAL_FRAGMENT_MIME]);
+            expect(copied?.body?.blockRanges ?? []).toEqual([]);
+            selections.__TEST_ONLY_add([{
+                startOffset: 2,
+                endOffset: 2,
+                collapsed: true,
+                isActive: true,
+                segmentId: '',
+            }]);
+
+            expect(await clipboard.paste()).toBe(true);
+            const inserted = includeParagraph ? 'Callout\r' : 'Callout';
+            expect(testBed.doc.getBody()?.dataStream).toBe(`${code.slice(0, 2)}${inserted}${code.slice(2)}${callout}\r\n`);
+            expect(testBed.doc.getBody()?.blockRanges?.map((block) => block.blockId)).toEqual(['code', 'callout']);
+            expect(validateDocumentStructure(testBed.doc.getSnapshot())).toEqual([]);
+            const after = Tools.deepClone(testBed.doc.getSnapshot());
+            expect(remote.getSnapshot()).toEqual(after);
+
+            expect(await commands.executeCommand(UndoCommand.id)).toBe(true);
+            expect(testBed.doc.getSnapshot()).toEqual(before);
+            expect(remote.getSnapshot()).toEqual(before);
+            expect(await commands.executeCommand(RedoCommand.id)).toBe(true);
+            expect(testBed.doc.getSnapshot()).toEqual(after);
+            expect(remote.getSnapshot()).toEqual(after);
+        } finally {
+            listener.dispose();
+            remote.dispose();
+            testBed.univer.dispose();
+        }
+    });
+
+    it('copies and pastes a complete block range after itself', async () => {
+        const tokens = DataStreamTreeTokenType;
+        const blockStream = `${tokens.BLOCK_START}Callout${tokens.PARAGRAPH}${tokens.BLOCK_END}`;
+        const clipboard = new TestClipboardInterfaceService();
+        const documentData: IDocumentData = {
+            id: 'block-copy-paste-doc',
+            body: {
+                dataStream: `${blockStream}After${tokens.PARAGRAPH}${tokens.SECTION_BREAK}`,
+                paragraphs: [
+                    { paragraphId: 'para_docs_ui_clipboard_fixture_source_block', startIndex: blockStream.length - 2 },
+                    { paragraphId: 'para_docs_ui_clipboard_fixture_after_block', startIndex: blockStream.length + 5 },
+                ],
+                blockRanges: [{
+                    blockId: 'callout-1',
+                    blockType: DocumentBlockRangeType.CALLOUT,
+                    startIndex: 0,
+                    endIndex: blockStream.length - 1,
+                }],
+                sectionBreaks: [],
+                customBlocks: [],
+                textRuns: [],
+            },
+            documentStyle: {},
+        };
+        const testBed = createCommandTestBed(documentData, [
+            [IClipboardInterfaceService, { useValue: clipboard }],
+            [IDocClipboardService, { useClass: DocClipboardService }],
+        ]);
+        const commandService = testBed.get(ICommandService);
+        commandService.registerCommand(InnerPasteCommand);
+        commandService.registerCommand(RichTextEditingMutation);
+        commandService.registerCommand(SetTextSelectionsOperation);
+        const selectionManager = testBed.get(DocSelectionManagerService);
+        selectionManager.__TEST_ONLY_setCurrentSelection({ unitId: 'block-copy-paste-doc', subUnitId: '' });
+        const service = testBed.get(IDocClipboardService);
+
+        expect(await service.copy(SliceBodyType.copy, [{
+            startOffset: 0,
+            endOffset: blockStream.length,
+            collapsed: false,
+            segmentId: '',
+        }])).toBe(true);
+
+        selectionManager.__TEST_ONLY_add([{
+            startOffset: blockStream.length,
+            endOffset: blockStream.length,
+            collapsed: true,
+            isActive: true,
+            segmentId: '',
+        }]);
+
+        expect(await service.paste()).toBe(true);
+
+        const documentModel = testBed.get(IUniverInstanceService).getUnit<DocumentDataModel>('block-copy-paste-doc', UniverInstanceType.UNIVER_DOC)!;
+        expect(documentModel.getBody()?.dataStream).toBe(`${blockStream}${blockStream}After${tokens.PARAGRAPH}${tokens.SECTION_BREAK}`);
+        const blockRanges = documentModel.getBody()?.blockRanges ?? [];
+        expect(blockRanges).toHaveLength(2);
+        expect(blockRanges[0].blockId).toBe('callout-1');
+        expect(blockRanges[1].blockId).not.toBe('callout-1');
+
+        testBed.univer.dispose();
+    });
+
+    it('pastes Univer internal clipboard data with document styles preserved', async () => {
+        const documentData: IDocumentData = {
+            id: 'internal-paste-doc',
+            body: {
+                dataStream: 'Body\r\n',
+                paragraphs: [{ paragraphId: 'para_docs_ui_clipboard_fixture_6', startIndex: 4 }],
+                sectionBreaks: [],
+                customBlocks: [],
+                textRuns: [],
+            },
+            documentStyle: {},
+        };
+        const testBed = createCommandTestBed(documentData, [
+            [IClipboardInterfaceService, { useClass: TestClipboardInterfaceService }],
+            [IDocClipboardService, { useClass: DocClipboardService }],
+        ]);
+        const commandService = testBed.get(ICommandService);
+        commandService.registerCommand(InnerPasteCommand);
+        commandService.registerCommand(RichTextEditingMutation);
+        commandService.registerCommand(SetTextSelectionsOperation);
+        const selectionManager = testBed.get(DocSelectionManagerService);
+        selectionManager.__TEST_ONLY_setCurrentSelection({ unitId: 'internal-paste-doc', subUnitId: '' });
+        selectionManager.__TEST_ONLY_add([{
+            startOffset: 4,
+            endOffset: 4,
+            collapsed: true,
+            isActive: true,
+            segmentId: '',
+        }]);
+        const internalJson = createInternalClipboardFragment({
+            body: {
+                dataStream: 'Styled\r\n',
+                paragraphs: [{ paragraphId: 'para_docs_ui_clipboard_fixture_7', startIndex: 6 }],
+                sectionBreaks: [],
+                customBlocks: [],
+                textRuns: [{
+                    st: 0,
+                    ed: 6,
+                    ts: { bl: BooleanNumber.TRUE },
+                }],
+            },
+        });
+        const clipboardItem = {
+            types: [DOC_INTERNAL_FRAGMENT_MIME, 'text/plain'],
+            presentationStyle: 'unspecified',
+            getType: async (type: string) => new Blob([
+                type === DOC_INTERNAL_FRAGMENT_MIME ? internalJson : 'Ignored',
+            ], { type }),
+        } as ClipboardItem;
+        const service = testBed.get(IDocClipboardService);
+
+        expect(await service.paste([clipboardItem])).toBe(true);
+
+        const univerInstanceService = testBed.get(IUniverInstanceService);
+        const documentModel = univerInstanceService.getUnit<DocumentDataModel>('internal-paste-doc', UniverInstanceType.UNIVER_DOC)!;
+        const body = documentModel.getBody();
+        let styledTextRunBold: BooleanNumber | undefined;
+        for (const textRun of body?.textRuns ?? []) {
+            if (textRun.st <= 4 && textRun.ed >= 10) {
+                styledTextRunBold = textRun.ts?.bl;
+                break;
+            }
+        }
+
+        expect(body?.dataStream).toContain('BodyStyled');
+        expect(styledTextRunBold).toBe(BooleanNumber.TRUE);
+
+        testBed.univer.dispose();
+    });
+
+    it('uploads base64 images from pasted html and inserts remote drawings into the document', async () => {
+        const documentData: IDocumentData = {
+            id: 'test-doc',
+            body: {
+                dataStream: 'Body\r\n',
+                paragraphs: [{ paragraphId: 'para_docs_ui_clipboard_fixture_1', startIndex: 4 }],
+                sectionBreaks: [],
+                customBlocks: [],
+                textRuns: [],
+            },
+            drawings: {},
+            drawingsOrder: [],
+            documentStyle: {},
+        };
+        const testBed = createCommandTestBed(documentData, [
+            [IClipboardInterfaceService, { useClass: TestClipboardInterfaceService }],
+            [IDocClipboardService, { useClass: DocClipboardService }],
+        ]);
+        const commandService = testBed.get(ICommandService);
+        commandService.registerCommand(InnerPasteCommand);
+        commandService.registerCommand(RichTextEditingMutation);
+        commandService.registerCommand(SetTextSelectionsOperation);
+        const selectionManager = testBed.get(DocSelectionManagerService);
+        selectionManager.__TEST_ONLY_setCurrentSelection({ unitId: 'test-doc', subUnitId: '' });
+        selectionManager.__TEST_ONLY_add([{
+            startOffset: 0,
+            endOffset: 0,
+            collapsed: true,
+            isActive: true,
+            segmentId: '',
+        }]);
+        const service = testBed.get(IDocClipboardService);
+        const source = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lz6N4wAAAABJRU5ErkJggg==';
+
+        service.addClipboardHook({
+            async onBeforePasteImage(file: File) {
+                expect(file.type).toBe('image/png');
+                return {
+                    imageSourceType: ImageSourceType.UUID,
+                    source: 'remote-file-id',
+                };
+            },
+        });
+        await service.legacyPaste({
+            html: `<p><img src="${source}" width="2" height="3"></p>`,
+            files: [],
+        });
+
+        const univerInstanceService = testBed.get(IUniverInstanceService);
+        const documentModel = univerInstanceService.getUnit<DocumentDataModel>('test-doc', UniverInstanceType.UNIVER_DOC)!;
+        const snapshot = documentModel.getSnapshot();
+        const blocks = snapshot.body?.customBlocks ?? [];
+        let drawingSource = '';
+        for (const block of blocks) {
+            const drawing = snapshot.drawings?.[block.blockId];
+            const imageDrawing = drawing as { source?: string } | undefined;
+            if (imageDrawing?.source === 'remote-file-id') {
+                drawingSource = imageDrawing.source;
+            }
+        }
+
+        expect(drawingSource).toBe('remote-file-id');
+        expect(JSON.stringify(snapshot)).not.toContain('data:image');
+
+        testBed.univer.dispose();
+    });
+
+    it('does not upload pasted images when Document Edit is denied', async () => {
+        const documentData: IDocumentData = {
+            id: 'denied-image-paste-doc',
+            body: {
+                dataStream: 'Body\r\n',
+                paragraphs: [{ paragraphId: 'denied-image-paragraph', startIndex: 4 }],
+                sectionBreaks: [],
+                customBlocks: [],
+                textRuns: [],
+            },
+            documentStyle: {},
+        };
+        const testBed = createCommandTestBed(documentData, [
+            [IClipboardInterfaceService, { useClass: TestClipboardInterfaceService }],
+            [IDocClipboardService, { useClass: DocClipboardService }],
+        ]);
+        const service = testBed.get(IDocClipboardService);
+        const selectionManager = testBed.get(DocSelectionManagerService);
+        selectionManager.__TEST_ONLY_setCurrentSelection({ unitId: documentData.id, subUnitId: '' });
+        selectionManager.__TEST_ONLY_add([{
+            startOffset: 0,
+            endOffset: 0,
+            collapsed: true,
+            isActive: true,
+            segmentId: '',
+        }]);
+        const upload = vi.fn(async () => ({
+            imageSourceType: ImageSourceType.UUID,
+            source: 'must-not-upload',
+        }));
+        service.addClipboardHook({ onBeforePasteImage: upload });
+        setDocumentPermissionValue(
+            testBed.get(IPermissionService),
+            documentData.id,
+            getDocumentParagraphPermissionObjectId('', 'denied-image-paragraph'),
+            UnitAction.Edit,
+            false
+        );
+
+        await expect(service.legacyPaste({
+            html: '<p><img src="data:image/png;base64,AA=="></p>',
+            files: [],
+        })).resolves.toBe(false);
+        expect(upload).not.toHaveBeenCalled();
+
+        testBed.univer.dispose();
+    });
+
+    it('does not paste an image when paragraph Edit is revoked during upload', async () => {
+        const documentData: IDocumentData = {
+            id: 'revoked-image-paste-doc',
+            body: {
+                dataStream: 'Body\r\n',
+                paragraphs: [{ paragraphId: 'revoked-image-paragraph', startIndex: 4 }],
+                sectionBreaks: [],
+                customBlocks: [],
+                textRuns: [],
+            },
+            drawings: {},
+            drawingsOrder: [],
+            documentStyle: {},
+        };
+        const testBed = createCommandTestBed(documentData, [
+            [IClipboardInterfaceService, { useClass: TestClipboardInterfaceService }],
+            [IDocClipboardService, { useClass: DocClipboardService }],
+        ]);
+        const commandService = testBed.get(ICommandService);
+        commandService.registerCommand(InnerPasteCommand);
+        commandService.registerCommand(RichTextEditingMutation);
+        commandService.registerCommand(SetTextSelectionsOperation);
+        const selectionManager = testBed.get(DocSelectionManagerService);
+        selectionManager.__TEST_ONLY_setCurrentSelection({ unitId: documentData.id, subUnitId: '' });
+        selectionManager.__TEST_ONLY_add([{
+            startOffset: 0,
+            endOffset: 0,
+            collapsed: true,
+            isActive: true,
+            segmentId: '',
+        }]);
+        const service = testBed.get(IDocClipboardService);
+        let finishUpload: ((value: { source: string; imageSourceType: ImageSourceType }) => void) | undefined;
+        const upload = vi.fn(() => new Promise<{ source: string; imageSourceType: ImageSourceType }>((resolve) => {
+            finishUpload = resolve;
+        }));
+        service.addClipboardHook({ onBeforePasteImage: upload });
+
+        const paste = service.legacyPaste({
+            html: '<p><img src="data:image/png;base64,AA=="></p>',
+            files: [],
+        });
+        await vi.waitFor(() => expect(finishUpload).toBeDefined());
+        setDocumentPermissionValue(
+            testBed.get(IPermissionService),
+            documentData.id,
+            getDocumentParagraphPermissionObjectId('', 'revoked-image-paragraph'),
+            UnitAction.Edit,
+            false
+        );
+        finishUpload?.({ source: 'remote-file-id', imageSourceType: ImageSourceType.UUID });
+
+        await expect(paste).resolves.toBe(false);
+        const documentModel = testBed.get(IUniverInstanceService)
+            .getUnit<DocumentDataModel>(documentData.id, UniverInstanceType.UNIVER_DOC)!;
+        expect(documentModel.getBody()?.dataStream).toBe('Body\r\n');
+
+        testBed.univer.dispose();
+    });
+
+    it('does not paste into another Document after the active Unit changes during upload', async () => {
+        const documentData: IDocumentData = {
+            id: 'unit-switch-image-paste-doc',
+            body: {
+                dataStream: 'Body\r\n',
+                paragraphs: [{ paragraphId: 'unit-switch-image-paragraph', startIndex: 4 }],
+                sectionBreaks: [],
+                customBlocks: [],
+                textRuns: [],
+            },
+            drawings: {},
+            drawingsOrder: [],
+            documentStyle: {},
+        };
+        const otherDocumentData: IDocumentData = {
+            ...documentData,
+            id: 'unit-switch-image-paste-other-doc',
+            body: {
+                ...documentData.body!,
+                paragraphs: [{ paragraphId: 'unit-switch-image-other-paragraph', startIndex: 4 }],
+            },
+        };
+        const testBed = createCommandTestBed(documentData, [
+            [IClipboardInterfaceService, { useClass: TestClipboardInterfaceService }],
+            [IDocClipboardService, { useClass: DocClipboardService }],
+        ]);
+        const commandService = testBed.get(ICommandService);
+        commandService.registerCommand(InnerPasteCommand);
+        commandService.registerCommand(RichTextEditingMutation);
+        commandService.registerCommand(SetTextSelectionsOperation);
+        const selectionManager = testBed.get(DocSelectionManagerService);
+        selectionManager.__TEST_ONLY_setCurrentSelection({ unitId: documentData.id, subUnitId: '' });
+        selectionManager.__TEST_ONLY_add([{
+            startOffset: 0,
+            endOffset: 0,
+            collapsed: true,
+            isActive: true,
+            segmentId: '',
+        }]);
+        const service = testBed.get(IDocClipboardService);
+        let finishUpload: ((value: { source: string; imageSourceType: ImageSourceType }) => void) | undefined;
+        service.addClipboardHook({
+            onBeforePasteImage: vi.fn(() => new Promise<{ source: string; imageSourceType: ImageSourceType }>((resolve) => {
+                finishUpload = resolve;
+            })),
+        });
+
+        const paste = service.legacyPaste({
+            html: '<p><img src="data:image/png;base64,AA=="></p>',
+            files: [],
+        });
+        await vi.waitFor(() => expect(finishUpload).toBeDefined());
+        testBed.univer.createUnit(UniverInstanceType.UNIVER_DOC, otherDocumentData);
+        testBed.get(IUniverInstanceService).focusUnit(otherDocumentData.id);
+        finishUpload?.({ source: 'remote-file-id', imageSourceType: ImageSourceType.UUID });
+
+        await expect(paste).resolves.toBe(false);
+        const instanceService = testBed.get(IUniverInstanceService);
+        expect(instanceService.getUnit<DocumentDataModel>(documentData.id, UniverInstanceType.UNIVER_DOC)?.getBody()?.dataStream)
+            .toBe('Body\r\n');
+        expect(instanceService.getUnit<DocumentDataModel>(otherDocumentData.id, UniverInstanceType.UNIVER_DOC)?.getBody()?.dataStream)
+            .toBe('Body\r\n');
+
+        testBed.univer.dispose();
+    });
+
+    it('pastes into an explicitly targeted embedded Document when another Document is current', async () => {
+        const targetDocument: IDocumentData = {
+            id: 'embedded-paste-target-doc',
+            body: {
+                dataStream: 'Target\r\n',
+                paragraphs: [{ paragraphId: 'embedded-paste-target-paragraph', startIndex: 6 }],
+            },
+            documentStyle: {},
+        };
+        const currentDocument: IDocumentData = {
+            id: 'embedded-paste-current-doc',
+            body: {
+                dataStream: 'Current\r\n',
+                paragraphs: [{ paragraphId: 'embedded-paste-current-paragraph', startIndex: 7 }],
+            },
+            documentStyle: {},
+        };
+        const testBed = createCommandTestBed(targetDocument, [
+            [IClipboardInterfaceService, { useClass: TestClipboardInterfaceService }],
+            [IDocClipboardService, { useClass: DocClipboardService }],
+        ]);
+        const commandService = testBed.get(ICommandService);
+        commandService.registerCommand(InnerPasteCommand);
+        commandService.registerCommand(RichTextEditingMutation);
+        commandService.registerCommand(SetTextSelectionsOperation);
+        const selectionManager = testBed.get(DocSelectionManagerService);
+        selectionManager.__TEST_ONLY_setCurrentSelection({ unitId: targetDocument.id, subUnitId: targetDocument.id });
+        selectionManager.__TEST_ONLY_add([{
+            startOffset: 6,
+            endOffset: 6,
+            collapsed: true,
+            isActive: true,
+            segmentId: '',
+        }]);
+        testBed.univer.createUnit(UniverInstanceType.UNIVER_DOC, currentDocument);
+        testBed.get(IUniverInstanceService).focusUnit(currentDocument.id);
+
+        const pasted = await testBed.get(IDocClipboardService).legacyPaste({
+            text: ' embedded',
+            files: [],
+            unitId: targetDocument.id,
+        });
+
+        const instanceService = testBed.get(IUniverInstanceService);
+        expect(pasted).toBe(true);
+        expect(instanceService.getUnit<DocumentDataModel>(targetDocument.id, UniverInstanceType.UNIVER_DOC)?.getBody()?.dataStream)
+            .toBe('Target embedded\r\n');
+        expect(instanceService.getUnit<DocumentDataModel>(currentDocument.id, UniverInstanceType.UNIVER_DOC)?.getBody()?.dataStream)
+            .toBe('Current\r\n');
+
+        testBed.univer.dispose();
+    });
+
+    it('turns pasted image files into inline document drawings through the image paste hook', async () => {
+        class TestImage {
+            naturalWidth = 20;
+            naturalHeight = 10;
+            private _onload: (() => void) | null = null;
+
+            get src(): string {
+                return '';
+            }
+
+            set src(_value: string) {
+                queueMicrotask(() => this._onload?.());
+            }
+
+            get onload(): (() => void) | null {
+                return this._onload;
+            }
+
+            set onload(value: (() => void) | null) {
+                this._onload = value;
+            }
+        }
+        vi.stubGlobal('Image', TestImage);
+        vi.stubGlobal('URL', { ...URL, createObjectURL: () => 'blob:local-image' });
+        const documentData: IDocumentData = {
+            id: 'file-image-paste-doc',
+            body: {
+                dataStream: 'Body\r\n',
+                paragraphs: [{ paragraphId: 'para_docs_ui_clipboard_fixture_14', startIndex: 4 }],
+                sectionBreaks: [],
+                customBlocks: [],
+                textRuns: [],
+            },
+            drawings: {},
+            drawingsOrder: [],
+            documentStyle: {},
+        };
+        const testBed = createCommandTestBed(documentData, [
+            [IClipboardInterfaceService, { useClass: TestClipboardInterfaceService }],
+            [IDocClipboardService, { useClass: DocClipboardService }],
+        ]);
+        try {
+            const commandService = testBed.get(ICommandService);
+            commandService.registerCommand(InnerPasteCommand);
+            commandService.registerCommand(RichTextEditingMutation);
+            commandService.registerCommand(SetTextSelectionsOperation);
+            const selectionManager = testBed.get(DocSelectionManagerService);
+            selectionManager.__TEST_ONLY_setCurrentSelection({ unitId: 'file-image-paste-doc', subUnitId: '' });
+            selectionManager.__TEST_ONLY_add([{
+                startOffset: 0,
+                endOffset: 0,
+                collapsed: true,
+                isActive: true,
+                segmentId: '',
+            }]);
+            const service = testBed.get(IDocClipboardService);
+            service.addClipboardHook({
+                async onBeforePasteImage(file: File) {
+                    expect(file.name).toBe('local.png');
+                    expect(file.type).toBe('image/png');
+                    return {
+                        imageSourceType: ImageSourceType.UUID,
+                        source: 'remote-local-file-id',
+                    };
+                },
+            });
+
+            expect(await service.legacyPaste({
+                files: [new File(['image'], 'local.png', { type: 'image/png' })],
+            })).toBe(true);
+
+            const univerInstanceService = testBed.get(IUniverInstanceService);
+            const documentModel = univerInstanceService.getUnit<DocumentDataModel>('file-image-paste-doc', UniverInstanceType.UNIVER_DOC)!;
+            const snapshot = documentModel.getSnapshot();
+            let drawingSource = '';
+            for (const drawing of Object.values(snapshot.drawings ?? {})) {
+                const imageDrawing = drawing as { source?: string } | undefined;
+                if (imageDrawing?.source === 'remote-local-file-id') {
+                    drawingSource = imageDrawing.source;
+                    break;
+                }
+            }
+
+            expect(drawingSource).toBe('remote-local-file-id');
+        } finally {
+            testBed.univer.dispose();
+            vi.unstubAllGlobals();
+        }
+    });
+
+    it('applies before-paste hooks to plain text before inserting it into the document', async () => {
+        const documentData: IDocumentData = {
+            id: 'paste-hook-doc',
+            body: {
+                dataStream: 'Body\r\n',
+                paragraphs: [{ paragraphId: 'para_docs_ui_clipboard_fixture_3', startIndex: 4 }],
+                sectionBreaks: [],
+                customBlocks: [],
+                textRuns: [],
+            },
+            documentStyle: {},
+        };
+        const testBed = createCommandTestBed(documentData, [
+            [IClipboardInterfaceService, { useClass: TestClipboardInterfaceService }],
+            [IDocClipboardService, { useClass: DocClipboardService }],
+        ]);
+        const commandService = testBed.get(ICommandService);
+        commandService.registerCommand(InnerPasteCommand);
+        commandService.registerCommand(RichTextEditingMutation);
+        commandService.registerCommand(SetTextSelectionsOperation);
+        const selectionManager = testBed.get(DocSelectionManagerService);
+        selectionManager.__TEST_ONLY_setCurrentSelection({ unitId: 'paste-hook-doc', subUnitId: '' });
+        selectionManager.__TEST_ONLY_add([{
+            startOffset: 0,
+            endOffset: 0,
+            collapsed: true,
+            isActive: true,
+            segmentId: '',
+        }]);
+        const service = testBed.get(IDocClipboardService);
+
+        service.addClipboardHook({
+            onBeforePaste: () => ({
+                dataStream: 'Hooked\r\n',
+                paragraphs: [{ paragraphId: 'para_docs_ui_clipboard_fixture_4', startIndex: 6 }],
+                sectionBreaks: [],
+                customBlocks: [],
+                textRuns: [],
+            }),
+        });
+
+        expect(await service.legacyPaste({ text: 'Plain', files: [] })).toBe(true);
+
+        const univerInstanceService = testBed.get(IUniverInstanceService);
+        const documentModel = univerInstanceService.getUnit<DocumentDataModel>('paste-hook-doc', UniverInstanceType.UNIVER_DOC)!;
+        expect(documentModel.getBody()?.dataStream).toContain('Hooked');
+        expect(documentModel.getBody()?.dataStream).not.toContain('Plain');
+
+        testBed.univer.dispose();
+    });
+
+    it('stops applying a paste hook after the hook disposable is released', async () => {
+        const documentData: IDocumentData = {
+            id: 'paste-dispose-doc',
+            body: {
+                dataStream: 'Body\r\n',
+                paragraphs: [{ paragraphId: 'para_docs_ui_clipboard_fixture_10', startIndex: 4 }],
+                sectionBreaks: [],
+                customBlocks: [],
+                textRuns: [],
+            },
+            documentStyle: {},
+        };
+        const testBed = createCommandTestBed(documentData, [
+            [IClipboardInterfaceService, { useClass: TestClipboardInterfaceService }],
+            [IDocClipboardService, { useClass: DocClipboardService }],
+        ]);
+        const commandService = testBed.get(ICommandService);
+        commandService.registerCommand(InnerPasteCommand);
+        commandService.registerCommand(RichTextEditingMutation);
+        commandService.registerCommand(SetTextSelectionsOperation);
+        const selectionManager = testBed.get(DocSelectionManagerService);
+        selectionManager.__TEST_ONLY_setCurrentSelection({ unitId: 'paste-dispose-doc', subUnitId: '' });
+        selectionManager.__TEST_ONLY_add([{
+            startOffset: 4,
+            endOffset: 4,
+            collapsed: true,
+            isActive: true,
+            segmentId: '',
+        }]);
+        const service = testBed.get(IDocClipboardService);
+        const disposable = service.addClipboardHook({
+            onBeforePaste: () => ({
+                dataStream: 'Hooked\r\n',
+                paragraphs: [{ paragraphId: 'para_docs_ui_clipboard_fixture_11', startIndex: 6 }],
+                sectionBreaks: [],
+                customBlocks: [],
+                textRuns: [],
+            }),
+        });
+        disposable.dispose();
+
+        expect(await service.legacyPaste({ text: 'Plain', files: [] })).toBe(true);
+
+        const univerInstanceService = testBed.get(IUniverInstanceService);
+        const documentModel = univerInstanceService.getUnit<DocumentDataModel>('paste-dispose-doc', UniverInstanceType.UNIVER_DOC)!;
+        expect(documentModel.getBody()?.dataStream).toContain('Plain');
+        expect(documentModel.getBody()?.dataStream).not.toContain('Hooked');
+
+        testBed.univer.dispose();
+    });
+
+    it('does not paste when the clipboard payload is empty', async () => {
+        const documentData: IDocumentData = {
+            id: 'empty-paste-doc',
+            body: {
+                dataStream: 'Body\r\n',
+                paragraphs: [{ paragraphId: 'para_docs_ui_clipboard_fixture_12', startIndex: 4 }],
+                sectionBreaks: [],
+                customBlocks: [],
+                textRuns: [],
+            },
+            documentStyle: {},
+        };
+        const testBed = createCommandTestBed(documentData, [
+            [IClipboardInterfaceService, { useClass: TestClipboardInterfaceService }],
+            [IDocClipboardService, { useClass: DocClipboardService }],
+        ]);
+        const service = testBed.get(IDocClipboardService);
+
+        expect(await service.legacyPaste({ files: [] })).toBe(false);
+
+        const univerInstanceService = testBed.get(IUniverInstanceService);
+        const documentModel = univerInstanceService.getUnit<DocumentDataModel>('empty-paste-doc', UniverInstanceType.UNIVER_DOC)!;
+        expect(documentModel.getBody()?.dataStream).toBe('Body\r\n');
+
+        testBed.univer.dispose();
+    });
+});
+
+describe('DocClipboardService copy text hooks', () => {
+    it('uses onCopyContent for plain text while preserving the internal document fragment', async () => {
+        const clipboard = new TestClipboardInterfaceService();
+        const documentData: IDocumentData = {
+            id: 'copy-content-hook-doc',
+            body: {
+                dataStream: 'A\uFFFCC\r\n',
+                paragraphs: [{
+                    paragraphId: 'para_docs_ui_clipboard_copy_hook',
+                    startIndex: 3,
+                }],
+                customRanges: [{
+                    startIndex: 1,
+                    endIndex: 1,
+                    rangeId: 'formula-1',
+                    rangeType: 0,
+                    wholeEntity: true,
+                }],
+            },
+            documentStyle: {},
+        };
+        const testBed = createCommandTestBed(documentData, [
+            [IClipboardInterfaceService, { useValue: clipboard }],
+            [IDocClipboardService, { useClass: DocClipboardService }],
+        ]);
+        const selectionManager = testBed.get(DocSelectionManagerService);
+        selectionManager.__TEST_ONLY_setCurrentSelection({
+            unitId: documentData.id,
+            subUnitId: '',
+        });
+        const service = testBed.get(IDocClipboardService);
+        service.addClipboardHook({
+            onCopyContent: (start, end, context) => {
+                expect([start, end]).toEqual([0, 3]);
+                expect(context.unitId).toBe(documentData.id);
+                expect(context.segmentId).toBe('');
+                expect(context.body.dataStream).toBe(documentData.body?.dataStream);
+                return 'A42C';
+            },
+        });
+
+        expect(await service.copy(SliceBodyType.copy, [{
+            startOffset: 0,
+            endOffset: 3,
+            collapsed: false,
+            segmentId: '',
+        }])).toBe(true);
+        expect(clipboard.writes[0].text).toBe('A42C');
+        const internalJson = clipboard.writes[0].custom?.[DOC_INTERNAL_FRAGMENT_MIME];
+        expect(parseInternalClipboardFragment(internalJson)?.body?.dataStream)
+            .toContain('\uFFFC');
+
+        testBed.univer.dispose();
+    });
+
+    it('passes source-to-target Custom Range identity mappings to paste adapters', async () => {
+        const clipboard = new TestClipboardInterfaceService();
+        const documentData: IDocumentData = {
+            id: 'custom-range-mapping-doc',
+            body: {
+                dataStream: '\uFFFC\r\n',
+                paragraphs: [{
+                    paragraphId: 'para_docs_ui_clipboard_mapping',
+                    startIndex: 1,
+                }],
+                customRanges: [{
+                    startIndex: 0,
+                    endIndex: 0,
+                    rangeId: 'source-range',
+                    rangeType: 0,
+                    wholeEntity: true,
+                }],
+            },
+            documentStyle: {},
+        };
+        const testBed = createCommandTestBed(documentData, [
+            [IClipboardInterfaceService, { useValue: clipboard }],
+            [IDocClipboardService, { useClass: DocClipboardService }],
+            [IDocClipboardPasteAdapterService, {
+                useClass: DocClipboardPasteAdapterService,
+            }],
+        ]);
+        const commandService = testBed.get(ICommandService);
+        commandService.registerCommand(InnerPasteCommand);
+        commandService.registerCommand(RichTextEditingMutation);
+        commandService.registerCommand(SetTextSelectionsOperation);
+        const mappings = vi.fn<
+            NonNullable<IDocClipboardPasteAdapter['getPasteMutationInfos']>
+        >(() => ({
+            redoMutations: [],
+            undoMutations: [],
+        }));
+        testBed.get(IDocClipboardPasteAdapterService).registerAdapter({
+            getPasteMutationInfos: mappings,
+        });
+        const selectionManager = testBed.get(DocSelectionManagerService);
+        selectionManager.__TEST_ONLY_setCurrentSelection({
+            unitId: documentData.id,
+            subUnitId: '',
+        });
+        const service = testBed.get(IDocClipboardService);
+
+        expect(await service.copy(SliceBodyType.copy, [{
+            startOffset: 0,
+            endOffset: 1,
+            collapsed: false,
+            segmentId: '',
+        }])).toBe(true);
+        selectionManager.__TEST_ONLY_add([{
+            startOffset: 1,
+            endOffset: 1,
+            collapsed: true,
+            isActive: true,
+            segmentId: '',
+        }]);
+        expect(await service.paste()).toBe(true);
+
+        const firstCall = mappings.mock.calls[0];
+        if (!firstCall) {
+            throw new Error('Expected the paste adapter to be called.');
+        }
+        const mapping = firstCall[0].customRangeMappings?.[0];
+        if (!mapping) {
+            throw new Error('Expected one Custom Range mapping.');
+        }
+        expect(mapping.sourceRange.rangeId).toBe('source-range');
+        expect(mapping.targetRange.rangeId).not.toBe('source-range');
+
+        testBed.univer.dispose();
+    });
+});
+
+describe('DocClipboardService paste options', () => {
+    function setup() {
+        const bed = createCommandTestBed({
+            id: 'paste-options',
+            body: {
+                dataStream: 'Before selected after\r\n',
+                customBlocks: [],
+                customRanges: [],
+                customDecorations: [],
+                paragraphs: [{ startIndex: 21, paragraphId: 'target', paragraphStyle: { spaceAbove: { v: 6 } } }],
+                textRuns: [{ st: 0, ed: 21, ts: { ff: 'Arial', fs: 12 } }],
+            },
+            documentStyle: {},
+        }, [
+            [IClipboardInterfaceService, { useClass: TestClipboardInterfaceService }],
+            [IDocClipboardService, { useClass: DocClipboardService }],
+        ]);
+        const commands = bed.get(ICommandService);
+        [InnerPasteCommand, RichTextEditingMutation, SetTextSelectionsOperation].forEach((command) => commands.registerCommand(command));
+        const selection = bed.get(DocSelectionManagerService);
+        selection.__TEST_ONLY_setCurrentSelection({ unitId: 'paste-options', subUnitId: '' });
+        selection.__TEST_ONLY_add([{ startOffset: 7, endOffset: 15, collapsed: false, isActive: true, segmentId: '' }]);
+        const clipboard = bed.get(IDocClipboardService);
+        const source: Partial<IDocumentData> = {
+            body: {
+                dataStream: 'Rich text',
+                textRuns: [{ st: 0, ed: 4, ts: { bl: BooleanNumber.TRUE, ff: 'Courier New', fs: 28 } }],
+            },
+        };
+        const payload = { html: '<b>Rich</b> text', text: 'Rich text', internalJson: createInternalClipboardFragment(source), files: [] };
+        return { ...bed, commands, selection, clipboard, payload };
+    }
+
+    it('switches formats repeatedly and keeps the whole paste as one undoable edit', async () => {
+        const bed = setup();
+        try {
+            const before = Tools.deepClone(bed.doc.getBody());
+            expect(await bed.clipboard.legacyPaste(bed.payload)).toBe(true);
+            expect(bed.doc.getBody()?.dataStream).toBe('Before Rich text after\r\n');
+            expect(await bed.clipboard.changePasteMode('destination')).toBe(true);
+            expect(bed.doc.getBody()?.textRuns).toContainEqual(expect.objectContaining({ ts: expect.objectContaining({ ff: 'Arial', fs: 12, bl: BooleanNumber.TRUE }) }));
+            expect(await bed.clipboard.changePasteMode('text')).toBe(true);
+            expect(bed.doc.getBody()?.dataStream).toBe('Before Rich text after\r\n');
+            expect(bed.doc.getBody()?.textRuns?.some((run) => run.ts?.bl === BooleanNumber.TRUE)).toBe(false);
+            expect(await bed.clipboard.changePasteMode('source')).toBe(true);
+            const after = Tools.deepClone(bed.doc.getBody());
+            expect(bed.get(IUndoRedoService).getUndoRedoStatus('paste-options').undos).toBe(1);
+            expect(await bed.commands.executeCommand(UndoCommand.id)).toBe(true);
+            expect(bed.doc.getBody()).toEqual(before);
+            expect(await bed.commands.executeCommand(RedoCommand.id)).toBe(true);
+            expect(bed.doc.getBody()).toEqual(after);
+        } finally {
+            bed.univer.dispose();
+        }
+    });
+
+    it('emits mutations that reproduce format switches in a collaborating document', async () => {
+        const bed = setup();
+        const remote = new DocumentDataModel(Tools.deepClone(bed.doc.getSnapshot()));
+        const listener = bed.commands.onMutationExecutedForCollab((command) => {
+            if (command.id === RichTextEditingMutation.id) {
+                const params = command.params as { actions: Parameters<DocumentDataModel['apply']>[0] };
+                remote.apply(params.actions);
+            }
+        });
+        try {
+            expect(await bed.clipboard.legacyPaste(bed.payload)).toBe(true);
+            expect(await bed.clipboard.changePasteMode('text')).toBe(true);
+            expect(remote.getBody()).toEqual(bed.doc.getBody());
+            expect(await bed.clipboard.changePasteMode('source')).toBe(true);
+            expect(remote.getBody()).toEqual(bed.doc.getBody());
+        } finally {
+            listener.dispose();
+            remote.dispose();
+            bed.univer.dispose();
+        }
+    });
+
+    it.each(['source', 'destination', 'text'] as const)('preserves Unicode and paragraph breaks through every transition starting with %s', async (initialMode) => {
+        const bed = setup();
+        try {
+            const before = Tools.deepClone(bed.doc.getBody());
+            const text = '中文🙂 café\n第二段';
+            const payload = {
+                html: '<p><b>中文🙂 café</b></p><p><i>第二段</i></p>',
+                text,
+                files: [],
+                mode: initialMode,
+            };
+            expect(await bed.clipboard.legacyPaste(payload)).toBe(true);
+            let currentMode = initialMode;
+            for (const mode of ['text', 'destination', 'source', 'destination', 'text', 'source'] as const) {
+                expect(await bed.clipboard.changePasteMode(mode)).toBe(mode !== currentMode);
+                currentMode = mode;
+                const body = bed.doc.getBody()!;
+                expect(body.dataStream.replace(/\r+/g, '\n')).toContain(text);
+                expect(body.dataStream.startsWith('Before ')).toBe(true);
+                expect(body.dataStream.endsWith(' after\r\n')).toBe(true);
+                expect(body.dataStream.match(/中文🙂 café/g)).toHaveLength(1);
+                expect(body.textRuns?.some((run) => run.ts?.bl === BooleanNumber.TRUE)).toBe(mode !== 'text');
+            }
+            expect(bed.get(IUndoRedoService).getUndoRedoStatus('paste-options').undos).toBe(1);
+            const after = Tools.deepClone(bed.doc.getBody());
+            expect(await bed.commands.executeCommand(UndoCommand.id)).toBe(true);
+            expect(bed.doc.getBody()).toEqual(before);
+            expect(await bed.commands.executeCommand(RedoCommand.id)).toBe(true);
+            expect(bed.doc.getBody()).toEqual(after);
+        } finally {
+            bed.univer.dispose();
+        }
+    });
+
+    it('switches a table to text and restores its cells and resources without duplicating surrounding content', async () => {
+        const bed = setup();
+        try {
+            const before = Tools.deepClone(bed.doc.getSnapshot());
+            expect(await bed.clipboard.legacyPaste({
+                html: '<table><tr><td><b>A</b></td><td>B</td></tr><tr><td>C</td><td>D</td></tr></table>',
+                text: 'A\tB\nC\tD',
+                files: [],
+            })).toBe(true);
+            for (const mode of ['text', 'destination', 'text', 'source'] as const) {
+                expect(await bed.clipboard.changePasteMode(mode)).toBe(true);
+                const body = bed.doc.getBody()!;
+                expect(body.dataStream.match(/Before /g)).toHaveLength(1);
+                expect(body.dataStream.match(/ after/g)).toHaveLength(1);
+                if (mode === 'text') {
+                    expect(body.dataStream).toContain('A\tB\rC\tD');
+                    expect(body.tables ?? []).toHaveLength(0);
+                } else {
+                    expect(body.tables).toHaveLength(1);
+                    expect(bed.doc.getSnapshot().tableSource?.[body.tables![0].tableId]).toBeDefined();
+                }
+            }
+            expect(bed.get(IUndoRedoService).getUndoRedoStatus('paste-options').undos).toBe(1);
+            const after = Tools.deepClone(bed.doc.getSnapshot());
+            expect(await bed.commands.executeCommand(UndoCommand.id)).toBe(true);
+            expect(bed.doc.getBody()).toEqual({ ...before.body, tables: [], sectionBreaks: [] });
+            expect(await bed.commands.executeCommand(RedoCommand.id)).toBe(true);
+            expect(bed.doc.getBody()).toEqual(after.body);
+            expect(bed.doc.getSnapshot().tableSource).toEqual(after.tableSource);
+        } finally {
+            bed.univer.dispose();
+        }
+    });
+
+    it('only changes the latest paste and does not undo a preceding paste', async () => {
+        const bed = setup();
+        try {
+            expect(await bed.clipboard.legacyPaste(bed.payload)).toBe(true);
+            const firstPaste = Tools.deepClone(bed.doc.getBody());
+            bed.selection.replaceSelectionInfoWithoutRefresh({
+                ...bed.selection.getSelectionInfo()!,
+                textRanges: [{ startOffset: 16, endOffset: 16, collapsed: true, isActive: true, segmentId: '' }],
+            });
+            bed.selection.refreshSelection();
+            expect(await bed.clipboard.legacyPaste({ html: '<i>Next</i>', text: 'Next', files: [] })).toBe(true);
+            expect(await bed.clipboard.changePasteMode('text')).toBe(true);
+            expect(bed.doc.getBody()?.dataStream).toBe('Before Rich textNext after\r\n');
+            expect(bed.get(IUndoRedoService).getUndoRedoStatus('paste-options').undos).toBe(2);
+            expect(await bed.commands.executeCommand(UndoCommand.id)).toBe(true);
+            expect(bed.doc.getBody()).toEqual(firstPaste);
+            expect(await bed.clipboard.changePasteMode('source')).toBe(false);
+        } finally {
+            bed.univer.dispose();
+        }
+    });
+
+    it('serializes competing switches without undoing another replacement', async () => {
+        const bed = setup();
+        try {
+            expect(await bed.clipboard.legacyPaste(bed.payload)).toBe(true);
+            expect(await Promise.all([
+                bed.clipboard.changePasteMode('text'),
+                bed.clipboard.changePasteMode('destination'),
+            ])).toEqual([true, false]);
+            expect(bed.doc.getBody()?.dataStream).toBe('Before Rich text after\r\n');
+            expect(bed.doc.getBody()?.textRuns?.some((run) => run.ts?.bl === BooleanNumber.TRUE)).toBe(false);
+            expect(bed.get(IUndoRedoService).getUndoRedoStatus('paste-options').undos).toBe(1);
+        } finally {
+            bed.univer.dispose();
+        }
+    });
+
+    it('does not upload images for text-only paste and can restore the original rich content', async () => {
+        const bed = setup();
+        try {
+            const upload = vi.fn(async () => null);
+            bed.clipboard.addClipboardHook({ onBeforePasteImage: upload });
+            expect(await bed.clipboard.legacyPaste({ ...bed.payload, mode: 'text', html: '<b>Rich</b> text<img src="data:image/png;base64,AA==">' })).toBe(true);
+            expect(upload).not.toHaveBeenCalled();
+            expect(bed.doc.getBody()?.textRuns?.some((run) => run.ts?.bl === BooleanNumber.TRUE)).toBe(false);
+            expect(await bed.clipboard.changePasteMode('source')).toBe(true);
+            expect(bed.doc.getBody()?.textRuns?.some((run) => run.ts?.bl === BooleanNumber.TRUE)).toBe(true);
+        } finally {
+            bed.univer.dispose();
+        }
+    });
+
+    it('keeps options when layout fills in selection metadata without moving the caret', async () => {
+        const bed = setup();
+        try {
+            expect(await bed.clipboard.legacyPaste(bed.payload)).toBe(true);
+            const info = bed.selection.getSelectionInfo()!;
+            bed.selection.replaceSelectionInfoWithoutRefresh({
+                ...info,
+                textRanges: info.textRanges.map((range) => ({
+                    ...range,
+                    segmentId: '',
+                    segmentPage: -1,
+                    rangeType: DOC_RANGE_TYPE.TEXT,
+                })),
+            });
+            bed.selection.refreshSelection();
+            expect(await bed.clipboard.changePasteMode('text')).toBe(true);
+        } finally {
+            bed.univer.dispose();
+        }
+    });
+
+    it('rejects a stale switch after moving the selection', async () => {
+        const bed = setup();
+        try {
+            await bed.clipboard.legacyPaste(bed.payload);
+            bed.selection.__TEST_ONLY_add([{ startOffset: 0, endOffset: 0, collapsed: true, isActive: true, segmentId: '' }]);
+            const snapshot = Tools.deepClone(bed.doc.getBody());
+            expect(await bed.clipboard.changePasteMode('text')).toBe(false);
+            expect(bed.doc.getBody()).toEqual(snapshot);
+        } finally {
+            bed.univer.dispose();
+        }
+    });
+
+    it('invalidates options on a remote mutation without undoing that mutation', async () => {
+        const bed = setup();
+        try {
+            await bed.clipboard.legacyPaste(bed.payload);
+            expect(bed.commands.syncExecuteCommand(RichTextEditingMutation.id, {
+                unitId: 'paste-options',
+                segmentId: '',
+                textRanges: null,
+                actions: [],
+                isSync: true,
+            })).toBeTruthy();
+            const snapshot = Tools.deepClone(bed.doc.getBody());
+            expect(await bed.clipboard.changePasteMode('text')).toBe(false);
+            expect(bed.doc.getBody()).toEqual(snapshot);
+        } finally {
+            bed.univer.dispose();
+        }
+    });
+
+    it('does not paste at a different selection after waiting for clipboard permission', async () => {
+        const bed = setup();
+        try {
+            let resolveRead: ((items: ClipboardItem[]) => void) | undefined;
+            vi.spyOn(bed.get(IClipboardInterfaceService), 'read').mockImplementation(() => new Promise((resolve) => {
+                resolveRead = resolve;
+            }));
+            const pending = bed.clipboard.pasteFromClipboard('text');
+            bed.selection.__TEST_ONLY_add([{ startOffset: 0, endOffset: 0, collapsed: true, isActive: true, segmentId: '' }]);
+            resolveRead!([]);
+            expect(await pending).toBe(false);
+            expect(bed.doc.getBody()?.dataStream).toBe('Before selected after\r\n');
+        } finally {
+            bed.univer.dispose();
+        }
+    });
+
+    it('does not replace another history entry even if the selection has not changed', async () => {
+        const bed = setup();
+        try {
+            await bed.clipboard.legacyPaste(bed.payload);
+            bed.get(IUndoRedoService).pushUndoRedo({ unitID: 'paste-options', undoMutations: [], redoMutations: [] });
+            expect(await bed.clipboard.changePasteMode('text')).toBe(false);
+            expect(bed.doc.getBody()?.dataStream).toBe('Before Rich text after\r\n');
+        } finally {
+            bed.univer.dispose();
+        }
+    });
+
+    it('restores the previous paste if the replacement fails', async () => {
+        const bed = setup();
+        try {
+            await bed.clipboard.legacyPaste(bed.payload);
+            const snapshot = Tools.deepClone(bed.doc.getBody());
+            bed.clipboard.addClipboardHook({
+                onBeforePaste: () => {
+                    throw new Error('Rejected paste');
+                },
+            });
+            await expect(bed.clipboard.changePasteMode('text')).rejects.toThrow('Rejected paste');
+            expect(bed.doc.getBody()).toEqual(snapshot);
+        } finally {
+            bed.univer.dispose();
+        }
+    });
+});
+
+describe('comment editor plain-text paste', () => {
+    function setup() {
+        const unitId = `${DOCS_COMMENT_EDITOR_UNIT_ID_KEY}_cell_host_sheet_comment`;
+        const bed = createCommandTestBed({
+            id: unitId,
+            body: {
+                dataStream: 'Before selected after\r\n',
+                customBlocks: [],
+                customDecorations: [],
+                customRanges: [],
+                paragraphs: [{ startIndex: 21, paragraphId: 'comment-target' }],
+                textRuns: [],
+            },
+            documentStyle: {},
+        }, [
+            [IClipboardInterfaceService, { useClass: TestClipboardInterfaceService }],
+            [IDocClipboardService, { useClass: DocClipboardService }],
+        ]);
+        const commands = bed.get(ICommandService);
+        [InnerPasteCommand, RichTextEditingMutation, SetTextSelectionsOperation].forEach((command) => commands.registerCommand(command));
+        const selection = bed.get(DocSelectionManagerService);
+        selection.__TEST_ONLY_setCurrentSelection({ unitId, subUnitId: '' });
+        selection.__TEST_ONLY_add([{ startOffset: 7, endOffset: 15, collapsed: false, isActive: true, segmentId: '' }]);
+        return { ...bed, unitId, commands, clipboard: bed.get(IDocClipboardService) };
+    }
+
+    it.each(['clipboard text', 'HTML', 'internal fragment'] as const)('discards dark-mode formatting from %s and preserves undo/redo', async (source) => {
+        const bed = setup();
+        const html = '<span style="background-color: #202020; color: #ffffff; font-size: 28px; font-weight: bold">中文🙂 café</span>';
+        const internalJson = createInternalClipboardFragment({
+            body: {
+                dataStream: '中文🙂 café',
+                textRuns: [{ st: 0, ed: 9, ts: { bl: BooleanNumber.TRUE, fs: 28, bg: { rgb: '#202020' }, cl: { rgb: '#ffffff' } } }],
+            },
+        });
+        try {
+            const before = Tools.deepClone(bed.doc.getBody());
+            const payload = { unitId: bed.unitId, files: [], mode: 'source' as const };
+            const content = source === 'HTML' ? { html } : { internalJson };
+            const text = '中文🙂 café\n第二段\t文字\nhttps://univer.ai';
+            expect(await bed.clipboard.legacyPaste({
+                ...payload,
+                ...content,
+                ...(source === 'clipboard text' ? { html, text } : {}),
+            })).toBe(true);
+
+            const after = Tools.deepClone(bed.doc.getBody())!;
+            const expectedText = source === 'clipboard text' ? text.replace(/\n/g, '\r') : '中文🙂 café';
+            expect(after.dataStream).toBe(`Before ${expectedText} after\r\n`);
+            expect(after.textRuns ?? []).toEqual([]);
+            expect(after.paragraphs?.some((paragraph) => Object.keys(paragraph.paragraphStyle ?? {}).length)).toBe(false);
+            expect(after.customRanges ?? []).toEqual([]);
+            expect(after.customBlocks ?? []).toEqual([]);
+            expect(await firstValueFrom(bed.clipboard.pasteOptions$)).toBeNull();
+            expect(validateDocBodyStructure(after)).toEqual([]);
+            expect(await bed.commands.executeCommand(UndoCommand.id)).toBe(true);
+            expect(bed.doc.getBody()).toEqual(before);
+            expect(await bed.commands.executeCommand(RedoCommand.id)).toBe(true);
+            expect(bed.doc.getBody()).toEqual(after);
+        } finally {
+            bed.univer.dispose();
+        }
+    });
+
+    it('flattens an internal table fragment to text without inserting table resources', async () => {
+        const bed = setup();
+        const token = DataStreamTreeTokenType;
+        const row = (cells: string[]) => token.TABLE_ROW_START
+            + cells.map((text) => `${token.TABLE_CELL_START}${text}\r\n${token.TABLE_CELL_END}`).join('')
+            + token.TABLE_ROW_END;
+        const dataStream = token.TABLE_START + row(['A', 'B']) + row(['C', 'D']) + token.TABLE_END;
+        try {
+            expect(await bed.clipboard.legacyPaste({
+                unitId: bed.unitId,
+                internalJson: createInternalClipboardFragment({
+                    body: {
+                        dataStream,
+                        tables: [{ startIndex: 0, endIndex: dataStream.length, tableId: 'copied-table' }],
+                    },
+                    tableSource: {},
+                }),
+                files: [],
+            })).toBe(true);
+            expect(bed.doc.getBody()?.dataStream).toBe('Before A\tB\rC\tD after\r\n');
+            expect(bed.doc.getBody()?.tables ?? []).toEqual([]);
+            expect(bed.doc.getBody()?.textRuns ?? []).toEqual([]);
+            expect(Object.keys(bed.doc.getSnapshot().tableSource ?? {})).toEqual([]);
+        } finally {
+            bed.univer.dispose();
+        }
+    });
+
+    it('ignores image-only clipboard content without replacing selected comment text', async () => {
+        const bed = setup();
+        try {
+            const before = Tools.deepClone(bed.doc.getBody());
+            expect(await bed.clipboard.legacyPaste({
+                unitId: bed.unitId,
+                files: [new File(['image'], 'comment.png', { type: 'image/png' })],
+            })).toBe(false);
+            expect(bed.doc.getBody()).toEqual(before);
+            expect(bed.get(IUndoRedoService).getUndoRedoStatus(bed.unitId).undos).toBe(0);
+        } finally {
+            bed.univer.dispose();
+        }
+    });
+});
+
+describe('internal editor paste options', () => {
+    it('opts in only the active editor, switches its own history, and clears options when editing ends', async () => {
+        const univer = new Univer();
+        univer.registerPlugin(UniverDocsPlugin);
+        const injector = univer.__getInjector();
+        injector.add([IRenderManagerService, { useClass: RenderManagerService }]);
+        injector.add([DocMenuStyleService]);
+        injector.add([DocHtmlExportService]);
+        injector.add([IClipboardInterfaceService, { useClass: TestClipboardInterfaceService }]);
+        injector.add([IDocClipboardService, { useClass: DocClipboardService }]);
+        const host = univer.createUnit(UniverInstanceType.UNIVER_DOC, { id: 'host', body: { dataStream: 'Host\r\n' } });
+        const unitId = createInternalEditorID('shape-paste');
+        const doc = univer.createUnit<IDocumentData, DocumentDataModel>(UniverInstanceType.UNIVER_DOC, {
+            id: unitId,
+            body: { dataStream: 'Before\r\n', paragraphs: [{ startIndex: 6, paragraphId: 'target' }], customBlocks: [] },
+            documentStyle: {},
+        });
+        const instanceService = injector.get(IUniverInstanceService);
+        instanceService.focusUnit(host.getUnitId());
+        instanceService.setCurrentUnitForType(unitId);
+        const context = injector.get(IContextService);
+        context.setContextValue(EDITOR_ACTIVATED, true);
+        context.setContextValue(FOCUSING_SHAPE_TEXT_EDITOR, true);
+        const selection = injector.get(DocSelectionManagerService);
+        selection.__TEST_ONLY_setCurrentSelection({ unitId, subUnitId: '' });
+        selection.__TEST_ONLY_add([{ startOffset: 6, endOffset: 6, collapsed: true, isActive: true, segmentId: '' }]);
+        const commands = injector.get(ICommandService);
+        commands.registerCommand(InnerPasteCommand);
+        const clipboard = injector.get(IDocClipboardService);
+        const history = injector.get(IUndoRedoService);
+        const payload = { unitId, files: [], html: '<b>Rich</b>', text: 'Rich' };
+        try {
+            expect(clipboard.isPasteOptionsEnabled(unitId)).toBe(false);
+            expect(await clipboard.legacyPaste(payload)).toBe(true);
+            expect(await firstValueFrom(clipboard.pasteOptions$)).toBeNull();
+            const hook = clipboard.addClipboardHook({ supportsPasteOptions: (id) => id === unitId });
+            expect(clipboard.isPasteOptionsEnabled(createInternalEditorID('other'))).toBe(false);
+            const before = Tools.deepClone(doc.getBody());
+            expect(await clipboard.legacyPaste(payload)).toBe(true);
+            expect(await firstValueFrom(clipboard.pasteOptions$)).toMatchObject({ unitId, mode: 'source' });
+            const source = Tools.deepClone(doc.getBody());
+            commands.syncExecuteCommand(RichTextEditingMutation.id, {
+                unitId: host.getUnitId(),
+                actions: [],
+                textRanges: null,
+                isSync: true,
+            });
+            expect(await firstValueFrom(clipboard.pasteOptions$)).toMatchObject({ unitId, mode: 'source' });
+            expect(await clipboard.changePasteMode('text')).toBe(true);
+            expect(doc.getBody()?.dataStream).toBe(source?.dataStream);
+            expect(await clipboard.changePasteMode('destination')).toBe(true);
+            expect(await clipboard.changePasteMode('source')).toBe(true);
+            expect(doc.getBody()).toEqual(source);
+            expect(history.getUndoRedoStatus(unitId).undos).toBe(2);
+            expect(history.getUndoRedoStatus(host.getUnitId()).undos).toBe(0);
+            expect(instanceService.getFocusedUnit()).toBe(host);
+            expect(commands.syncExecuteCommand(UndoCommand.id)).toBe(true);
+            expect(doc.getBody()).toEqual(before);
+            expect(commands.syncExecuteCommand(RedoCommand.id)).toBe(true);
+            expect(doc.getBody()).toEqual(source);
+            expect(await clipboard.legacyPaste(payload)).toBe(true);
+            context.setContextValue(FOCUSING_SHAPE_TEXT_EDITOR, false);
+            context.setContextValue(EDITOR_ACTIVATED, false);
+            hook.dispose();
+            expect(await firstValueFrom(clipboard.pasteOptions$)).toBeNull();
+            expect(await clipboard.changePasteMode('text')).toBe(false);
+            expect(clipboard.isPasteOptionsEnabled(unitId)).toBe(false);
+        } finally {
+            univer.dispose();
+        }
+    });
+});

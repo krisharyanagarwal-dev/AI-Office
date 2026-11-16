@@ -1,0 +1,110 @@
+version: '3.8'
+
+services:
+  # Filesystem MCP Server
+  filesystem:
+    image: mcp/filesystem:latest
+    build:
+      context: ./servers/filesystem
+    volumes:
+      - ./workspace:/workspace:rw
+      - ~/.mcp:/root/.mcp:ro
+    command: [/workspace]
+    ports:
+      - "8080:8080"  # For debugging if needed
+    healthcheck:
+      test: ["CMD", "true"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Git MCP Server
+  git:
+    image: mcp/git:latest
+    build:
+      context: ./servers/git
+    volumes:
+      - ./workspace:/workspace:rw
+      - ~/.gitconfig:/root/.gitconfig:ro
+    command: ["--repository", "/workspace"]
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD", "true"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # GitHub MCP Server
+  github:
+    image: mcp/github:latest
+    build:
+      context: ./servers/github
+    environment:
+      - GITHUB_PERSONAL_ACCESS_TOKEN=${GITHUB_TOKEN}
+    volumes:
+      - ./workspace:/workspace:rw
+    command: []
+    ports:
+      - "8082:8082"
+    healthcheck:
+      test: ["CMD", "true"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # PostgreSQL MCP Server
+  postgres:
+    image: mcp/postgres:latest
+    build:
+      context: ./servers/postgres
+    entrypoint: []
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-mcp}
+    ports:
+      - "8083:8083"
+    command: ["sh", "-c", "sleep 30"]
+    healthcheck:
+      test: ["CMD", "true"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+#   # Playwright MCP Server (Browser Automation)
+#   playwright:
+#     image: mcp/playwright:latest
+#     build:
+#       context: ./servers/playwright
+#     volumes:
+#       - ./workspace:/workspace:rw
+#       - /dev/shm:/dev/shm
+#     command: ["mcp-server-playwright"]
+#     ports:
+#       - "8085:8085"
+#     healthcheck:
+#       test: ["CMD", "curl", "-f", "http://localhost:8085/health"]
+#       interval: 10s
+#       timeout: 5s
+#       retries: 5
+
+  # MCP Inspector (for debugging)
+  inspector:
+    image: mcp/inspector:latest
+    build:
+      context: ./inspector
+    ports:
+      - "8086:8086"
+    environment:
+      - MCP_SERVER_URL=http://host.docker.internal:8080
+    depends_on:
+      filesystem:
+         condition: service_started
+
+networks:
+  default:
+    name: mcp-network
+    driver: bridge

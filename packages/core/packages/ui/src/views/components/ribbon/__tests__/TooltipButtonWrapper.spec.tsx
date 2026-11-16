@@ -1,0 +1,594 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/**
+ * @vitest-environment jsdom
+ */
+
+import type { ComponentType, ReactElement } from 'react';
+import { act, cleanup, createEvent, fireEvent, render, waitFor } from '@testing-library/react';
+import {
+    CommandService,
+    ConfigService,
+    ContextService,
+    DesktopLogService,
+    FOCUSING_SHEET,
+    ICommandService,
+    IConfigService,
+    IContextService,
+    ILogService,
+    Injector,
+    IUniverInstanceService,
+    LocaleService,
+    LocaleType,
+    UniverInstanceService,
+    Workbook,
+} from '@univerjs/core';
+import { ConfigProvider, Dialog, Dropdown } from '@univerjs/design';
+import { useState } from 'react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ComponentManager } from '../../../../common/component-manager';
+import { IconManager } from '../../../../common/icon-manager';
+import { FontService, IFontService } from '../../../../services/font.service';
+import { DesktopLayoutService, ILayoutService } from '../../../../services/layout/layout.service';
+import { MenuItemType } from '../../../../services/menu/menu';
+import { IMenuManagerService, MenuManagerService } from '../../../../services/menu/menu-manager.service';
+import { IPlatformService, PlatformService } from '../../../../services/platform/platform.service';
+import { IUIRuntimeScopeService, UIRuntimeScopeService } from '../../../../services/runtime-scope/ui-runtime-scope.service';
+import { IShortcutService, ShortcutService } from '../../../../services/shortcut/shortcut.service';
+import { connectInjector } from '../../../../utils/di';
+import { FONT_FAMILY_ITEM_COMPONENT, FontFamilyItem } from '../../../font-family/FontFamilyItem';
+import {
+    DropdownMenuLabel,
+    DropdownMenuWrapper,
+    DropdownWrapper,
+    ToolbarDropdownProvider,
+    ToolbarTooltip,
+    TooltipWrapper,
+} from '../TooltipButtonWrapper';
+
+const testInjectors: Injector[] = [];
+
+function NestedDialogDropdown() {
+    const [open, setOpen] = useState(false);
+
+    return (
+        <>
+            <Dropdown overlay={<button type="button" onClick={() => setOpen(true)}>More colors</button>}>
+                <button type="button">Border color</button>
+            </Dropdown>
+            <Dialog open={open}>Custom color</Dialog>
+        </>
+    );
+}
+
+function renderWithDependencies(
+    element: ReactElement,
+    menuItems: ReturnType<IMenuManagerService['getMenuByPositionKey']> = []
+) {
+    const injector = new Injector();
+    testInjectors.push(injector);
+    injector.add([LocaleService]);
+    injector.add([ILogService, { useClass: DesktopLogService }]);
+    injector.add([ComponentManager]);
+    injector.add([IconManager]);
+    injector.add([IMenuManagerService, { useClass: MenuManagerService }]);
+    injector.add([ICommandService, { useClass: CommandService }]);
+    injector.add([IConfigService, { useClass: ConfigService }]);
+    injector.add([IContextService, { useClass: ContextService }]);
+    injector.add([IUniverInstanceService, { useClass: UniverInstanceService }]);
+    injector.add([ILayoutService, { useClass: DesktopLayoutService }]);
+    injector.add([IPlatformService, { useClass: PlatformService }]);
+    injector.add([IUIRuntimeScopeService, { useClass: UIRuntimeScopeService }]);
+    injector.add([IShortcutService, { useClass: ShortcutService }]);
+    const localeService = injector.get(LocaleService);
+    localeService.load({ [LocaleType.EN_US]: { Reset: 'Reset' } });
+    localeService.setLocale(LocaleType.EN_US);
+    localeService.setDirection('ltr');
+    injector.get(IMenuManagerService).appendRootMenu({
+        'test-menu': Object.fromEntries(menuItems.map((item) => [item.key, {
+            order: item.order,
+            menuItemFactory: () => item.item!,
+        }])),
+    });
+    const forceEscape = vi.spyOn(injector.get(IShortcutService), 'forceEscape');
+    injector.get(ComponentManager).register('TestDynamicOption', ({ onChange }: { onChange: (value: string) => void }) => (
+        <button type="button" onClick={() => onChange('dynamic-value')}>Choose dynamic value</button>
+    ));
+
+    const ConnectedTestRoot = connectInjector(() => element, injector) as ComponentType;
+    return { ...render(<ConnectedTestRoot />), forceEscape, injector };
+}
+
+afterEach(() => {
+    cleanup();
+    testInjectors.forEach((injector) => injector.dispose());
+    testInjectors.length = 0;
+    vi.restoreAllMocks();
+});
+
+describe('ToolbarTooltip', () => {
+    it('stays hidden after its popup closes until a new trigger interaction', () => {
+        const renderTooltip = (popupOpen: boolean) => (
+            <ToolbarTooltip title="Fill" popupOpen={popupOpen}>
+                <button type="button">Fill trigger</button>
+            </ToolbarTooltip>
+        );
+        const { getByRole, queryByRole, rerender } = render(renderTooltip(false));
+        const trigger = getByRole('button', { name: 'Fill trigger' }).parentElement;
+        if (!trigger) {
+            throw new Error('Expected toolbar tooltip trigger wrapper');
+        }
+
+        fireEvent.mouseEnter(trigger);
+        const tooltip = getByRole('tooltip');
+        expect(tooltip.textContent).toBe('Fill');
+        expect(tooltip.classList.contains('univer-pointer-events-none')).toBe(true);
+
+        rerender(renderTooltip(true));
+        expect(queryByRole('tooltip')).toBeNull();
+
+        rerender(renderTooltip(false));
+        expect(queryByRole('tooltip')).toBeNull();
+
+        fireEvent.mouseLeave(trigger);
+        fireEvent.mouseEnter(trigger);
+        expect(getByRole('tooltip').textContent).toBe('Fill');
+    });
+});
+
+describe('DropdownMenuLabel', () => {
+    it('keeps Ribbon trigger toggling and closed-menu pointer focus separate during exit', async () => {
+        const getComputedStyle = window.getComputedStyle.bind(window);
+        const styleSpy = vi.spyOn(window, 'getComputedStyle').mockImplementation((element, pseudoElement) => {
+            const styles = getComputedStyle(element, pseudoElement);
+            if (element.getAttribute('data-slot') !== 'dropdown-menu-content') {
+                return styles;
+            }
+            // jsdom does not animate; keep the real Presence exit lifecycle alive.
+            return new Proxy(styles, {
+                get(target, property) {
+                    if (property === 'animationName') {
+                        return element.getAttribute('data-state') === 'closed' ? 'menu-exit' : 'none';
+                    }
+                    return Reflect.get(target, property);
+                },
+            });
+        });
+        try {
+            const { getByRole, getByText } = renderWithDependencies(
+                <>
+                    <input aria-label="Next editor" />
+                    <TooltipWrapper dropdownKey="exit-menu">
+                        <DropdownMenuWrapper menuId="test-menu" options={[{ label: 'Center', value: 'center' }]} onOptionSelect={vi.fn()}>
+                            <button type="button">Align</button>
+                        </DropdownMenuWrapper>
+                    </TooltipWrapper>
+                </>
+            );
+            const trigger = getByRole('button', { name: 'Align' });
+            for (const open of [true, false, true, false]) {
+                await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+                fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false, pointerType: 'mouse' });
+                expect(trigger.getAttribute('aria-expanded')).toBe(String(open));
+                const item = getByText('Center');
+                expect(item.closest('[data-radix-menu-content]')?.getAttribute('data-state')).toBe(open ? 'open' : 'closed');
+                if (!open) {
+                    const editor = getByRole('textbox', { name: 'Next editor' });
+                    editor.focus();
+                    for (const type of ['pointerMove', 'pointerOut'] as const) {
+                        const event = createEvent[type](item, { bubbles: true, cancelable: true, relatedTarget: editor });
+                        Object.defineProperty(event, 'pointerType', { value: 'mouse' });
+                        fireEvent(item, event);
+                        expect(document.activeElement).toBe(editor);
+                    }
+                }
+            }
+        } finally {
+            cleanup();
+            styleSpy.mockRestore();
+        }
+    });
+
+    it('preserves option metadata when a custom label emits a dynamic value', () => {
+        const onOptionSelect = vi.fn();
+        const params = (value?: string | number) => ({ value });
+        const option = {
+            id: 'dynamic-option',
+            commandId: 'dynamic-command',
+            label: {
+                name: 'TestDynamicOption',
+                selectable: false,
+            },
+            params,
+        };
+        const { getByRole } = renderWithDependencies(
+            <DropdownMenuLabel
+                option={option}
+                onOptionSelect={onOptionSelect}
+            />
+        );
+
+        fireEvent.click(getByRole('button', { name: 'Choose dynamic value' }));
+
+        expect(onOptionSelect).toHaveBeenCalledWith({
+            ...option,
+            value: 'dynamic-value',
+        });
+    });
+});
+
+describe('DropdownWrapper', () => {
+    it('keeps an enabled dropdown open when a sibling is disabled', () => {
+        const { getByRole, queryByText } = render(
+            <ToolbarDropdownProvider>
+                <TooltipWrapper dropdownKey="disabled-dropdown">
+                    <DropdownWrapper disabled overlay={<div>Disabled content</div>}>
+                        <button type="button">Disabled dropdown</button>
+                    </DropdownWrapper>
+                </TooltipWrapper>
+                <TooltipWrapper dropdownKey="enabled-dropdown">
+                    <DropdownWrapper overlay={<div>Enabled content</div>}>
+                        <button type="button">Enabled dropdown</button>
+                    </DropdownWrapper>
+                </TooltipWrapper>
+            </ToolbarDropdownProvider>
+        );
+
+        fireEvent.click(getByRole('button', { name: 'Enabled dropdown' }));
+
+        expect(queryByText('Enabled content')).not.toBeNull();
+    });
+
+    it('opens toward the left in RTL layouts', async () => {
+        const { findByText, getByRole } = render(
+            <ConfigProvider direction="rtl" mountContainer={document.body}>
+                <ToolbarDropdownProvider>
+                    <TooltipWrapper dropdownKey="test-dropdown">
+                        <DropdownWrapper overlay={<div>Dropdown content</div>}>
+                            <button type="button">Open dropdown</button>
+                        </DropdownWrapper>
+                    </TooltipWrapper>
+                </ToolbarDropdownProvider>
+            </ConfigProvider>
+        );
+
+        fireEvent.click(getByRole('button', { name: 'Open dropdown' }));
+        const content = (await findByText('Dropdown content')).closest('[data-slot="popover-content"]');
+
+        expect(content?.getAttribute('data-align')).toBe('end');
+    });
+
+    it('closes on an outside pointerdown even when no click follows', async () => {
+        const { findByText, getByRole, queryByText } = render(
+            <ToolbarDropdownProvider>
+                <TooltipWrapper dropdownKey="test-dropdown">
+                    <DropdownWrapper overlay={<div>Dropdown content</div>}>
+                        <button type="button">Open dropdown</button>
+                    </DropdownWrapper>
+                </TooltipWrapper>
+            </ToolbarDropdownProvider>
+        );
+
+        fireEvent.click(getByRole('button', { name: 'Open dropdown' }));
+        await findByText('Dropdown content');
+        fireEvent.pointerDown(document.body);
+
+        expect(queryByText('Dropdown content')).toBeNull();
+    });
+
+    it('keeps the toolbar dropdown open when interacting with a nested portaled dropdown', () => {
+        const { getByRole } = render(
+            <ConfigProvider mountContainer={document.body}>
+                <ToolbarDropdownProvider>
+                    <TooltipWrapper dropdownKey="border-dropdown">
+                        <DropdownWrapper
+                            overlay={<NestedDialogDropdown />}
+                        >
+                            <button type="button">Border</button>
+                        </DropdownWrapper>
+                    </TooltipWrapper>
+                </ToolbarDropdownProvider>
+            </ConfigProvider>
+        );
+
+        fireEvent.click(getByRole('button', { name: 'Border' }));
+        fireEvent.click(getByRole('button', { name: 'Border color' }));
+        const moreColorButton = getByRole('button', { name: 'More colors' });
+        fireEvent.pointerDown(moreColorButton);
+        fireEvent.click(moreColorButton);
+
+        expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    });
+});
+
+describe('DropdownMenuWrapper', () => {
+    it.each(['worksheet', 'workbook'])(
+        'invalidates an open Sheet menu when its %s changes',
+        async (change) => {
+            const onOptionSelect = vi.fn();
+            const { injector, getByRole, findByRole, queryByRole } = renderWithDependencies(
+                <TooltipWrapper>
+                    <DropdownMenuWrapper
+                        menuId="test-menu"
+                        options={[{ label: { name: 'RetainedOption', selectable: false } }]}
+                        onOptionSelect={onOptionSelect}
+                    >
+                        <button type="button">Open scoped menu</button>
+                    </DropdownMenuWrapper>
+                </TooltipWrapper>
+            );
+            let retainedChange: ((value: string) => void) | undefined;
+            const registration = injector.get(ComponentManager).register('RetainedOption', ({ onChange }: {
+                onChange: (value: string) => void;
+            }) => {
+                retainedChange = onChange;
+                return <button type="button">Retained option</button>;
+            });
+            const editor = document.createElement('input');
+            document.body.appendChild(editor);
+            const workbook = injector.createInstance(Workbook, {
+                id: 'original',
+                sheetOrder: ['first', 'second'],
+                sheets: { first: { id: 'first', name: 'First' }, second: { id: 'second', name: 'Second' } },
+            });
+            const peer = injector.createInstance(Workbook, {
+                id: 'peer',
+                sheetOrder: ['peer-sheet'],
+                sheets: { 'peer-sheet': { id: 'peer-sheet', name: 'Peer' } },
+            });
+            const instances = injector.get(IUniverInstanceService);
+            instances.__addUnit(workbook);
+            instances.__addUnit(peer);
+            instances.setCurrentUnitForType(workbook.getUnitId());
+            injector.get(IContextService).setContextValue(FOCUSING_SHEET, true);
+            editor.focus();
+            fireEvent.pointerDown(getByRole('button', { name: 'Open scoped menu' }), { button: 0, ctrlKey: false });
+            await findByRole('button', { name: 'Retained option' });
+            const callback = retainedChange;
+            act(() => workbook.setActiveSheet(workbook.getActiveSheet()));
+            expect(queryByRole('button', { name: 'Retained option' })).not.toBeNull();
+            act(() => {
+                if (change === 'worksheet') {
+                    workbook.setActiveSheet(workbook.getSheetBySheetId('second')!);
+                } else {
+                    instances.setCurrentUnitForType(peer.getUnitId());
+                }
+                callback?.('stale-value');
+            });
+            await waitFor(() => expect(queryByRole('button', { name: 'Retained option' })).toBeNull());
+            expect(onOptionSelect).not.toHaveBeenCalled();
+            act(() => {
+                instances.setCurrentUnitForType(workbook.getUnitId());
+                workbook.setActiveSheet(workbook.getSheetBySheetId('first')!);
+            });
+            fireEvent.pointerDown(getByRole('button', { name: 'Open scoped menu' }), { button: 0, ctrlKey: false });
+            await findByRole('button', { name: 'Retained option' });
+            act(() => callback?.('late-value-after-reopen'));
+            expect(onOptionSelect).not.toHaveBeenCalled();
+            expect(queryByRole('button', { name: 'Retained option' })).not.toBeNull();
+            registration.dispose();
+            editor.remove();
+            workbook.dispose();
+            peer.dispose();
+        }
+    );
+
+    it.each([undefined, 'embed-1'].flatMap((owner) => (
+        ['select', 'escape', 'outside', 'owner-change', 'command-focus'].map((closeAction) => ({ owner, closeAction }))
+    )))(
+        'restores the editor with boundary $owner after $closeAction only while it still owns the interaction',
+        async ({ owner, closeAction }) => {
+            const editor = document.createElement('div');
+            editor.tabIndex = 0;
+            editor.dataset.uComp = 'editor';
+            if (owner) {
+                editor.dataset.embedInteractionBoundaryOwner = owner;
+            }
+            const outside = document.createElement('input');
+            document.body.append(editor, outside);
+            try {
+                const { findByRole, getByRole } = renderWithDependencies(
+                    <ToolbarDropdownProvider>
+                        <TooltipWrapper dropdownKey="test-editor-focus">
+                            <DropdownMenuWrapper
+                                menuId="test-menu"
+                                options={[{ label: { name: 'TestDynamicOption', hoverable: false, selectable: false } }]}
+                                onOptionSelect={() => {
+                                    if (closeAction === 'command-focus') {
+                                        editor.focus();
+                                    }
+                                }}
+                            >
+                                <button type="button">Open editor menu</button>
+                            </DropdownMenuWrapper>
+                        </TooltipWrapper>
+                    </ToolbarDropdownProvider>
+                );
+                const trigger = getByRole('button', { name: 'Open editor menu' });
+                editor.focus();
+                fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+                const option = await findByRole('button', { name: 'Choose dynamic value' });
+                option.focus();
+
+                if (closeAction === 'outside') {
+                    fireEvent.pointerDown(outside, { button: 0, ctrlKey: false });
+                    outside.focus();
+                } else if (closeAction === 'escape') {
+                    fireEvent.keyDown(option, { key: 'Escape', keyCode: 27 });
+                } else {
+                    if (closeAction === 'owner-change') {
+                        editor.dataset.embedInteractionBoundaryOwner = 'embed-2';
+                    }
+                    fireEvent.click(option);
+                }
+
+                await waitFor(() => expect(trigger.getAttribute('aria-expanded')).toBe('false'));
+                if (closeAction === 'outside') {
+                    await waitFor(() => expect(document.activeElement).toBe(outside));
+                } else if (closeAction === 'owner-change') {
+                    await waitFor(() => expect(document.activeElement).toBe(trigger));
+                } else {
+                    await waitFor(() => expect(document.activeElement).toBe(editor));
+                }
+            } finally {
+                editor.remove();
+                outside.remove();
+            }
+        }
+    );
+
+    it('renders a single embedded custom panel flush with the dropdown edge', async () => {
+        const { findByRole, forceEscape, getByRole } = renderWithDependencies(
+            <ToolbarDropdownProvider>
+                <TooltipWrapper dropdownKey="test-custom-panel">
+                    <DropdownMenuWrapper
+                        menuId="test-menu"
+                        options={[{
+                            label: {
+                                name: 'TestDynamicOption',
+                                hoverable: false,
+                                selectable: false,
+                                props: { embedded: true },
+                            },
+                        }]}
+                        onOptionSelect={vi.fn()}
+                    >
+                        <button type="button">Open custom panel</button>
+                    </DropdownMenuWrapper>
+                </TooltipWrapper>
+            </ToolbarDropdownProvider>
+        );
+
+        fireEvent.pointerDown(getByRole('button', { name: 'Open custom panel' }), { button: 0, ctrlKey: false });
+        const option = await findByRole('button', { name: 'Choose dynamic value' });
+        const menuItem = option.closest('[data-slot="dropdown-menu-item"]');
+        const menuContent = option.closest('[data-slot="dropdown-menu-content"]');
+
+        expect(menuItem?.className).toContain('!univer-p-0');
+        expect(menuContent?.className).toContain('!univer-p-0');
+        expect(forceEscape).toHaveBeenCalledOnce();
+        const disposeShortcutEscape = vi.spyOn(forceEscape.mock.results[0].value, 'dispose');
+
+        fireEvent.click(option);
+        await waitFor(() => expect(disposeShortcutEscape).toHaveBeenCalledOnce());
+    });
+
+    it('uses only the shared menu padding around the font list and selects its font value', async () => {
+        vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
+        const onOptionSelect = vi.fn();
+        const { findByRole, getByRole, queryByRole, injector } = renderWithDependencies(
+            <ToolbarDropdownProvider>
+                <TooltipWrapper dropdownKey="font-family">
+                    <DropdownMenuWrapper
+                        menuId="test-menu"
+                        options={[{
+                            label: {
+                                name: FONT_FAMILY_ITEM_COMPONENT,
+                                hoverable: false,
+                                selectable: false,
+                            },
+                        }]}
+                        onOptionSelect={onOptionSelect}
+                    >
+                        <button type="button">Open fonts</button>
+                    </DropdownMenuWrapper>
+                </TooltipWrapper>
+            </ToolbarDropdownProvider>
+        );
+        injector.add([IFontService, { useClass: FontService }]);
+        injector.get(ComponentManager).register(FONT_FAMILY_ITEM_COMPONENT, FontFamilyItem);
+
+        fireEvent.pointerDown(getByRole('button', { name: 'Open fonts' }), { button: 0, ctrlKey: false });
+        const option = await findByRole('button', { name: 'Courier New' });
+        expect(option.closest('[data-slot="dropdown-menu-item"]')?.className).toContain('!univer-p-0');
+        expect(getByRole('menu').className).not.toContain('!univer-p-0');
+
+        fireEvent.click(option);
+        expect(onOptionSelect).toHaveBeenCalledWith(expect.objectContaining({ value: 'Courier New' }));
+        await waitFor(() => expect(queryByRole('menu')).toBeNull());
+    });
+
+    it('keeps padding around a non-embedded custom panel', async () => {
+        const { findByRole, getByRole } = renderWithDependencies(
+            <ToolbarDropdownProvider>
+                <TooltipWrapper dropdownKey="test-non-embedded-custom-panel">
+                    <DropdownMenuWrapper
+                        menuId="test-menu"
+                        options={[{
+                            label: {
+                                name: 'TestDynamicOption',
+                                hoverable: false,
+                                selectable: false,
+                            },
+                        }]}
+                        onOptionSelect={vi.fn()}
+                    >
+                        <button type="button">Open non-embedded custom panel</button>
+                    </DropdownMenuWrapper>
+                </TooltipWrapper>
+            </ToolbarDropdownProvider>
+        );
+
+        fireEvent.pointerDown(getByRole('button', { name: 'Open non-embedded custom panel' }), { button: 0, ctrlKey: false });
+        const option = await findByRole('button', { name: 'Choose dynamic value' });
+        const menuItem = option.closest('[data-slot="dropdown-menu-item"]');
+        const menuContent = option.closest('[data-slot="dropdown-menu-content"]');
+
+        expect(menuItem?.className).not.toContain('!univer-p-0');
+        expect(menuContent?.className).not.toContain('!univer-p-0');
+    });
+
+    it('keeps padding around a custom panel when menu actions follow it', async () => {
+        const { findByRole, getByRole } = renderWithDependencies(
+            <ToolbarDropdownProvider>
+                <TooltipWrapper dropdownKey="test-custom-panel-with-action">
+                    <DropdownMenuWrapper
+                        menuId="test-menu"
+                        options={[{
+                            label: {
+                                name: 'TestDynamicOption',
+                                hoverable: false,
+                                selectable: false,
+                                props: { embedded: true },
+                            },
+                        }]}
+                        onOptionSelect={vi.fn()}
+                    >
+                        <button type="button">Open custom panel with action</button>
+                    </DropdownMenuWrapper>
+                </TooltipWrapper>
+            </ToolbarDropdownProvider>,
+            [{
+                key: 'reset',
+                order: 0,
+                item: {
+                    id: 'reset',
+                    type: MenuItemType.BUTTON,
+                    title: 'Reset',
+                },
+            }]
+        );
+
+        fireEvent.pointerDown(getByRole('button', { name: 'Open custom panel with action' }), { button: 0, ctrlKey: false });
+        const option = await findByRole('button', { name: 'Choose dynamic value' });
+        const menuItem = option.closest('[data-slot="dropdown-menu-item"]');
+        const menuContent = option.closest('[data-slot="dropdown-menu-content"]');
+
+        expect(menuItem?.className).not.toContain('!univer-p-0');
+        expect(menuContent?.className).not.toContain('!univer-p-0');
+    });
+});

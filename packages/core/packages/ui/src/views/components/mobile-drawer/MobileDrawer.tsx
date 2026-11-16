@@ -1,0 +1,373 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type { AriaRole, PointerEvent, ReactNode, RefObject, TouchEvent } from 'react';
+import type { MobilePanelLayout } from '../../mobile-workbench/MobileCanvasLayout';
+import {
+    clsx,
+    MobileOverlayContext,
+    resetButtonClassName,
+    scrollbarClassName,
+    useMobileKeyboardViewportLayout,
+} from '@univerjs/design';
+import { createContext, useCallback, useContext, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useMobileCanvasPanel, useMobileOverlayRegistration } from '../../mobile-workbench/MobileCanvasLayout';
+import { MobileDrawerCoordinatorContext } from './MobileDrawerCoordinator';
+
+export type MobileDrawerSnap = 'compact' | 'expanded';
+export type MobileDrawerRelease = MobileDrawerSnap | 'closed';
+export type MobileDrawerOpenMode = 'replace' | 'push';
+type MobileDrawerRef<T> = { current: T | null } | ((instance: T | null) => void) | null;
+
+function assignDrawerRef<T>(ref: MobileDrawerRef<T> | undefined, element: T | null) {
+    if (typeof ref === 'function') {
+        ref(element);
+    } else if (ref) {
+        ref.current = element;
+    }
+}
+
+const MOBILE_DRAWER_COMPACT_PERCENT = 40;
+const MOBILE_DRAWER_EXPANDED_PERCENT = 80;
+const MobileDrawerLayoutContext = createContext<MobilePanelLayout>('modal');
+
+export function resolveMobileDrawerRelease(params: {
+    snap: MobileDrawerSnap;
+    deltaY: number;
+    durationMs: number;
+    percent: number;
+}): MobileDrawerRelease {
+    const { snap, deltaY, durationMs, percent } = params;
+    const velocity = deltaY / Math.max(durationMs, 1);
+    if ((deltaY > 48 && (snap === 'compact' || velocity > 0.55)) || percent < 20) return 'closed';
+    if (snap === 'expanded' && deltaY > 24) return 'compact';
+    if (snap === 'compact' && deltaY < -24) return 'expanded';
+    return percent >= 60 ? 'expanded' : 'compact';
+}
+
+export function MobileDrawer(props: {
+    snap: MobileDrawerSnap;
+    expandLabel: string;
+    collapseLabel: string;
+    onSnapChange: (snap: MobileDrawerSnap) => void;
+    onClose: () => void;
+    children?: ReactNode;
+    header?: ReactNode;
+    floatingActions?: ReactNode;
+    componentName?: string;
+    panelRef?: MobileDrawerRef<HTMLElement>;
+    contentRef?: MobileDrawerRef<HTMLDivElement>;
+    layerRef?: RefObject<HTMLElement | null>;
+    openMode?: MobileDrawerOpenMode;
+    panelClassName?: string;
+    contentClassName?: string;
+    footer?: ReactNode;
+    role?: AriaRole;
+    ariaLabel?: string;
+    layout?: MobilePanelLayout;
+}) {
+    const {
+        snap,
+        expandLabel,
+        collapseLabel,
+        onSnapChange,
+        onClose,
+        children,
+        header,
+        floatingActions,
+        componentName = 'mobile-drawer',
+        panelRef,
+        contentRef,
+        layerRef,
+        openMode = 'replace',
+        panelClassName,
+        contentClassName,
+        footer,
+        role,
+        ariaLabel,
+        layout: requestedLayout,
+    } = props;
+    const coordinator = useContext(MobileDrawerCoordinatorContext);
+    const registerDrawer = coordinator?.register;
+    const unregisterDrawer = coordinator?.unregister;
+    const panelElementRef = useRef<HTMLElement>(null);
+    const drawerIdRef = useRef<symbol | null>(null);
+    const onCloseRef = useRef(onClose);
+    onCloseRef.current = onClose;
+    if (!drawerIdRef.current) {
+        drawerIdRef.current = Symbol(componentName);
+    }
+    const drawerId = drawerIdRef.current;
+    const active = !coordinator || coordinator.activeDrawerId === drawerId;
+    const inheritedLayout = useContext(MobileDrawerLayoutContext);
+    const layout = requestedLayout ?? inheritedLayout;
+    const registerOverlay = useMobileOverlayRegistration(layout);
+    const viewportHeightUnit = globalThis.CSS?.supports('height', '1dvh') ? 'dvh' : 'vh';
+    const overlay = useMemo(() => ({
+        modal: layout === 'modal',
+        contentProps: {
+            style: layout === 'canvas'
+                ? {
+                    height: `${MOBILE_DRAWER_COMPACT_PERCENT}${viewportHeightUnit}`,
+                    maxHeight: `${MOBILE_DRAWER_COMPACT_PERCENT}${viewportHeightUnit}`,
+                }
+                : undefined,
+            // Nested canvas controls must not steal focus or restore it to a
+            // trigger after the user has resumed editing in the canvas.
+            onOpenAutoFocus: layout === 'canvas' ? (event: Event) => event.preventDefault() : undefined,
+            onCloseAutoFocus: layout === 'canvas' ? (event: Event) => event.preventDefault() : undefined,
+        },
+        onMount: registerOverlay,
+    }), [layout, registerOverlay, viewportHeightUnit]);
+    const [dragPercent, setDragPercent] = useState<number | null>(null);
+    const surfaceRef = useRef<HTMLElement>(null);
+    const setPanelRef = useCallback((element: HTMLElement | null) => {
+        surfaceRef.current = element;
+        panelElementRef.current = element;
+        assignDrawerRef(panelRef, element);
+    }, [panelRef]);
+    useMobileCanvasPanel(surfaceRef, layout, dragPercent !== null);
+    const suppressHandleClickRef = useRef(false);
+    const dragRef = useRef<{
+        startY: number;
+        startTime: number;
+        startPercent: number;
+        currentPercent: number;
+        currentY: number;
+        moved: boolean;
+    } | null>(null);
+    const drawerPercent = dragPercent ?? (snap === 'compact'
+        ? MOBILE_DRAWER_COMPACT_PERCENT
+        : MOBILE_DRAWER_EXPANDED_PERCENT);
+    const keyboardLayout = useMobileKeyboardViewportLayout(panelElementRef);
+
+    useLayoutEffect(() => {
+        if (!registerDrawer || !unregisterDrawer) {
+            return;
+        }
+
+        registerDrawer(drawerId, openMode, () => onCloseRef.current());
+        return () => unregisterDrawer(drawerId);
+    }, [drawerId, openMode, registerDrawer, unregisterDrawer]);
+
+    useLayoutEffect(() => {
+        const layer = layerRef?.current ?? (layerRef ? panelElementRef.current?.parentElement : null);
+        if (!layer) {
+            return;
+        }
+
+        layer.toggleAttribute('hidden', !active);
+    }, [active, layerRef]);
+
+    function beginDrag(clientY: number) {
+        dragRef.current = {
+            startY: clientY,
+            startTime: performance.now(),
+            startPercent: drawerPercent,
+            currentPercent: drawerPercent,
+            currentY: clientY,
+            moved: false,
+        };
+    }
+
+    function moveDrag(clientY: number) {
+        const drag = dragRef.current;
+        if (!drag) return;
+
+        const deltaY = clientY - drag.startY;
+        const nextPercent = Math.max(0, Math.min(
+            MOBILE_DRAWER_EXPANDED_PERCENT,
+            drag.startPercent - deltaY / Math.max(window.innerHeight, 1) * 100
+        ));
+        drag.currentPercent = nextPercent;
+        drag.currentY = clientY;
+        drag.moved ||= Math.abs(deltaY) > 6;
+        setDragPercent(nextPercent);
+    }
+
+    function endDrag(clientY: number) {
+        const drag = dragRef.current;
+        if (!drag) return;
+
+        const result = resolveMobileDrawerRelease({
+            snap,
+            deltaY: clientY - drag.startY,
+            durationMs: performance.now() - drag.startTime,
+            percent: drag.currentPercent,
+        });
+        suppressHandleClickRef.current = drag.moved;
+        dragRef.current = null;
+        setDragPercent(null);
+        if (result === 'closed') {
+            if (coordinator) {
+                coordinator.close(drawerId);
+            } else {
+                onClose();
+            }
+        } else {
+            onSnapChange(result);
+        }
+    }
+
+    function handlePointerDown(event: PointerEvent<HTMLButtonElement>) {
+        try {
+            event.currentTarget.setPointerCapture(event.pointerId);
+        } catch {
+            // Some embedded WebViews expose Pointer Events but not pointer capture.
+        }
+        beginDrag(event.clientY);
+    }
+
+    function handlePointerMove(event: PointerEvent<HTMLButtonElement>) {
+        moveDrag(event.clientY);
+    }
+
+    function handlePointerUp(event: PointerEvent<HTMLButtonElement>) {
+        endDrag(event.clientY);
+    }
+
+    function handlePointerCancel() {
+        const drag = dragRef.current;
+        if (!drag?.moved) {
+            dragRef.current = null;
+            setDragPercent(null);
+            return;
+        }
+
+        endDrag(drag.currentY);
+    }
+
+    function handleTouchStart(event: TouchEvent<HTMLButtonElement>) {
+        const touch = event.touches[0];
+        if (touch) {
+            beginDrag(touch.clientY);
+        }
+    }
+
+    function handleTouchMove(event: TouchEvent<HTMLButtonElement>) {
+        const touch = event.touches[0];
+        if (touch) {
+            moveDrag(touch.clientY);
+        }
+    }
+
+    function handleTouchEnd() {
+        const drag = dragRef.current;
+        if (drag) {
+            endDrag(drag.currentY);
+        }
+    }
+
+    function handleTouchCancel() {
+        handlePointerCancel();
+    }
+
+    return (
+        <MobileDrawerLayoutContext.Provider value={layout}>
+            <MobileOverlayContext.Provider value={overlay}>
+                {floatingActions && (
+                    <div
+                        className="univer-pointer-events-none univer-absolute univer-right-4 univer-z-30"
+                        style={{ bottom: `calc(${drawerPercent}${viewportHeightUnit} + 12px)` }}
+                    >
+                        {floatingActions}
+                    </div>
+                )}
+                <section
+                    ref={setPanelRef}
+                    hidden={!active}
+                    role={role}
+                    aria-modal={(layout === 'modal' && role === 'dialog') || undefined}
+                    aria-label={ariaLabel}
+                    data-u-comp={componentName}
+                    data-snap={snap}
+                // Small form text triggers iOS focus zoom. Keep this local to mobile
+                // drawers, without overriding document/contenteditable text styles.
+                    className={clsx(`
+                      univer-absolute univer-inset-x-0 univer-bottom-0 univer-z-20 univer-flex univer-flex-col
+                      univer-overflow-hidden univer-rounded-t-[24px] univer-bg-gray-50 univer-shadow-2xl
+                      univer-transition-[height] univer-duration-200
+                      dark:!univer-bg-gray-900
+                      [&_input]:!univer-text-base
+                      [&_select]:!univer-text-base
+                      [&_textarea]:!univer-text-base
+                    `, 'univer-pointer-events-auto', dragPercent != null && '!univer-transition-none', panelClassName)}
+                    style={{
+                        height: `${drawerPercent}${viewportHeightUnit}`,
+                        paddingBottom: 'env(safe-area-inset-bottom, 0px)',
+                    }}
+                >
+                    <div
+                        className="
+                          univer-relative univer-flex univer-h-14 univer-shrink-0 univer-items-end univer-bg-gray-0
+                          dark:!univer-bg-gray-800
+                        "
+                    >
+                        <button
+                            type="button"
+                            aria-label={snap === 'compact' ? expandLabel : collapseLabel}
+                            className={clsx(resetButtonClassName, `
+                              univer-absolute univer-left-1/2 univer-top-0 univer-z-10 univer-flex univer-h-6
+                              univer-w-16 -univer-translate-x-1/2 univer-touch-none univer-items-center
+                              univer-justify-center
+                            `)}
+                            style={{ touchAction: 'none' }}
+                            onPointerDown={handlePointerDown}
+                            onPointerMove={handlePointerMove}
+                            onPointerUp={handlePointerUp}
+                            onPointerCancel={handlePointerCancel}
+                            onTouchStart={handleTouchStart}
+                            onTouchMove={handleTouchMove}
+                            onTouchEnd={handleTouchEnd}
+                            onTouchCancel={handleTouchCancel}
+                            onClick={() => {
+                                if (suppressHandleClickRef.current) {
+                                    suppressHandleClickRef.current = false;
+                                    return;
+                                }
+                                onSnapChange(snap === 'compact' ? 'expanded' : 'compact');
+                            }}
+                        >
+                            <span
+                                className="
+                                  univer-h-1 univer-w-10 univer-rounded-full univer-bg-gray-300
+                                  dark:!univer-bg-gray-600
+                                "
+                            />
+                        </button>
+                        {header}
+                    </div>
+                    <div
+                        ref={contentRef}
+                        className={clsx(
+                            'univer-flex-1 univer-overflow-y-auto univer-overflow-x-hidden univer-p-3',
+                            scrollbarClassName,
+                            contentClassName
+                        )}
+                        style={{
+                            paddingBottom: keyboardLayout
+                                ? `calc(0.75rem + ${keyboardLayout.bottom}px)`
+                                : undefined,
+                        }}
+                    >
+                        {children}
+                    </div>
+                    {footer}
+                </section>
+            </MobileOverlayContext.Provider>
+        </MobileDrawerLayoutContext.Provider>
+    );
+}

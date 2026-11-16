@@ -1,0 +1,802 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type { Dependency, IDisposable, IDocumentData, Nullable } from '@univerjs/core';
+import type { ISuccinctDocRangeParam } from '@univerjs/engine-render';
+import type { IThreadComment } from '@univerjs/thread-comment';
+import type { IShortcutItem } from '@univerjs/ui';
+import type { Root } from 'react-dom/client';
+import {
+    CommandService,
+    ConfigService,
+    ContextService,
+    createIdentifier,
+    DesktopLogService,
+    ICommandService,
+    IConfigService,
+    IContextService,
+    ILogService,
+    Injector,
+    IUniverInstanceService,
+    LifecycleService,
+    LifecycleStages,
+    LocaleService,
+    LocaleType,
+    LogLevel,
+    RegionService,
+    toDisposable,
+    UniverInstanceType,
+    UserManagerService,
+} from '@univerjs/core';
+import { IEditorService } from '@univerjs/docs-ui';
+import {
+    AddCommentCommand,
+    AddCommentMutation,
+    DeleteCommentCommand,
+    DeleteCommentMutation,
+    DeleteCommentTreeCommand,
+    IThreadCommentDataSourceService,
+    ResolveCommentCommand,
+    ResolveCommentMutation,
+    ThreadCommentDataSourceService,
+    ThreadCommentModel,
+    UpdateCommentCommand,
+    UpdateCommentMutation,
+} from '@univerjs/thread-comment';
+import { IShortcutService, ISidebarService, RediContext } from '@univerjs/ui';
+import { act } from 'react';
+import { createRoot } from 'react-dom/client';
+import { BehaviorSubject, Subject } from 'rxjs';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { SetActiveCommentOperation } from '../../commands/operations/comment.operations';
+import { ThreadCommentPanelService } from '../../services/thread-comment-panel.service';
+import { MobileThreadCommentPanel } from '../mobile/MobileThreadCommentPanel';
+import { transformTextNodes2Document } from '../thread-comment-editor/util';
+import { ThreadCommentPanel } from '../ThreadCommentPanel';
+import { ThreadCommentTree, ThreadCommentTreeLocation } from '../ThreadCommentTree';
+
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+const UNIT_ID = 'unit-1';
+const SHEET_ID = 'sheet-1';
+const IRenderManagerService = createIdentifier<TestRenderManagerService>('engine-render.render-manager.service');
+interface IEditorRecord {
+    id: string;
+    data: IDocumentData;
+    selections: ISuccinctDocRangeParam[];
+    focused: boolean;
+}
+
+class TestLocaleService {
+    private readonly _currentLocale$ = new BehaviorSubject<LocaleType>(LocaleType.ZH_CN);
+    readonly currentLocale$ = this._currentLocale$.asObservable();
+    private readonly _direction$ = new BehaviorSubject<'ltr' | 'rtl'>('ltr');
+    readonly direction$ = this._direction$.asObservable();
+
+    t(key: string) {
+        return key;
+    }
+
+    getCurrentLocale() {
+        return this._currentLocale$.getValue();
+    }
+
+    getDirection() {
+        return this._direction$.getValue();
+    }
+}
+
+class TestEditor {
+    readonly input$ = new Subject<unknown>();
+    readonly paste$ = new Subject<unknown>();
+    readonly focus$ = new Subject<unknown>();
+    readonly blur$ = new Subject<unknown>();
+    readonly change$ = new Subject<unknown>();
+    readonly selectionChange$ = new Subject<unknown>();
+
+    readonly render = {
+        isDisposed: () => false,
+        with: () => ({
+            getSkeleton: () => ({
+                getActualSize: () => ({ actualWidth: 0, actualHeight: 0 }),
+            }),
+            getViewModel: () => ({
+                getDataModel: () => ({
+                    updateDocumentDataPageSize: () => undefined,
+                }),
+            }),
+        }),
+        scene: {
+            transformByState: () => undefined,
+            getViewport: () => undefined,
+        },
+        mainComponent: {
+            resize: () => undefined,
+            translate: () => undefined,
+        },
+        components: {
+            get: () => undefined,
+        },
+    };
+
+    constructor(private readonly _record: IEditorRecord) {
+    }
+
+    isFocus() {
+        return this._record.focused;
+    }
+
+    focus(): void {
+        this._record.focused = true;
+        this.focus$.next(undefined);
+    }
+
+    blur(): void {
+        this._record.focused = false;
+        this.blur$.next(undefined);
+    }
+
+    select(): void {
+    }
+
+    setSelectionRanges(ranges: ISuccinctDocRangeParam[]): void {
+        this._record.selections = ranges;
+        this.selectionChange$.next(undefined);
+    }
+
+    getSelectionRanges() {
+        return this._record.selections;
+    }
+
+    getEditorId() {
+        return this._record.id;
+    }
+
+    getDocumentData() {
+        return this._record.data;
+    }
+
+    setDocumentData(data: IDocumentData, ranges: ISuccinctDocRangeParam[] = []): void {
+        this._record.data = data;
+        this._record.selections = ranges;
+        this.selectionChange$.next(undefined);
+    }
+
+    replaceText(value: string): void {
+        this._record.data = {
+            ...this._record.data,
+            body: {
+                dataStream: `${value}\r\n`,
+            },
+        };
+        this.selectionChange$.next(undefined);
+    }
+
+    clearUndoRedoHistory(): void {
+    }
+
+    getValue() {
+        return this._record.data.body?.dataStream ?? '';
+    }
+
+    isSheetEditor() {
+        return false;
+    }
+
+    getBoundingClientRect() {
+        return { width: 320, height: 64 };
+    }
+}
+
+class TestEditorService {
+    private readonly _editors = new Map<string, TestEditor>();
+    private _focusId: Nullable<string>;
+    readonly blur$ = new Subject<unknown>();
+    readonly focus$ = new Subject<ISuccinctDocRangeParam>();
+
+    getEditor(id?: string): Nullable<TestEditor> {
+        return id ? this._editors.get(id) : undefined;
+    }
+
+    register(config: { initialSnapshot: IDocumentData }, _container: HTMLDivElement): IDisposable {
+        const snapshot = config.initialSnapshot;
+        const record: IEditorRecord = {
+            id: snapshot.id,
+            data: snapshot,
+            selections: [],
+            focused: false,
+        };
+        const editor = new TestEditor(record);
+        this._editors.set(record.id, editor);
+
+        return toDisposable(() => {
+            this._editors.delete(record.id);
+        });
+    }
+
+    getAllEditor() {
+        return this._editors;
+    }
+
+    isEditor(editorUnitId: string) {
+        return this._editors.has(editorUnitId);
+    }
+
+    getEditorRenderConfig() {
+        return null;
+    }
+
+    isSheetEditor() {
+        return false;
+    }
+
+    blur(): void {
+        this.getFocusEditor()?.blur();
+        this._focusId = null;
+        this.blur$.next(undefined);
+    }
+
+    focus(editorUnitId: string): void {
+        this._focusId = editorUnitId;
+        this.getEditor(editorUnitId)?.focus();
+        this.focus$.next({ startOffset: 0, endOffset: 0 });
+    }
+
+    getFocusId() {
+        return this._focusId;
+    }
+
+    getFocusEditor() {
+        return this._focusId ? this.getEditor(this._focusId) : undefined;
+    }
+}
+
+class TestRenderManagerService {
+    readonly created$ = new Subject<unknown>();
+    readonly disposed$ = new Subject<string>();
+    readonly defaultEngine = {};
+
+    addRender(): void {}
+    createRender() { return undefined; }
+    removeRender(): void {}
+    getRenderUnitById() { return undefined; }
+    getAllRenderersOfType() { return []; }
+    getRenderAll() { return new Map(); }
+    create(): void {}
+    has() { return false; }
+    registerRenderModule(): IDisposable { return toDisposable(() => undefined); }
+    dispose(): void {}
+}
+
+class TestShortcutService {
+    readonly shortcutChanged$ = new Subject<void>();
+    readonly shortcuts: IShortcutItem[] = [];
+
+    forceEscape(): IDisposable { return toDisposable(() => undefined); }
+    forceDisable(): IDisposable { return toDisposable(() => undefined); }
+    dispatch(): undefined { return undefined; }
+    registerShortcut(shortcut: IShortcutItem): IDisposable {
+        this.shortcuts.push(shortcut);
+        return toDisposable(() => undefined);
+    }
+
+    getShortcutDisplay(): string | null { return null; }
+    getShortcutDisplayOfCommand(): string | null { return null; }
+    getAllShortcuts(): IShortcutItem[] { return this.shortcuts; }
+}
+
+class TestSidebarService {
+    readonly sidebarOptions$ = new BehaviorSubject({ visible: true });
+    readonly scrollEvent$ = new Subject<Event>();
+    private _container: HTMLElement | undefined;
+    private _width: number | undefined;
+
+    open(): IDisposable { return toDisposable(() => undefined); }
+    close(): void {
+        this.sidebarOptions$.next({ visible: false });
+    }
+
+    get visible() { return this.sidebarOptions$.getValue().visible; }
+    get options() { return this.sidebarOptions$.getValue(); }
+    getContainer() { return this._container; }
+    setContainer(element?: HTMLElement): void { this._container = element; }
+    get width() { return this._width; }
+    setWidth(value: number): void { this._width = value; }
+}
+
+class TestUniverInstanceService {
+    getCurrentTypeOfUnit$() {
+        return new BehaviorSubject({ id: 'workbook' });
+    }
+
+    setCurrentUnitForType(): void {
+    }
+}
+
+function createComment(overrides: Partial<IThreadComment>): IThreadComment {
+    const id = overrides.id ?? 'comment-1';
+
+    return {
+        id,
+        threadId: overrides.threadId ?? id,
+        ref: overrides.ref ?? 'A1',
+        dT: overrides.dT ?? '2026-06-17T00:00:00.000Z',
+        personId: overrides.personId ?? 'owner',
+        text: overrides.text ?? transformTextNodes2Document([{ type: 'text', content: id }]),
+        unitId: overrides.unitId ?? UNIT_ID,
+        subUnitId: overrides.subUnitId ?? SHEET_ID,
+        attachments: overrides.attachments,
+        children: overrides.children,
+        mentions: overrides.mentions,
+        parentId: overrides.parentId,
+        resolved: overrides.resolved,
+        updateT: overrides.updateT,
+        updated: overrides.updated,
+    };
+}
+
+function createPanelTestBed() {
+    const injector = new Injector();
+    const dependencies: Dependency[] = [
+        [ICommandService, { useClass: CommandService }],
+        [ILogService, { useClass: DesktopLogService }],
+        [IContextService, { useClass: ContextService }],
+        [IConfigService, { useClass: ConfigService }],
+        [LocaleService, { useClass: TestLocaleService as never }],
+        [RegionService],
+        [IEditorService, { useClass: TestEditorService as never }],
+        [IRenderManagerService, { useClass: TestRenderManagerService as never }],
+        [IShortcutService, { useClass: TestShortcutService as never }],
+        [ISidebarService, { useClass: TestSidebarService as never }],
+        [IUniverInstanceService, { useClass: TestUniverInstanceService as never }],
+        [IThreadCommentDataSourceService, { useClass: ThreadCommentDataSourceService }],
+        [LifecycleService],
+        [UserManagerService],
+        [ThreadCommentModel],
+        [ThreadCommentPanelService],
+    ];
+
+    dependencies.forEach((dependency) => injector.add(dependency));
+    injector.get(ILogService).setLogLevel(LogLevel.SILENT);
+    injector.get(LifecycleService).stage = LifecycleStages.Rendered;
+    injector.get(UserManagerService).setCurrentUser({ userID: 'owner', name: 'Owner', avatar: 'owner.png' });
+
+    const commandService = injector.get(ICommandService);
+    [
+        AddCommentCommand,
+        AddCommentMutation,
+        DeleteCommentCommand,
+        DeleteCommentMutation,
+        DeleteCommentTreeCommand,
+        ResolveCommentCommand,
+        ResolveCommentMutation,
+        SetActiveCommentOperation,
+        UpdateCommentCommand,
+        UpdateCommentMutation,
+    ].forEach((command) => commandService.registerCommand(command));
+
+    return {
+        injector,
+        panelService: injector.get(ThreadCommentPanelService),
+        threadCommentModel: injector.get(ThreadCommentModel),
+    };
+}
+
+function renderPanel(injector: Injector, element: React.ReactElement) {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+        root.render(
+            <RediContext.Provider value={{ injector }}>
+                {element}
+            </RediContext.Provider>
+        );
+    });
+
+    return { container, root };
+}
+
+function renderDefaultPanel(injector: Injector) {
+    return renderPanel(
+        injector,
+        <ThreadCommentPanel
+            unitId={UNIT_ID}
+            subUnitId$={new BehaviorSubject<string | undefined>(SHEET_ID)}
+            type={UniverInstanceType.UNIVER_SHEET}
+            onAdd={() => undefined}
+            getSubUnitName={(subUnitId) => subUnitId}
+        />
+    );
+}
+
+function addRootComment(model: ThreadCommentModel, comment: IThreadComment) {
+    model.addComment(comment.unitId, comment.subUnitId, comment);
+}
+
+function getPanelItem(container: HTMLElement, commentId: string) {
+    const item = container.querySelector(`#PANEL-${UNIT_ID}-${SHEET_ID}-${commentId}`);
+    if (!item) {
+        throw new Error(`Panel item "${commentId}" was not found.`);
+    }
+
+    return item as HTMLElement;
+}
+
+describe('ThreadCommentPanel', () => {
+    let root: Root | undefined;
+    let container: HTMLElement | undefined;
+
+    beforeEach(() => {
+        document.body.innerHTML = '';
+    });
+
+    afterEach(() => {
+        if (root) {
+            act(() => root!.unmount());
+        }
+        container?.remove();
+        root = undefined;
+        container = undefined;
+    });
+
+    it('keeps unresolved comments before resolved comments after applying caller sorting', () => {
+        const testBed = createPanelTestBed();
+        addRootComment(testBed.threadCommentModel, createComment({
+            id: 'open-thread',
+            ref: 'A1',
+            text: transformTextNodes2Document([{ type: 'text', content: 'Open comment' }]),
+        }));
+        addRootComment(testBed.threadCommentModel, createComment({
+            id: 'resolved-thread',
+            ref: 'B2',
+            resolved: true,
+            text: transformTextNodes2Document([{ type: 'text', content: 'Resolved comment' }]),
+        }));
+
+        const rendered = renderPanel(
+            testBed.injector,
+            <ThreadCommentPanel
+                unitId={UNIT_ID}
+                subUnitId$={new BehaviorSubject<string | undefined>(SHEET_ID)}
+                type={UniverInstanceType.UNIVER_SHEET}
+                onAdd={() => undefined}
+                getSubUnitName={(subUnitId) => subUnitId}
+                sortComments={(comments) => comments.slice().reverse()}
+            />
+        );
+        root = rendered.root;
+        container = rendered.container;
+
+        const panelText = container.textContent ?? '';
+
+        expect(panelText.indexOf('Open comment')).toBeGreaterThan(-1);
+        expect(panelText.indexOf('Resolved comment')).toBeGreaterThan(-1);
+        expect(panelText.indexOf('Open comment')).toBeLessThan(panelText.indexOf('thread-comment-ui.panel.solved'));
+        expect(panelText.indexOf('thread-comment-ui.panel.solved')).toBeLessThan(panelText.indexOf('Resolved comment'));
+    });
+
+    it('auto-focuses the active comment when requested by the host panel', async () => {
+        const testBed = createPanelTestBed();
+        addRootComment(testBed.threadCommentModel, createComment({ id: 'comment-1', ref: 'A1' }));
+        testBed.panelService.setActiveComment({
+            unitId: UNIT_ID,
+            subUnitId: SHEET_ID,
+            commentId: 'comment-1',
+        });
+
+        ({ container, root } = renderPanel(
+            testBed.injector,
+            <ThreadCommentPanel
+                unitId={UNIT_ID}
+                subUnitId$={new BehaviorSubject<string | undefined>(SHEET_ID)}
+                type={UniverInstanceType.UNIVER_SHEET}
+                onAdd={() => undefined}
+                getSubUnitName={(subUnitId) => subUnitId}
+                autoFocusActiveComment
+            />
+        ));
+
+        await vi.waitFor(() => {
+            expect((testBed.injector.get(IEditorService) as unknown as TestEditorService).getFocusId()).toBeTruthy();
+        });
+    });
+
+    it('renders and closes the active comment in the mobile detail view', () => {
+        const testBed = createPanelTestBed();
+        addRootComment(testBed.threadCommentModel, createComment({ id: 'comment-1', ref: 'A1' }));
+        testBed.panelService.setActiveComment({
+            unitId: UNIT_ID,
+            subUnitId: SHEET_ID,
+            commentId: 'comment-1',
+        });
+
+        ({ container, root } = renderPanel(
+            testBed.injector,
+            <MobileThreadCommentPanel
+                unitId={UNIT_ID}
+                subUnitId$={new BehaviorSubject<string | undefined>(SHEET_ID)}
+                type={UniverInstanceType.UNIVER_SHEET}
+                onAdd={() => undefined}
+                getSubUnitName={(subUnitId) => subUnitId}
+            />
+        ));
+
+        const backButton = container.querySelector<HTMLButtonElement>('[aria-label="thread-comment-ui.mobile.back"]');
+        expect(backButton).not.toBeNull();
+        expect(container.textContent).not.toContain('thread-comment-ui.filter.status.all');
+
+        act(() => backButton!.click());
+
+        expect(testBed.panelService.activeCommentId).toBeUndefined();
+        expect(container.textContent).toContain('thread-comment-ui.filter.status.all');
+    });
+
+    it('keeps an empty-id temporary target active and shows its editor', () => {
+        const testBed = createPanelTestBed();
+        const onTempCommentClose = vi.fn();
+        testBed.panelService.setActiveComment({
+            unitId: UNIT_ID,
+            subUnitId: SHEET_ID,
+            commentId: '',
+        });
+        const rendered = renderPanel(
+            testBed.injector,
+            <ThreadCommentPanel
+                unitId={UNIT_ID}
+                subUnitId$={new BehaviorSubject<string | undefined>(SHEET_ID)}
+                type={UniverInstanceType.UNIVER_SHEET}
+                onAdd={() => undefined}
+                getSubUnitName={(subUnitId) => subUnitId}
+                tempComment={createComment({ id: '', threadId: '', ref: '#shape-1' })}
+                onTempCommentClose={onTempCommentClose}
+            />
+        );
+        root = rendered.root;
+        container = rendered.container;
+
+        expect(container.textContent).toContain('thread-comment-ui.editor.placeholder');
+        expect(testBed.panelService.activeCommentId).toEqual({
+            unitId: UNIT_ID,
+            subUnitId: SHEET_ID,
+            commentId: '',
+        });
+
+        act(() => {
+            container!.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }));
+        });
+        expect(testBed.panelService.activeCommentId).toBeUndefined();
+        expect(onTempCommentClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('closes a temporary comment when the active subunit changes', () => {
+        const testBed = createPanelTestBed();
+        const activeSubUnit$ = new BehaviorSubject<string | undefined>(SHEET_ID);
+        const onTempCommentClose = vi.fn();
+        const rendered = renderPanel(
+            testBed.injector,
+            <ThreadCommentPanel
+                unitId={UNIT_ID}
+                subUnitId$={activeSubUnit$}
+                type={UniverInstanceType.UNIVER_SHEET}
+                onAdd={() => undefined}
+                getSubUnitName={(subUnitId) => subUnitId}
+                tempComment={createComment({ id: '', threadId: '', ref: '#shape-1' })}
+                onTempCommentClose={onTempCommentClose}
+            />
+        );
+        root = rendered.root;
+        container = rendered.container;
+
+        act(() => activeSubUnit$.next('sheet-2'));
+
+        expect(onTempCommentClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('shows only the active subunit and updates when it changes', () => {
+        const testBed = createPanelTestBed();
+        const activeSubUnit$ = new BehaviorSubject<string | undefined>(SHEET_ID);
+        addRootComment(testBed.threadCommentModel, createComment({ id: 'sheet-1-thread' }));
+        addRootComment(testBed.threadCommentModel, createComment({
+            id: 'sheet-2-thread',
+            subUnitId: 'sheet-2',
+        }));
+        const rendered = renderPanel(
+            testBed.injector,
+            <ThreadCommentPanel
+                unitId={UNIT_ID}
+                subUnitId$={activeSubUnit$}
+                type={UniverInstanceType.UNIVER_SLIDE}
+                onAdd={() => undefined}
+                getSubUnitName={(subUnitId) => subUnitId}
+            />
+        );
+        root = rendered.root;
+        container = rendered.container;
+
+        expect(container.textContent).toContain('sheet-1-thread');
+        expect(container.textContent).not.toContain('sheet-2-thread');
+
+        act(() => activeSubUnit$.next('sheet-2'));
+
+        expect(container.textContent).not.toContain('sheet-1-thread');
+        expect(container.textContent).toContain('sheet-2-thread');
+    });
+
+    it('does not render a temporary comment owned by another unit', () => {
+        const testBed = createPanelTestBed();
+        const onTempCommentClose = vi.fn();
+        const rendered = renderPanel(
+            testBed.injector,
+            <ThreadCommentPanel
+                unitId={UNIT_ID}
+                subUnitId$={new BehaviorSubject<string | undefined>(SHEET_ID)}
+                type={UniverInstanceType.UNIVER_SHEET}
+                onAdd={() => undefined}
+                getSubUnitName={(subUnitId) => subUnitId}
+                tempComment={createComment({ id: '', threadId: '', unitId: 'other-unit' })}
+                onTempCommentClose={onTempCommentClose}
+            />
+        );
+        root = rendered.root;
+        container = rendered.container;
+
+        expect(container.textContent).not.toContain('thread-comment-ui.editor.placeholder');
+        expect(onTempCommentClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('sets active comment from unresolved panel items and clears it for resolved items', () => {
+        const testBed = createPanelTestBed();
+        addRootComment(testBed.threadCommentModel, createComment({ id: 'open-thread', ref: 'A1' }));
+        addRootComment(testBed.threadCommentModel, createComment({ id: 'resolved-thread', ref: 'B2', resolved: true }));
+
+        const rendered = renderDefaultPanel(testBed.injector);
+        root = rendered.root;
+        container = rendered.container;
+
+        act(() => {
+            getPanelItem(container!, 'open-thread').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        });
+
+        expect(testBed.panelService.activeCommentId).toEqual({
+            unitId: UNIT_ID,
+            subUnitId: SHEET_ID,
+            commentId: 'open-thread',
+            temp: false,
+        });
+
+        act(() => {
+            getPanelItem(container!, 'resolved-thread').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        });
+
+        expect(testBed.panelService.activeCommentId).toBeUndefined();
+    });
+
+    it.each([
+        { unitId: UNIT_ID, subUnitId: SHEET_ID, id: 'open-thread', keepsActive: true },
+        { unitId: 'other-unit', subUnitId: SHEET_ID, id: 'open-thread', keepsActive: false },
+        { unitId: UNIT_ID, subUnitId: 'other-sheet', id: 'open-thread', keepsActive: false },
+        { unitId: UNIT_ID, subUnitId: SHEET_ID, id: 'other-thread', keepsActive: false },
+    ])('handles editor canvas clicks in cell popup $unitId/$subUnitId/$id', (popup) => {
+        const testBed = createPanelTestBed();
+        addRootComment(testBed.threadCommentModel, createComment({ id: 'open-thread', ref: 'A1' }));
+        ({ container, root } = renderPanel(
+            testBed.injector,
+            <>
+                <ThreadCommentPanel
+                    unitId={UNIT_ID}
+                    subUnitId$={new BehaviorSubject<string | undefined>(SHEET_ID)}
+                    type={UniverInstanceType.UNIVER_SHEET}
+                    onAdd={() => undefined}
+                    getSubUnitName={(subUnitId) => subUnitId}
+                />
+                <ThreadCommentTree
+                    unitId={popup.unitId}
+                    subUnitId={popup.subUnitId}
+                    id={popup.id}
+                    location={ThreadCommentTreeLocation.CELL}
+                    type={UniverInstanceType.UNIVER_SHEET}
+                    getSubUnitName={(subUnitId) => subUnitId}
+                />
+            </>
+        ));
+        act(() => {
+            getPanelItem(container!, 'open-thread').click();
+        });
+        const activeComment = testBed.panelService.activeCommentId;
+        expect(activeComment?.commentId).toBe('open-thread');
+
+        const popupElement = document.getElementById(
+            `${ThreadCommentTreeLocation.CELL}-${popup.unitId}-${popup.subUnitId}-${popup.id}`
+        );
+        expect(popupElement).not.toBeNull();
+        // The editor service boundary does not create a renderer canvas in this test.
+        const canvas = document.createElement('canvas');
+        popupElement!.appendChild(canvas);
+        act(() => {
+            canvas.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }));
+        });
+
+        expect(testBed.panelService.activeCommentId).toEqual(popup.keepsActive ? activeComment : undefined);
+    });
+
+    it('clears the active comment when the primary pointer hits a blank area', () => {
+        const testBed = createPanelTestBed();
+        addRootComment(testBed.threadCommentModel, createComment({ id: 'open-thread', ref: 'A1' }));
+
+        const rendered = renderDefaultPanel(testBed.injector);
+        root = rendered.root;
+        container = rendered.container;
+        const panelItem = getPanelItem(container, 'open-thread');
+
+        act(() => {
+            panelItem.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+            panelItem.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }));
+        });
+        expect(testBed.panelService.activeCommentId?.commentId).toBe('open-thread');
+
+        act(() => {
+            container!.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }));
+        });
+        expect(testBed.panelService.activeCommentId).toBeUndefined();
+
+        const canvas = document.createElement('canvas');
+        document.body.appendChild(canvas);
+        act(() => {
+            panelItem.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        });
+        act(() => {
+            canvas.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }));
+        });
+        expect(testBed.panelService.activeCommentId).toBeUndefined();
+    });
+
+    it('clears the active target when a remote update deletes its thread', () => {
+        const testBed = createPanelTestBed();
+        addRootComment(testBed.threadCommentModel, createComment({ id: 'remote-thread', ref: 'A1' }));
+        const rendered = renderDefaultPanel(testBed.injector);
+        root = rendered.root;
+        container = rendered.container;
+
+        act(() => {
+            getPanelItem(container!, 'remote-thread').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        });
+        expect(testBed.panelService.activeCommentId?.commentId).toBe('remote-thread');
+
+        act(() => {
+            testBed.threadCommentModel.deleteThread(UNIT_ID, SHEET_ID, 'remote-thread');
+        });
+
+        expect(testBed.panelService.activeCommentId).toBeUndefined();
+    });
+
+    it('renders hundreds of comment threads within a bounded time', () => {
+        const testBed = createPanelTestBed();
+        for (let index = 0; index < 250; index += 1) {
+            addRootComment(testBed.threadCommentModel, createComment({ id: `bulk-${index}` }));
+        }
+
+        const startedAt = performance.now();
+        const rendered = renderDefaultPanel(testBed.injector);
+        const elapsed = performance.now() - startedAt;
+        root = rendered.root;
+        container = rendered.container;
+
+        expect(container.querySelectorAll(`[id^="PANEL-${UNIT_ID}-${SHEET_ID}-bulk-"]`)).toHaveLength(250);
+        expect(elapsed).toBeLessThan(5_000);
+    });
+});

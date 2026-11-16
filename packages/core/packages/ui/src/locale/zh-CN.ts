@@ -1,0 +1,202 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type enUS from './en-US';
+import emojiLocale from './emoji-locale/zh-CN.generated';
+
+const locale: typeof enUS = {
+    ui: {
+        clearFormatting: '清除格式',
+        formatPainter: '格式刷',
+        accessibility: {
+            menu: '菜单',
+            zoom: '缩放',
+            zoomIn: '放大',
+            zoomOut: '缩小',
+            resetZoom: '重置缩放',
+        },
+        objectPermission: {
+            operationDenied: '该内容已受保护，无法执行此操作。',
+            remove: '删除保护',
+            roleOwner: '文件所有者',
+            roleEditor: '文件编辑者',
+            selectedCount: '已选择 {0} 人',
+            searchPeople: '搜索人员',
+            noMatchingPeople: '没有匹配的人员',
+            loadMore: '加载更多',
+            fileHint: '文件成员由分享功能管理；此处设置成员可以执行的操作。',
+            documentParent: '此节同时受整文档编辑权限限制。',
+            paragraphParent: '此段落同时受整文档及所在节的编辑权限限制。',
+            documentObjectParent: '此对象还可能受到整文档及其所在或锚定段落、节的编辑权限限制。',
+            slideParent: '同时受整份演示文稿的编辑权限限制。',
+            slideObjectParent: '同时受整份演示文稿及所在页面或母版的编辑权限限制。',
+            baseParent: '同时受整个 Base 的编辑权限限制。',
+            baseObjectParent: '同时受整个 Base 及所在表的编辑权限限制。',
+            recordParent: '同时受整个 Base 及所在表的限制；修改字段值还需具备对应字段的编辑权限。',
+            boardParent: '此对象同时受整个白板的编辑权限限制。',
+            ownerInherit: '文件所有者，继承权限',
+            peopleError: '人员列表加载失败，请重试。',
+            document: '文档',
+            section: '节',
+            paragraph: '段落',
+            entity: '对象',
+            presentation: '演示文稿',
+            page: '页面',
+            master: '母版视图',
+            base: '多维表格',
+            table: '数据表',
+            field: '字段',
+            record: '记录',
+            view: '视图',
+            board: '白板',
+            objectName: '{0}：{1}',
+
+            search: '搜索对象',
+            empty: '没有匹配的对象',
+            more: '显示前 100 个对象，请搜索以缩小范围。',
+            title: '权限',
+            cancel: '取消',
+            save: '保存',
+            saving: '正在保存…',
+            loading: '正在加载…',
+            conflict: '权限已被修改，请重新加载后再保存。',
+            error: '无法读取或保存权限，已保留你的修改。',
+            reload: '重新加载',
+            denied: '你没有管理此对象权限的权限。',
+            edit: '谁可以编辑',
+            all: '所有文件编辑者',
+            owner: '仅对象所有者',
+            members: '指定成员',
+            copy: '允许编辑者复制',
+            print: '允许编辑者打印',
+            export: '允许编辑者导出',
+            comment: '允许编辑者评论',
+            parentHint: '仍受文件及上级对象权限的限制。',
+        },
+        featureSearch: {
+            title: '搜索功能',
+            placeholder: '输入功能或菜单名称…',
+            empty: '未找到当前可用的功能',
+            ribbon: '功能区',
+            contextMenu: '右键菜单',
+        },
+        emojiPicker: {
+            search: '搜索',
+            random: '随机表情',
+            recents: '最近使用',
+            emojis: '表情',
+            animals: '动物',
+            food: '食物',
+            activities: '活动',
+            places: '地点',
+            objects: '物品',
+            symbols: '符号',
+            searchResults: '搜索结果',
+            noResults: '未找到表情',
+            ...emojiLocale,
+        },
+        symbolPicker: {
+            mathematics: '数学',
+            greek: '希腊字母',
+            common: '常用',
+        },
+        toolbar: {
+            heading: {
+                normal: '正文',
+                title: '标题',
+                subTitle: '副标题',
+                1: '标题1',
+                2: '标题2',
+                3: '标题3',
+                4: '标题4',
+                5: '标题5',
+            },
+        },
+        ribbon: {
+            start: '开始',
+            startDesc: '初始化工作表并设置基本参数。',
+            insert: '插入',
+            insertDesc: '插入行、列、图表和各种其他元素。',
+            formulas: '公式',
+            formulasDesc: '使用函数和公式进行数据计算。',
+            data: '数据',
+            dataDesc: '管理数据，包括导入、排序和筛选。',
+            view: '视图',
+            viewDesc: '切换视图模式并调整显示效果。',
+            others: '其他',
+            othersDesc: '其他功能和设置。',
+            more: '更多',
+            groups: {
+                clipboard: '剪贴板',
+                font: '字体',
+                layout: '对齐与布局',
+                number: '数字格式',
+                tools: '工具',
+                editing: '编辑',
+                media: '媒体',
+                cells: '单元格',
+                formulas: '公式',
+                rules: '规则',
+                organization: '数据整理',
+                display: '显示',
+                visibility: '可见性',
+            },
+        },
+        fontFamily: {
+            'not-supported': '系统中未找到该字体，使用默认字体。',
+        },
+        'shortcut-panel': {
+            title: '快捷键面板',
+        },
+        shortcut: {
+            undo: '撤销',
+            redo: '重做',
+            cut: '剪切',
+            copy: '复制',
+            paste: '粘贴',
+            'shortcut-panel': '打开收起快捷键面板',
+        },
+        'common-edit': '常用编辑',
+        'toggle-shortcut-panel': '打开收起快捷键面板',
+        navigation: {
+            back: '返回',
+            previous: '上一个',
+            next: '下一个',
+        },
+        sidebar: {
+            panel: '侧边栏',
+            resize: '调整侧边栏大小',
+            close: '关闭侧边栏',
+        },
+        beforeClose: {
+            title: '部分更改尚未保存',
+        },
+        clipboard: {
+            authentication: {
+                title: '无法访问剪贴板',
+                content: '请允许 Univer 访问您的剪贴板。',
+            },
+        },
+        rangeSelector: {
+            cancel: '取消',
+        },
+        'global-shortcut': '全局快捷键',
+        row: '行',
+        column: '列',
+    },
+};
+
+export default locale;

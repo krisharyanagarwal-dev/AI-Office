@@ -1,0 +1,345 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type { Nullable } from '@univerjs/core';
+import type {
+    IDocumentSkeletonColumnGroup,
+    IDocumentSkeletonColumnGroupColumn,
+    IDocumentSkeletonLine,
+    IDocumentSkeletonPage,
+} from '../../../../basics/i-document-skeleton-cached';
+import type { ISectionBreakConfig } from '../../../../basics/interfaces';
+import type { IDocumentLayoutColumn, IDocumentLayoutColumnGroup } from '../../document-layout-presentation';
+import type { DataStreamTreeNode } from '../../view-model/data-stream-tree-node';
+import type { DocumentViewModel } from '../../view-model/document-view-model';
+import type { ILayoutContext } from '../tools';
+import { ColumnResponsiveType, DataStreamTreeNodeType } from '@univerjs/core';
+import { DocumentSkeletonPageType, LineType } from '../../../../basics/i-document-skeleton-cached';
+import { getDocumentCompatibilityPolicy } from '../../document-compatibility';
+import { applyTrailingBlockRangeSpaceBelow, createSkeletonPage } from '../model/page';
+import { getLastNotFullColumnInfo, updateBlockIndex, updateInlineDrawingCoordsAndBorder } from '../tools';
+import { dealWidthParagraph } from './paragraph/paragraph-layout';
+
+interface IColumnGroupLayoutColumn {
+    columnId: string;
+    left: number;
+    top: number;
+    width: number;
+}
+
+interface IColumnGroupLayout {
+    mode: 'horizontal' | 'stack';
+    width: number;
+    height: number;
+    columns: IColumnGroupLayoutColumn[];
+}
+
+const DEFAULT_COLUMN_GROUP_MIN_HEIGHT = 72;
+const DEFAULT_COLUMN_GROUP_HORIZONTAL_PADDING = 8;
+
+export function createColumnGroupSkeleton(
+    ctx: ILayoutContext,
+    curPage: IDocumentSkeletonPage,
+    viewModel: DocumentViewModel,
+    columnGroupNode: DataStreamTreeNode,
+    sectionBreakConfig: ISectionBreakConfig
+): Nullable<IDocumentSkeletonColumnGroup> {
+    const columnGroupSource = viewModel.getColumnGroupByStartIndex(columnGroupNode.startIndex)?.columnGroupSource;
+    if (columnGroupSource == null) {
+        console.warn('Column group not found when creating column group skeleton');
+        return null;
+    }
+
+    const hostColumn = getLastNotFullColumnInfo(curPage)?.column;
+    if (hostColumn == null) {
+        return null;
+    }
+
+    const horizontalPadding = Math.max(
+        0,
+        columnGroupSource.horizontalPadding?.v ?? DEFAULT_COLUMN_GROUP_HORIZONTAL_PADDING
+    );
+    const minHeight = Math.max(0, columnGroupSource.minHeight?.v ?? DEFAULT_COLUMN_GROUP_MIN_HEIGHT);
+    const columnPages = columnGroupNode.children.map((columnNode, index) => {
+        const sourceColumn = columnGroupSource.columns[index];
+        const width = Math.max(0, getInitialColumnWidth(columnGroupSource, sourceColumn, hostColumn.width));
+
+        return createColumnContentPage(ctx, viewModel, columnNode, sectionBreakConfig, width, horizontalPadding);
+    });
+    const columnHeights = columnPages.map((page) => Math.max(page.height, minHeight));
+    const layout = calculateColumnGroupLayout(columnGroupSource, hostColumn.width, columnHeights);
+    const columns = layout.columns.map((layoutColumn, index): IDocumentSkeletonColumnGroupColumn => {
+        const page = columnPages[index];
+        page.pageHeight = columnHeights[index];
+
+        return {
+            columnId: layoutColumn.columnId,
+            left: layoutColumn.left,
+            top: layoutColumn.top,
+            width: layoutColumn.width,
+            height: columnHeights[index],
+            st: columnGroupNode.children[index].startIndex,
+            ed: columnGroupNode.children[index].endIndex,
+            page,
+        };
+    });
+
+    const columnGroupSkeleton: IDocumentSkeletonColumnGroup = {
+        columns,
+        width: layout.width,
+        height: layout.height,
+        top: getNextBlockTop(hostColumn.lines),
+        left: hostColumn.left,
+        st: columnGroupNode.startIndex,
+        ed: columnGroupNode.endIndex,
+        columnGroupId: columnGroupSource.columnGroupId,
+        columnGroupSource,
+    };
+
+    columns.forEach((column) => {
+        column.parent = columnGroupSkeleton;
+        column.page.parent = column as never;
+    });
+
+    return columnGroupSkeleton;
+}
+
+export function appendColumnGroupBlockLine(page: IDocumentSkeletonPage, columnGroup: IDocumentSkeletonColumnGroup): boolean {
+    const columnInfo = getLastNotFullColumnInfo(page);
+    if (columnInfo == null) {
+        return false;
+    }
+
+    const { column } = columnInfo;
+    const line = createColumnGroupBlockLine(columnGroup, column.lines.length);
+    line.parent = column;
+    column.lines.push(line);
+
+    page.skeColumnGroups.set(columnGroup.columnGroupId, columnGroup);
+    columnGroup.parent = page;
+
+    return true;
+}
+
+function createColumnContentPage(
+    ctx: ILayoutContext,
+    viewModel: DocumentViewModel,
+    columnNode: DataStreamTreeNode,
+    sectionBreakConfig: ISectionBreakConfig,
+    width: number,
+    horizontalPadding: number
+): IDocumentSkeletonPage {
+    const columnSectionBreakConfig: ISectionBreakConfig = {
+        ...sectionBreakConfig,
+        pageSize: {
+            width,
+            height: Number.POSITIVE_INFINITY,
+        },
+        marginTop: 0,
+        marginBottom: 0,
+        marginLeft: horizontalPadding,
+        marginRight: horizontalPadding,
+        columnProperties: [],
+    };
+    const page = createSkeletonPage(ctx, columnSectionBreakConfig, ctx.skeletonResourceReference);
+    page.type = DocumentSkeletonPageType.CELL;
+
+    const paragraphNodes = getColumnParagraphNodes(columnNode);
+    for (let index = 0; index < paragraphNodes.length; index++) {
+        const paragraphNode = paragraphNodes[index];
+        const nextParagraphNode = paragraphNodes[index + 1]?.nodeType === DataStreamTreeNodeType.PARAGRAPH
+            ? paragraphNodes[index + 1]
+            : undefined;
+        dealWidthParagraph(ctx, viewModel, paragraphNode, page, columnSectionBreakConfig, nextParagraphNode);
+    }
+
+    updateBlockIndex(
+        [page],
+        columnNode.startIndex,
+        sectionBreakConfig.documentCompatibilityPolicy ?? getDocumentCompatibilityPolicy()
+    );
+    updateInlineDrawingCoordsAndBorder(ctx, [page]);
+    applyTrailingBlockRangeSpaceBelow([page], ctx.dataModel?.getBody?.(), columnNode.endIndex);
+
+    return page;
+}
+
+function getColumnParagraphNodes(columnNode: DataStreamTreeNode): DataStreamTreeNode[] {
+    const firstChild = columnNode.children[0];
+    if (firstChild?.nodeType === DataStreamTreeNodeType.SECTION_BREAK) {
+        return firstChild.children;
+    }
+
+    return columnNode.children;
+}
+
+function createColumnGroupBlockLine(columnGroup: IDocumentSkeletonColumnGroup, lineIndex: number): IDocumentSkeletonLine {
+    const top = columnGroup.top;
+
+    return {
+        paragraphIndex: columnGroup.ed,
+        type: LineType.BLOCK,
+        divides: [],
+        divideLen: 0,
+        lineHeight: columnGroup.height,
+        contentHeight: columnGroup.height,
+        top,
+        asc: 0,
+        dsc: 0,
+        paddingTop: 0,
+        paddingBottom: 0,
+        marginTop: 0,
+        marginBottom: 0,
+        spaceBelowApply: 0,
+        st: columnGroup.st,
+        ed: columnGroup.ed,
+        lineIndex,
+        paragraphStart: true,
+        isBehindTable: false,
+        tableId: '',
+    };
+}
+
+function getNextBlockTop(lines: IDocumentSkeletonLine[]) {
+    const lastLine = lines[lines.length - 1];
+    if (lastLine == null) {
+        return 0;
+    }
+
+    return lastLine.top + lastLine.lineHeight;
+}
+
+export function calculateColumnGroupLayout(source: IDocumentLayoutColumnGroup, availableWidth: number, columnHeights: number[]): IColumnGroupLayout {
+    const width = Math.max(0, availableWidth);
+    const gap = Math.max(0, source.gap?.v ?? 0);
+    const columns = source.columns;
+    if (columns.length === 0) {
+        return {
+            mode: 'horizontal',
+            width,
+            height: 0,
+            columns: [],
+        };
+    }
+
+    if (shouldStack(columns, width, gap, source.responsive)) {
+        let top = 0;
+
+        const layoutColumns = columns.map((column, index) => {
+            const topOffset = getColumnTopOffset(column);
+            const layoutColumn = {
+                columnId: column.columnId,
+                left: 0,
+                top: top + topOffset,
+                width,
+            };
+            top += Math.max(0, topOffset + (columnHeights[index] ?? 0));
+
+            return layoutColumn;
+        });
+        return {
+            mode: 'stack',
+            width,
+            height: top,
+            columns: layoutColumns,
+        };
+    }
+
+    const contentWidth = Math.max(0, width - gap * (columns.length - 1));
+    const widths = allocateHorizontalWidths(columns, contentWidth);
+    let left = 0;
+
+    const layoutColumns = columns.map((column, index) => {
+        const layoutColumn = {
+            columnId: column.columnId,
+            left,
+            top: getColumnTopOffset(column),
+            width: widths[index],
+        };
+        left += widths[index] + gap;
+
+        return layoutColumn;
+    });
+    return {
+        mode: 'horizontal',
+        width,
+        height: Math.max(0, ...layoutColumns.map((column, index) => (
+            column.top + Math.max(0, columnHeights[index] ?? 0)
+        ))),
+        columns: layoutColumns,
+    };
+}
+
+function getColumnTopOffset(column: IDocumentLayoutColumn): number {
+    const offset = column.topOffset?.v;
+    return typeof offset === 'number' && Number.isFinite(offset) ? offset : 0;
+}
+
+function shouldStack(columns: IDocumentLayoutColumn[], availableWidth: number, gap: number, responsive: ColumnResponsiveType): boolean {
+    if (responsive !== ColumnResponsiveType.STACK) {
+        return false;
+    }
+
+    const totalMinWidth = columns.reduce((sum, column) => sum + getMinWidth(column), 0) + gap * Math.max(0, columns.length - 1);
+
+    return totalMinWidth > availableWidth;
+}
+
+function getInitialColumnWidth(source: IDocumentLayoutColumnGroup, column: IDocumentLayoutColumn | undefined, availableWidth: number): number {
+    if (column == null) {
+        return availableWidth;
+    }
+
+    const contentWidth = Math.max(0, availableWidth - Math.max(0, source.gap?.v ?? 0) * Math.max(0, source.columns.length - 1));
+    const ratioSum = source.columns.reduce((sum, item) => sum + Math.max(0, item.widthRatio || 0), 0) || source.columns.length;
+
+    return Math.max(getMinWidth(column), contentWidth * (Math.max(0, column.widthRatio || 0) || 1) / ratioSum);
+}
+
+function allocateHorizontalWidths(columns: IDocumentLayoutColumn[], contentWidth: number): number[] {
+    const ratioSum = columns.reduce((sum, column) => sum + Math.max(0, column.widthRatio || 0), 0) || columns.length;
+    const idealWidths = columns.map((column) => contentWidth * (Math.max(0, column.widthRatio || 0) || 1) / ratioSum);
+    const minWidths = columns.map(getMinWidth);
+    const widths = idealWidths.map((width, index) => Math.max(width, minWidths[index]));
+    const overflow = widths.reduce((sum, width) => sum + width, 0) - contentWidth;
+
+    if (overflow <= 0) {
+        return widths;
+    }
+
+    return compressToFit(widths, minWidths, overflow);
+}
+
+function compressToFit(widths: number[], minWidths: number[], overflow: number): number[] {
+    const nextWidths = [...widths];
+    const flexibleIndexes = nextWidths
+        .map((width, index) => ({ index, shrink: Math.max(0, width - minWidths[index]) }))
+        .filter((item) => item.shrink > 0);
+    const totalShrink = flexibleIndexes.reduce((sum, item) => sum + item.shrink, 0);
+    const appliedOverflow = Math.min(overflow, totalShrink);
+    if (appliedOverflow <= 0 || totalShrink <= 0) {
+        return nextWidths;
+    }
+    for (const item of flexibleIndexes) {
+        nextWidths[item.index] -= appliedOverflow * item.shrink / totalShrink;
+    }
+
+    return nextWidths;
+}
+
+function getMinWidth(column: IDocumentLayoutColumn): number {
+    return Math.max(0, column.minWidth?.v ?? 0);
+}

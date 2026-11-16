@@ -1,0 +1,133 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type { DateSystem } from '@univerjs/core';
+import type { ArrayValueObject } from '../value-object/array-value-object';
+import type { BaseValueObject } from '../value-object/base-value-object';
+import { isRealNum } from '@univerjs/core';
+import { compareToken } from '../../basics/token';
+import { ValueObjectFactory } from '../value-object/array-value-object';
+import {
+    BooleanValueObject,
+    createBooleanValueObjectByRawValue,
+    NumberValueObject,
+    StringValueObject,
+} from '../value-object/primitive-object';
+import { expandArrayValueObject } from './array-object';
+
+export function createCriteriaValueObject(content: string, dateSystem?: DateSystem): BaseValueObject {
+    if (isRealNum(content)) {
+        const number = Number(content);
+        // Excel accepts decimal/scientific notation and spaces, but not JS
+        // radix prefixes, control whitespace or infinities.
+        if (!/^ *[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)? *$/i.test(content) || !Number.isFinite(number)) {
+            return StringValueObject.create(content);
+        }
+        // Excel flushes subnormal decimal values to zero.
+        return NumberValueObject.create(Math.abs(number) < 2 ** -1022 ? 0 : number);
+    }
+    return ValueObjectFactory.create(content, false, dateSystem);
+}
+
+export function findCompareToken(str: string, dateSystem?: DateSystem): [compareToken, BaseValueObject] {
+    const comparisonTokens: compareToken[] = [
+        compareToken.EQUALS,
+        compareToken.NOT_EQUAL,
+        compareToken.GREATER_THAN_OR_EQUAL,
+        compareToken.GREATER_THAN,
+        compareToken.LESS_THAN_OR_EQUAL,
+        compareToken.LESS_THAN,
+    ];
+
+    let operator = compareToken.EQUALS;
+    let content = str;
+    for (const token of comparisonTokens) {
+        if (str.startsWith(token)) {
+            operator = token;
+            content = str.substring(token.length);
+            break;
+        }
+    }
+
+    // Criteria accept numeric text such as "01" and "1.0" even though a
+    // worksheet cell containing that text must retain its string type.
+    return [operator, createCriteriaValueObject(content, dateSystem)];
+}
+
+/**
+ * When it contains both comparison characters and wildcard characters
+ * 1. The value of apple* has the same effect as =apple*
+ * 2. >=apple*: normal value, >apple: obtains the same effect as >=apple*
+ * 3. <apple*: normal value, <=apple: obtains the same effect as <apple*
+ */
+export function valueObjectCompare(range: BaseValueObject, criteria: BaseValueObject, operator?: compareToken, isCaseSensitive?: boolean) {
+    if (!operator) {
+        // Only strings can extract comparison symbols, other types of values are 'equal to'
+        // TODO: criteria: 32, ">32", B5, "3?", "apple*", "*~?", TODAY(), ">"&A1:B3
+        if (criteria.isString()) {
+            const criteriaValueString = `${criteria.getValue()}`;
+            const [token, criteriaStringObject] = findCompareToken(
+                criteriaValueString,
+                criteria.getDateSystem()
+            );
+            operator = token;
+            criteria = criteriaStringObject;
+        } else {
+            operator = compareToken.EQUALS;
+        }
+    }
+
+    return range.compare(criteria, operator, isCaseSensitive);
+}
+
+/**
+ * Find the Boolean intersection of two ArrayValueObjects
+ */
+export function booleanObjectIntersection(valueObject1: ArrayValueObject, valueObject2: ArrayValueObject): ArrayValueObject {
+    const valueObject1RowCount = valueObject1.getRowCount();
+    const valueObject1ColumnCount = valueObject1.getColumnCount();
+    const valueObject2RowCount = valueObject2.getRowCount();
+    const valueObject2ColumnCount = valueObject2.getColumnCount();
+
+    let valueObject1Array = valueObject1;
+    let valueObject2Array = valueObject2;
+
+    if (valueObject1RowCount !== valueObject2RowCount || valueObject1ColumnCount !== valueObject2ColumnCount) {
+        const maxRowLength = Math.max(valueObject1RowCount, valueObject2RowCount);
+        const maxColumnLength = Math.max(valueObject1ColumnCount, valueObject2ColumnCount);
+
+        valueObject1Array = expandArrayValueObject(maxRowLength, maxColumnLength, valueObject1);
+        valueObject2Array = expandArrayValueObject(maxRowLength, maxColumnLength, valueObject2);
+    }
+
+    return valueObject1Array.mapValue((valueObject1, rowIndex, columnIndex) => {
+        const valueObject2 = valueObject2Array.get(rowIndex, columnIndex);
+
+        if (valueObject1?.isError()) {
+            return valueObject1;
+        }
+
+        if (valueObject2?.isError()) {
+            return valueObject2;
+        }
+
+        if (valueObject1?.isBoolean() && valueObject2?.isBoolean()) {
+            return createBooleanValueObjectByRawValue(valueObject1.getValue() && valueObject2.getValue());
+        }
+
+        return BooleanValueObject.create(false);
+    });
+}

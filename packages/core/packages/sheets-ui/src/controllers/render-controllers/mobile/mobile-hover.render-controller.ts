@@ -1,0 +1,347 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type { Nullable, Workbook } from '@univerjs/core';
+import type {
+    IMouseEvent,
+    IPointerEvent,
+    IRenderContext,
+    IRenderModule,
+    Spreadsheet,
+    SpreadsheetColumnHeader,
+    SpreadsheetHeader,
+} from '@univerjs/engine-render';
+import type { ISheetLocationBase, ISheetSkeletonManagerParam } from '@univerjs/sheets';
+import { Disposable, DisposableCollection, fromEventSubject, IContextService, Inject } from '@univerjs/core';
+import { DeviceType } from '@univerjs/engine-render';
+import { SHEET_VIEW_KEY } from '../../../common/keys';
+import { getCellIndexByOffsetWithMerge } from '../../../common/utils';
+import {
+    MOBILE_EXPANDING_SELECTION,
+    MOBILE_PINCH_ZOOMING,
+    MOBILE_TRIGGER_CONTEXT_MENU,
+} from '../../../consts/mobile-context';
+import { HoverManagerService } from '../../../services/hover-manager.service';
+import { SheetScrollManagerService } from '../../../services/scroll-manager.service';
+import { SheetSkeletonManagerService } from '../../../services/sheet-skeleton-manager.service';
+
+const TAP_MOVE_THRESHOLD = 10;
+const DOUBLE_TAP_MOVE_THRESHOLD = 20;
+const DOUBLE_TAP_DELAY = 500;
+
+interface IMobileTapState {
+    clientX: number;
+    clientY: number;
+    pointerId: number | undefined;
+}
+
+interface IMobileCompletedTap {
+    clientX: number;
+    clientY: number;
+    timeStamp: number;
+    cell: ISheetLocationBase;
+}
+
+type MobilePointerEvent = IMouseEvent | IPointerEvent;
+
+function getPointerId(event: MobilePointerEvent): number | undefined {
+    return 'pointerId' in event ? event.pointerId : undefined;
+}
+
+function isPrimaryPointer(event: MobilePointerEvent): boolean {
+    return !('isPrimary' in event) || event.isPrimary !== false;
+}
+
+export class MobileHoverRenderController extends Disposable implements IRenderModule {
+    private _active = false;
+    private _tapState: Nullable<IMobileTapState> = null;
+    private _lastCompletedTap: Nullable<IMobileCompletedTap> = null;
+    private _completedTapTimer: Nullable<ReturnType<typeof setTimeout>> = null;
+    private _suppressEngineDoubleClick = false;
+    private _suppressEngineDoubleClickTimer: Nullable<ReturnType<typeof setTimeout>> = null;
+
+    get active(): boolean {
+        return this._active;
+    }
+
+    constructor(
+        private readonly _context: IRenderContext<Workbook>,
+        @Inject(HoverManagerService) private readonly _hoverManagerService: HoverManagerService,
+        @Inject(SheetSkeletonManagerService) private readonly _sheetSkeletonManagerService: SheetSkeletonManagerService,
+        @Inject(SheetScrollManagerService) private readonly _scrollManagerService: SheetScrollManagerService,
+        @IContextService private readonly _contextService: IContextService
+    ) {
+        super();
+
+        this._initPointerEvent();
+        this._initScrollEvent();
+    }
+
+    override dispose(): void {
+        this._resetTapSequence();
+        this._clearEngineDoubleClickSuppression();
+        super.dispose();
+    }
+
+    private _initPointerEvent(): void {
+        const disposeSet = new DisposableCollection();
+        const handleSkeletonChange = (skeletonParam: Nullable<ISheetSkeletonManagerParam>) => {
+            disposeSet.dispose();
+            this._resetTapSequence();
+
+            if (!skeletonParam) {
+                return;
+            }
+
+            const { mainComponent, unitId, components } = this._context;
+            if (!mainComponent) {
+                return;
+            }
+
+            this._bindMainComponentEvents(disposeSet, mainComponent as Spreadsheet, unitId);
+            const rowHeader = components.get(SHEET_VIEW_KEY.ROW) as SpreadsheetHeader;
+            const colHeader = components.get(SHEET_VIEW_KEY.COLUMN) as SpreadsheetColumnHeader;
+            if (rowHeader) {
+                this._bindRowHeaderEvents(disposeSet, rowHeader, unitId);
+            }
+            if (colHeader) {
+                this._bindColumnHeaderEvents(disposeSet, colHeader, unitId);
+            }
+        };
+
+        handleSkeletonChange(this._sheetSkeletonManagerService.getCurrentParam());
+        this.disposeWithMe(this._sheetSkeletonManagerService.currentSkeleton$.subscribe(handleSkeletonChange));
+        this.disposeWithMe(this._context.scene.onPointerCancel$.subscribeEvent(() => this._resetTapSequence()));
+        this.disposeWithMe(disposeSet);
+    }
+
+    private _bindMainComponentEvents(disposeSet: DisposableCollection, mainComponent: Spreadsheet, unitId: string): void {
+        disposeSet.add(mainComponent.onPointerEnter$.subscribeEvent(() => {
+            this._active = true;
+        }));
+        disposeSet.add(fromEventSubject(mainComponent.onPointerMove$).subscribe((event) => {
+            this._active = true;
+            this._updateTapState(event);
+            this._hoverManagerService.triggerMouseMove(unitId, event);
+        }));
+        disposeSet.add(mainComponent.onPointerDown$.subscribeEvent((event) => {
+            this._startTap(event);
+            this._hoverManagerService.triggerPointerDown(unitId, event);
+        }));
+        disposeSet.add(mainComponent.onPointerUp$.subscribeEvent((event) => {
+            this._hoverManagerService.triggerPointerUp(unitId, event);
+            if (this._finishTap(event)) {
+                this._hoverManagerService.triggerClick(unitId, event.offsetX, event.offsetY);
+                this._completeTap(unitId, event);
+            }
+        }));
+        disposeSet.add(mainComponent.onDblclick$.subscribeEvent({
+            next: ([event, state]) => {
+                state.stopPropagation();
+                state.skipNextObservers = true;
+                // Touch double taps are validated on pointerup, including cell and gesture checks.
+                if (event.deviceType === DeviceType.Touch) {
+                    return;
+                }
+                if (this._suppressEngineDoubleClick) {
+                    this._clearEngineDoubleClickSuppression();
+                    return;
+                }
+
+                this._resetCompletedTap();
+                this._hoverManagerService.triggerDbClick(unitId, event);
+            },
+            priority: -1,
+        }));
+        disposeSet.add(mainComponent.onPointerLeave$.subscribeEvent(() => {
+            this._active = false;
+            this._tapState = null;
+        }));
+    }
+
+    private _bindRowHeaderEvents(disposeSet: DisposableCollection, rowHeader: SpreadsheetHeader, unitId: string): void {
+        disposeSet.add(rowHeader.onPointerMove$.subscribeEvent((event) => {
+            this._hoverManagerService.triggerRowHeaderMouseMove(unitId, event.offsetX, event.offsetY);
+        }));
+        disposeSet.add(rowHeader.onPointerDown$.subscribeEvent((event) => {
+            this._hoverManagerService.triggerRowHeaderPoniterDown(unitId, event.offsetX, event.offsetY);
+        }));
+        disposeSet.add(rowHeader.onPointerUp$.subscribeEvent((event) => {
+            this._hoverManagerService.triggerRowHeaderPoniterUp(unitId, event.offsetX, event.offsetY);
+            if (!this._contextService.getContextValue(MOBILE_TRIGGER_CONTEXT_MENU)) {
+                this._hoverManagerService.triggerRowHeaderClick(unitId, event.offsetX, event.offsetY);
+            }
+        }));
+        disposeSet.add(rowHeader.onDblclick$.subscribeEvent((event) => {
+            this._hoverManagerService.triggerRowHeaderDbClick(unitId, event.offsetX, event.offsetY);
+        }));
+    }
+
+    private _bindColumnHeaderEvents(
+        disposeSet: DisposableCollection,
+        columnHeader: SpreadsheetColumnHeader,
+        unitId: string
+    ): void {
+        disposeSet.add(columnHeader.onPointerMove$.subscribeEvent((event) => {
+            this._hoverManagerService.triggerColHeaderMouseMove(unitId, event.offsetX, event.offsetY);
+        }));
+        disposeSet.add(columnHeader.onPointerDown$.subscribeEvent((event) => {
+            this._hoverManagerService.triggerColHeaderPoniterDown(unitId, event.offsetX, event.offsetY);
+        }));
+        disposeSet.add(columnHeader.onPointerUp$.subscribeEvent((event) => {
+            this._hoverManagerService.triggerColHeaderPoniterUp(unitId, event.offsetX, event.offsetY);
+            if (!this._contextService.getContextValue(MOBILE_TRIGGER_CONTEXT_MENU)) {
+                this._hoverManagerService.triggerColHeaderClick(unitId, event.offsetX, event.offsetY);
+            }
+        }));
+        disposeSet.add(columnHeader.onDblclick$.subscribeEvent((event) => {
+            this._hoverManagerService.triggerColHeaderDbClick(unitId, event.offsetX, event.offsetY);
+        }));
+    }
+
+    private _startTap(event: MobilePointerEvent): void {
+        if (
+            !isPrimaryPointer(event) ||
+            this._contextService.getContextValue(MOBILE_PINCH_ZOOMING) ||
+            this._contextService.getContextValue(MOBILE_EXPANDING_SELECTION)
+        ) {
+            this._resetTapSequence();
+            return;
+        }
+
+        this._tapState = {
+            clientX: event.clientX,
+            clientY: event.clientY,
+            pointerId: getPointerId(event),
+        };
+    }
+
+    private _updateTapState(event: MobilePointerEvent): void {
+        const pointerId = getPointerId(event);
+        if (!this._tapState || (pointerId != null && pointerId !== this._tapState.pointerId)) {
+            return;
+        }
+
+        if (
+            Math.abs(event.clientX - this._tapState.clientX) > TAP_MOVE_THRESHOLD ||
+            Math.abs(event.clientY - this._tapState.clientY) > TAP_MOVE_THRESHOLD
+        ) {
+            this._resetTapSequence();
+        }
+    }
+
+    private _finishTap(event: MobilePointerEvent): boolean {
+        const tapState = this._tapState;
+        this._tapState = null;
+        const pointerId = getPointerId(event);
+        if (!tapState || (pointerId != null && pointerId !== tapState.pointerId)) {
+            this._resetCompletedTap();
+            return false;
+        }
+
+        const completed = Math.abs(event.clientX - tapState.clientX) <= TAP_MOVE_THRESHOLD
+            && Math.abs(event.clientY - tapState.clientY) <= TAP_MOVE_THRESHOLD
+            && !this._contextService.getContextValue(MOBILE_PINCH_ZOOMING)
+            && !this._contextService.getContextValue(MOBILE_EXPANDING_SELECTION)
+            && !this._contextService.getContextValue(MOBILE_TRIGGER_CONTEXT_MENU);
+        if (!completed) {
+            this._resetCompletedTap();
+        }
+
+        return completed;
+    }
+
+    private _completeTap(unitId: string, event: MobilePointerEvent): void {
+        const skeletonParam = this._sheetSkeletonManagerService.getCurrentParam();
+        const cellIndex = skeletonParam && getCellIndexByOffsetWithMerge(
+            event.offsetX,
+            event.offsetY,
+            this._context.scene,
+            skeletonParam.skeleton
+        );
+        if (!cellIndex || !skeletonParam) {
+            this._resetCompletedTap();
+            return;
+        }
+
+        const cell: ISheetLocationBase = {
+            unitId,
+            subUnitId: skeletonParam.sheetId,
+            row: cellIndex.actualRow,
+            col: cellIndex.actualCol,
+        };
+        const timeStamp = Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now();
+        const lastCompletedTap = this._lastCompletedTap;
+        if (
+            lastCompletedTap &&
+            timeStamp >= lastCompletedTap.timeStamp &&
+            timeStamp - lastCompletedTap.timeStamp <= DOUBLE_TAP_DELAY &&
+            cell.unitId === lastCompletedTap.cell.unitId &&
+            cell.subUnitId === lastCompletedTap.cell.subUnitId &&
+            cell.row === lastCompletedTap.cell.row &&
+            cell.col === lastCompletedTap.cell.col &&
+            Math.abs(event.clientX - lastCompletedTap.clientX) <= DOUBLE_TAP_MOVE_THRESHOLD &&
+            Math.abs(event.clientY - lastCompletedTap.clientY) <= DOUBLE_TAP_MOVE_THRESHOLD
+        ) {
+            this._resetCompletedTap();
+            this._clearEngineDoubleClickSuppression();
+            this._suppressEngineDoubleClick = true;
+            this._suppressEngineDoubleClickTimer = setTimeout(() => {
+                this._suppressEngineDoubleClick = false;
+                this._suppressEngineDoubleClickTimer = null;
+            });
+            this._hoverManagerService.triggerDbClick(unitId, event);
+            return;
+        }
+
+        this._resetCompletedTap();
+        this._lastCompletedTap = {
+            clientX: event.clientX,
+            clientY: event.clientY,
+            timeStamp,
+            cell,
+        };
+        this._completedTapTimer = setTimeout(() => this._resetCompletedTap(), DOUBLE_TAP_DELAY);
+    }
+
+    private _resetCompletedTap(): void {
+        if (this._completedTapTimer != null) {
+            clearTimeout(this._completedTapTimer);
+            this._completedTapTimer = null;
+        }
+        this._lastCompletedTap = null;
+    }
+
+    private _resetTapSequence(): void {
+        this._tapState = null;
+        this._resetCompletedTap();
+    }
+
+    private _clearEngineDoubleClickSuppression(): void {
+        if (this._suppressEngineDoubleClickTimer != null) {
+            clearTimeout(this._suppressEngineDoubleClickTimer);
+            this._suppressEngineDoubleClickTimer = null;
+        }
+        this._suppressEngineDoubleClick = false;
+    }
+
+    private _initScrollEvent(): void {
+        this.disposeWithMe(this._scrollManagerService.validViewportScrollInfo$.subscribe(() => {
+            this._resetTapSequence();
+            this._hoverManagerService.triggerScroll();
+        }));
+    }
+}

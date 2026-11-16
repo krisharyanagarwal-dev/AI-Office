@@ -1,0 +1,20 @@
+{
+  "scale": 1.0,
+  "center": true,
+  "showTags": true,
+  "showAttachments": false,
+  "linkDistance": 80,
+  "charge": -150,
+  "gravity": 0.1,
+  "depth": 2,
+  "filterTag": "",
+  "filterTagMode": "show",
+  "groupBy": "tag",
+  "colorBy": "tag",
+  "collapseFilter": "",
+  "collapseFilterMode": "show",
+  "showPopularTopics": true,
+  "removeTags": [],
+  "removeAttachments": false,
+  "showExistingOnly": false
+}

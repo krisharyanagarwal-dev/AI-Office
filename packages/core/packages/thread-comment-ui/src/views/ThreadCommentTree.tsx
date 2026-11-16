@@ -1,0 +1,754 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type { IUser, LocaleType, UniverInstanceType } from '@univerjs/core';
+import type { IAddCommentCommandParams, IThreadComment, IUpdateCommentCommandParams } from '@univerjs/thread-comment';
+import type { IUniverUIConfig } from '@univerjs/ui';
+import {
+    dateKit,
+    generateRandomId,
+    ICommandService,
+    isSafeUrl,
+    LOCALE_META,
+    LocaleService,
+    RegionService,
+    UserManagerService,
+} from '@univerjs/core';
+import { borderClassName, clsx, Dropdown, scrollbarClassName, Tooltip } from '@univerjs/design';
+import { DeleteIcon, MoreHorizontalIcon, ReplyToCommentIcon, SuccessIcon, SuccessOutlineIcon } from '@univerjs/icons';
+import {
+    AddCommentCommand,
+    DeleteCommentCommand,
+    DeleteCommentTreeCommand,
+    getDT,
+    ResolveCommentCommand,
+    ThreadCommentModel,
+    UpdateCommentCommand,
+} from '@univerjs/thread-comment';
+import { UI_PLUGIN_CONFIG_KEY, useConfigValue, useDependency, useEvent, useObservable } from '@univerjs/ui';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { debounceTime, map, of, startWith } from 'rxjs';
+import type { LocaleKey } from '../locale/types';
+import type { IThreadCommentEditorInstance } from './ThreadCommentEditor';
+import { SetActiveCommentOperation } from '../commands/operations/comment.operations';
+import { transformDocument2TextNodes, transformTextNodes2Document } from './thread-comment-editor/util';
+import { getThreadCommentEditorId } from './thread-comment-tree/util';
+import { ThreadCommentEditor } from './ThreadCommentEditor';
+
+export enum ThreadCommentTreeLocation {
+    CELL = 'CELL',
+    PANEL = 'PANEL',
+};
+
+export interface IThreadCommentTreeProps {
+    full?: boolean;
+    id?: string;
+    unitId: string;
+    subUnitId: string;
+    type: UniverInstanceType;
+    refStr?: string;
+    displayRef?: string;
+    showEdit?: boolean;
+    onClick?: () => void;
+    showHighlight?: boolean;
+    onClose?: () => void;
+    getSubUnitName: (subUnitId: string) => string;
+    location: ThreadCommentTreeLocation;
+    autoFocus?: boolean;
+    onMouseEnter?: () => void;
+    onMouseLeave?: () => void;
+    onAddComment?: (comment: IThreadComment) => boolean | void | Promise<boolean | void>;
+    onDeleteComment?: (comment: IThreadComment) => boolean;
+    onAfterDeleteComment?: (comment: IThreadComment) => void | Promise<void>;
+    onResolve?: (resolved: boolean) => void;
+    style?: React.CSSProperties;
+    DropdownComponent?: typeof Dropdown;
+    EditorComponent?: typeof ThreadCommentEditor;
+}
+
+export interface IThreadCommentItemProps {
+    item: IThreadComment;
+    unitId: string;
+    subUnitId: string;
+    onEditingChange?: (editing: boolean) => void;
+    editing?: boolean;
+    onClick?: () => void;
+    resolved?: boolean;
+    onReply: (user: IUser | undefined) => void;
+    isRoot?: boolean;
+    onClose?: () => void;
+    onDeleteComment?: (comment: IThreadComment) => boolean;
+    onAfterDeleteComment?: (comment: IThreadComment) => void | Promise<void>;
+    type: UniverInstanceType;
+    threadCommentEditorId: string;
+    DropdownComponent: typeof Dropdown;
+    EditorComponent: typeof ThreadCommentEditor;
+}
+
+const MOCK_ID = '__mock__';
+
+function formatCommentDateTime(value: string, region: LocaleType): string {
+    const date = dateKit(value);
+    const regionTag = LOCALE_META[region].tag;
+
+    return date.formatIntl(regionTag, {
+        year: 'numeric',
+        month: 'numeric',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+        numberingSystem: 'latn',
+    });
+}
+
+const ThreadCommentItem = (props: IThreadCommentItemProps) => {
+    const {
+        item,
+        unitId,
+        subUnitId,
+        editing,
+        onEditingChange,
+        onReply,
+        resolved,
+        isRoot,
+        onClose,
+        onDeleteComment,
+        onAfterDeleteComment,
+        type,
+        threadCommentEditorId,
+        DropdownComponent,
+        EditorComponent,
+    } = props;
+    const commandService = useDependency(ICommandService);
+    const localeService = useDependency(LocaleService);
+    const regionService = useDependency(RegionService);
+    const userManagerService = useDependency(UserManagerService);
+    useObservable(userManagerService.userChange$);
+    const user = userManagerService.getUser(item.personId);
+    const currentUser = useObservable(userManagerService.currentUser$);
+    const isCommentBySelf = currentUser?.userID === item.personId;
+    const isMock = item.id === MOCK_ID;
+    const [showReply, setShowReply] = useState(false);
+    const uiConfig = useConfigValue<IUniverUIConfig>(UI_PLUGIN_CONFIG_KEY);
+    const avatarFallback = uiConfig?.avatarFallback;
+    const currentRegion = useObservable(regionService.currentRegion$, regionService.getCurrentRegion());
+    const direction = useObservable(localeService.direction$, localeService.getDirection());
+    const dateText = isMock ? null : formatCommentDateTime(item.dT, currentRegion);
+
+    const handleDeleteItem = async () => {
+        if (onDeleteComment?.(item) === false) {
+            return;
+        }
+
+        try {
+            const success = await commandService.executeCommand(
+                isRoot ? DeleteCommentTreeCommand.id : DeleteCommentCommand.id,
+                {
+                    unitId,
+                    subUnitId,
+                    commentId: item.id,
+                }
+            );
+            if (success) {
+                try {
+                    await onAfterDeleteComment?.(item);
+                } catch {
+                    // The comment is already deleted; auxiliary anchor cleanup must not reopen it.
+                }
+                if (isRoot) {
+                    onClose?.();
+                }
+            }
+        } catch {
+            // Keep the thread visible so the user can retry after the remote failure.
+        }
+    };
+
+    return (
+        <div
+            className="
+              univer-relative univer-mb-3 univer-pl-[30px]
+              rtl:univer-pl-0 rtl:univer-pr-[30px]
+            "
+            onMouseLeave={() => setShowReply(false)}
+            onMouseEnter={() => setShowReply(true)}
+        >
+            <div
+                className={`
+                  univer-absolute univer-left-0 univer-top-0 univer-size-6 univer-rounded-full univer-bg-cover
+                  univer-bg-center univer-bg-no-repeat
+                  rtl:univer-left-auto rtl:univer-right-0
+                `}
+                style={{
+                    backgroundImage: `url(${user?.avatar || avatarFallback})`,
+                }}
+            />
+            {user || item.authorName
+                ? (
+                    <div className="univer-mb-1 univer-flex univer-h-6 univer-items-center univer-justify-between">
+                        <div className="univer-text-sm univer-font-medium univer-leading-5">
+                            {user?.name || item.authorName || ' '}
+                        </div>
+                        <div>
+                            {(isMock || resolved)
+                                ? null
+                                : (
+                                    showReply && user
+                                        ? (
+                                            <button
+                                                type="button"
+                                                aria-label={localeService.t<LocaleKey>('thread-comment-ui.editor.reply')}
+                                                className={`
+                                                  univer-ml-1 univer-inline-flex univer-size-6 univer-cursor-pointer
+                                                  univer-items-center univer-justify-center univer-rounded-sm
+                                                  univer-border-0 univer-bg-transparent univer-p-0 univer-text-base
+                                                  hover:univer-bg-gray-50
+                                                  rtl:univer-ml-0 rtl:univer-mr-1
+                                                  dark:hover:!univer-bg-gray-800
+                                                `}
+                                                onClick={() => onReply(user)}
+                                            >
+                                                <ReplyToCommentIcon />
+                                            </button>
+                                        )
+                                        : null
+                                )}
+                            {isCommentBySelf && !isMock && !resolved
+                                ? (
+                                    <DropdownComponent
+                                        overlay={(
+                                            <div dir={direction} className="univer-rounded-lg">
+                                                <ul
+                                                    className={`
+                                                      univer-m-0 univer-box-border univer-grid univer-list-none
+                                                      univer-p-1.5 univer-text-sm
+                                                      rtl:univer-text-right
+                                                      [&_button]:univer-block [&_button]:univer-w-full
+                                                      [&_button]:univer-cursor-pointer [&_button]:univer-rounded
+                                                      [&_button]:univer-border-0 [&_button]:univer-bg-transparent
+                                                      [&_button]:univer-px-2 [&_button]:univer-py-1.5
+                                                      [&_button]:univer-text-left [&_button]:univer-transition-colors
+                                                      rtl:[&_button]:univer-text-right
+                                                    `}
+                                                >
+                                                    <li>
+                                                        <button
+                                                            type="button"
+                                                            className={`
+                                                              hover:univer-bg-gray-200
+                                                              dark:hover:!univer-bg-gray-800
+                                                            `}
+                                                            onClick={() => onEditingChange?.(true)}
+                                                        >
+                                                            {localeService.t<LocaleKey>('thread-comment-ui.item.edit')}
+                                                        </button>
+                                                    </li>
+                                                    <li>
+                                                        <button
+                                                            type="button"
+                                                            className={`
+                                                              hover:univer-bg-gray-200
+                                                              dark:hover:!univer-bg-gray-800
+                                                            `}
+                                                            onClick={handleDeleteItem}
+                                                        >
+                                                            {localeService.t<LocaleKey>('thread-comment-ui.item.delete')}
+                                                        </button>
+                                                    </li>
+                                                </ul>
+                                            </div>
+                                        )}
+                                    >
+                                        <button
+                                            type="button"
+                                            aria-label={localeService.t<LocaleKey>('thread-comment-ui.item.more')}
+                                            className={`
+                                              univer-ml-1 univer-inline-flex univer-size-6 univer-cursor-pointer
+                                              univer-items-center univer-justify-center univer-rounded-sm
+                                              univer-border-0 univer-bg-transparent univer-p-0 univer-text-base
+                                              hover:univer-bg-gray-50
+                                              rtl:univer-ml-0 rtl:univer-mr-1
+                                              dark:hover:!univer-bg-gray-800
+                                            `}
+                                        >
+                                            <MoreHorizontalIcon />
+                                        </button>
+                                    </DropdownComponent>
+                                )
+                                : null}
+                        </div>
+                    </div>
+                )
+                : null}
+            {dateText && (
+                <time
+                    className={`
+                      univer-mb-1 univer-block univer-text-xs/normal univer-text-gray-600
+                      rtl:univer-text-right
+                      dark:!univer-text-gray-200
+                    `}
+                >
+                    <bdo dir="ltr">{dateText}</bdo>
+                </time>
+            )}
+            {editing
+                ? (
+                    <EditorComponent
+                        type={type}
+                        id={item.id}
+                        comment={item}
+                        onCancel={() => onEditingChange?.(false)}
+                        autoFocus
+                        unitId={unitId}
+                        subUnitId={subUnitId}
+                        editorId={threadCommentEditorId}
+                        onSave={async ({ text, attachments }) => {
+                            const success = await commandService.executeCommand(
+                                UpdateCommentCommand.id,
+                                {
+                                    unitId,
+                                    subUnitId,
+                                    payload: {
+                                        commentId: item.id,
+                                        text,
+                                        attachments,
+                                    },
+                                } as IUpdateCommentCommandParams
+                            );
+                            if (success) {
+                                onEditingChange?.(false);
+                            }
+                            return success;
+                        }}
+                    />
+                )
+                : (
+                    <div
+                        tabIndex={-1}
+                        className={`
+                          univer-select-text univer-text-sm univer-text-gray-900
+                          dark:!univer-text-gray-0
+                        `}
+                    >
+                        {transformDocument2TextNodes(item.text).map((paragraph, paragraphIndex) => {
+                            let offset = 0;
+
+                            return (
+                                <div
+                                    key={item.text.paragraphs?.[paragraphIndex]?.paragraphId}
+                                    className="univer-break-words"
+                                >
+                                    {paragraph.map((node) => {
+                                        const key = offset;
+                                        offset += node.type === 'mention' ? node.content.label.length : node.content.length;
+
+                                        switch (node.type) {
+                                            case 'mention':
+                                                return (
+                                                    <span className="univer-text-primary-600" key={key}>
+                                                        {node.content.label}
+                                                        {' '}
+                                                    </span>
+                                                );
+                                            case 'hyperlink': {
+                                                const url = node.range.properties?.url;
+                                                if (!isSafeUrl(url)) {
+                                                    return node.content;
+                                                }
+                                                return (
+                                                    <a
+                                                        key={key}
+                                                        href={url}
+                                                        target="_blank"
+                                                        rel="noopener noreferrer"
+                                                        className="univer-text-primary-600 univer-underline"
+                                                        onClick={(event) => event.stopPropagation()}
+                                                    >
+                                                        {node.content}
+                                                    </a>
+                                                );
+                                            }
+                                            default:
+                                                return node.content;
+                                        }
+                                    })}
+                                </div>
+                            );
+                        })}
+                    </div>
+                )}
+        </div>
+    );
+};
+
+export const ThreadCommentTree = (props: IThreadCommentTreeProps) => {
+    const {
+        id,
+        unitId,
+        subUnitId,
+        refStr,
+        displayRef,
+        showEdit = true,
+        onClick,
+        showHighlight,
+        onClose,
+        getSubUnitName,
+        location,
+        autoFocus,
+        onMouseEnter,
+        onMouseLeave,
+        onAddComment,
+        onDeleteComment,
+        onAfterDeleteComment,
+        onResolve,
+        type,
+        style,
+        full,
+        DropdownComponent = Dropdown,
+        EditorComponent = ThreadCommentEditor,
+    } = props;
+    const threadCommentModel = useDependency(ThreadCommentModel);
+    const [isHover, setIsHover] = useState(false);
+    const [editingId, setEditingId] = useState('');
+    const updte$ = useMemo(() => threadCommentModel.commentUpdate$.pipe(debounceTime(16)), [threadCommentModel]);
+    const comments = useObservable(
+        () => id
+            ? updte$.pipe(
+                map(() => threadCommentModel.getCommentWithChildren(unitId, subUnitId, id)),
+                startWith(threadCommentModel.getCommentWithChildren(unitId, subUnitId, id))
+            )
+            : of(null),
+        null,
+        false,
+        [id, subUnitId, threadCommentModel, unitId, updte$]
+    );
+    const commandService = useDependency(ICommandService);
+    const localeService = useDependency(LocaleService);
+    const userManagerService = useDependency(UserManagerService);
+    const resolved = comments?.root.resolved;
+    const currentUser = useObservable(userManagerService.currentUser$);
+    const editorRef = useRef<IThreadCommentEditorInstance>(null);
+    const fallbackEditorId = useMemo(() => generateRandomId(6), []);
+    const renderComments: IThreadComment[] = [
+        ...comments ?
+            [comments.root] :
+            // mock empty comment
+            [{
+                id: MOCK_ID,
+                text: {
+                    dataStream: '\n\r',
+                },
+                personId: currentUser?.userID ?? '',
+                ref: refStr ?? '',
+                dT: '',
+                unitId,
+                subUnitId,
+                threadId: '',
+            }],
+        ...(comments?.children ?? []) as IThreadComment[],
+    ];
+    const scrollerRef = useRef<HTMLDivElement>(null);
+    const handleMouseLeave = useEvent(onMouseLeave);
+    const handleResolve: React.MouseEventHandler<HTMLButtonElement> = async (e) => {
+        e.stopPropagation();
+        try {
+            const success = await commandService.executeCommand(ResolveCommentCommand.id, {
+                unitId,
+                subUnitId,
+                commentId: id,
+                resolved: !resolved,
+            });
+            if (!success) {
+                return;
+            }
+
+            await commandService.executeCommand(SetActiveCommentOperation.id, resolved
+                ? { unitId, subUnitId, commentId: id }
+                : undefined);
+            onResolve?.(!resolved);
+        } catch {
+            // Keep the current resolved state when the remote write fails.
+        }
+    };
+
+    const handleDeleteRoot: React.MouseEventHandler<HTMLButtonElement> = async (e) => {
+        e.stopPropagation();
+        const root = comments?.root;
+        if (!root || onDeleteComment?.(root) === false) {
+            return;
+        }
+
+        try {
+            const success = await commandService.executeCommand(
+                DeleteCommentTreeCommand.id,
+                {
+                    unitId,
+                    subUnitId,
+                    commentId: id,
+                }
+            );
+            if (success) {
+                try {
+                    await onAfterDeleteComment?.(root);
+                } catch {
+                    // The comment is already deleted; auxiliary anchor cleanup must not reopen it.
+                }
+                await commandService.executeCommand(SetActiveCommentOperation.id);
+                onClose?.();
+            }
+        } catch {
+            // Keep the thread visible so the user can retry after the remote failure.
+        }
+    };
+
+    useEffect(() => {
+        return handleMouseLeave;
+    }, [handleMouseLeave]);
+
+    const subUnitName = getSubUnitName(comments?.root.subUnitId ?? subUnitId);
+    const editorVisible = showEdit && !editingId && !resolved;
+    const title = `${displayRef ?? refStr ?? comments?.root.ref ?? ''}${subUnitName ? ' · ' : ''}${subUnitName}`;
+    const resolveLabel = localeService.t<LocaleKey>(resolved
+        ? 'thread-comment-ui.item.markUnresolved'
+        : 'thread-comment-ui.item.markResolved');
+    const deleteLabel = localeService.t<LocaleKey>('thread-comment-ui.item.delete');
+    const threadCommentEditorId = getThreadCommentEditorId({
+        location,
+        unitId,
+        subUnitId,
+        commentId: id,
+        fallbackId: fallbackEditorId,
+    });
+
+    return (
+        <div
+            id={`${location}-${unitId}-${subUnitId}-${id}`}
+            className={clsx(`
+              univer-relative univer-box-border univer-rounded-md univer-bg-gray-0 univer-p-4 univer-text-gray-900
+              dark:!univer-bg-gray-900 dark:!univer-text-gray-0
+            `, borderClassName, {
+                'univer-w-[278px]': !full,
+                'univer-w-full': full,
+                'univer-shadow': !resolved && (showHighlight || isHover || location === ThreadCommentTreeLocation.CELL),
+            })}
+            style={style}
+            onClick={(event) => {
+                const selection = event.currentTarget.ownerDocument.getSelection();
+                if (selection && !selection.isCollapsed && selection.anchorNode && selection.focusNode &&
+                    event.currentTarget.contains(selection.anchorNode) && event.currentTarget.contains(selection.focusNode)) {
+                    return;
+                }
+                onClick?.();
+            }}
+            onMouseEnter={() => {
+                onMouseEnter?.();
+                setIsHover(true);
+            }}
+            onMouseLeave={() => {
+                onMouseLeave?.();
+                setIsHover(false);
+            }}
+        >
+            {!resolved && showHighlight && (
+                <div
+                    className={`
+                      univer-absolute univer-left-0 univer-right-0 univer-top-0 univer-h-1.5 univer-rounded-t-md
+                      univer-bg-yellow-400
+                    `}
+                />
+            )}
+            <div
+                className={`
+                  univer-mb-4 univer-flex univer-flex-row univer-items-center univer-justify-between univer-text-sm
+                  univer-leading-5
+                `}
+            >
+                <div className="univer-flex univer-flex-1 univer-flex-row univer-items-center univer-overflow-hidden">
+                    <div
+                        className={`
+                          univer-mr-2 univer-h-3.5 univer-w-[3px] univer-flex-shrink-0 univer-flex-grow-0
+                          univer-rounded-sm univer-bg-yellow-500
+                          rtl:univer-ml-2 rtl:univer-mr-0
+                        `}
+                    />
+                    <Tooltip showIfEllipsis title={title}>
+                        <span
+                            className="univer-flex-1 univer-truncate"
+                        >
+                            {title}
+                        </span>
+                    </Tooltip>
+                </div>
+                {!!comments && (
+                    <div className="univer-flex univer-flex-shrink-0 univer-flex-grow-0 univer-flex-row">
+                        <Tooltip title={resolveLabel}>
+                            <button
+                                type="button"
+                                aria-label={resolveLabel}
+                                className={clsx(`
+                                  univer-ml-1 univer-inline-flex univer-size-6 univer-cursor-pointer univer-items-center
+                                  univer-justify-center univer-rounded-[3px] univer-border-0 univer-bg-transparent
+                                  univer-p-0 univer-text-base
+                                  hover:univer-bg-gray-50
+                                  rtl:univer-ml-0 rtl:univer-mr-1
+                                  dark:hover:!univer-bg-gray-800
+                                `, {
+                                    'univer-text-green-500': resolved,
+                                })}
+                                onClick={handleResolve}
+                            >
+                                {resolved ? <SuccessIcon /> : <SuccessOutlineIcon />}
+                            </button>
+                        </Tooltip>
+                        {currentUser?.userID === comments.root.personId
+                            ? (
+                                <Tooltip title={deleteLabel}>
+                                    <button
+                                        type="button"
+                                        aria-label={deleteLabel}
+                                        className={`
+                                          univer-ml-1 univer-inline-flex univer-size-6 univer-cursor-pointer
+                                          univer-items-center univer-justify-center univer-rounded-[3px] univer-border-0
+                                          univer-bg-transparent univer-p-0 univer-text-base
+                                          hover:univer-bg-gray-50
+                                          rtl:univer-ml-0 rtl:univer-mr-1
+                                          dark:hover:!univer-bg-gray-800
+                                        `}
+                                        onClick={handleDeleteRoot}
+                                    >
+                                        <DeleteIcon />
+                                    </button>
+                                </Tooltip>
+                            )
+                            : null}
+                    </div>
+                )}
+            </div>
+            <div
+                ref={scrollerRef}
+                className={clsx(
+                    'univer-max-h-80 univer-overflow-y-auto univer-overflow-x-hidden',
+                    scrollbarClassName,
+                    location === ThreadCommentTreeLocation.PANEL && '-univer-mx-4 univer-px-4'
+                )}
+            >
+                {renderComments.map(
+                    (item) => (
+                        <ThreadCommentItem
+                            unitId={unitId}
+                            subUnitId={subUnitId}
+                            item={item}
+                            key={item.id}
+                            isRoot={item.id === comments?.root.id}
+                            editing={editingId === item.id}
+                            resolved={comments?.root.resolved}
+                            type={type}
+                            threadCommentEditorId={threadCommentEditorId}
+                            DropdownComponent={DropdownComponent}
+                            EditorComponent={EditorComponent}
+                            onClose={onClose}
+                            onEditingChange={(editing) => {
+                                if (editing) {
+                                    setEditingId(item.id);
+                                } else {
+                                    setEditingId('');
+                                }
+                            }}
+                            onReply={(user) => {
+                                if (!user) {
+                                    return;
+                                }
+                                requestAnimationFrame(() => {
+                                    editorRef.current?.reply(transformTextNodes2Document([
+                                        {
+                                            type: 'mention',
+                                            content: {
+                                                id: user.userID,
+                                                label: `@${user.name}`,
+                                            },
+                                        },
+                                        {
+                                            type: 'text',
+                                            content: ' ',
+                                        },
+                                    ]));
+                                });
+                            }}
+                            onDeleteComment={onDeleteComment}
+                            onAfterDeleteComment={onAfterDeleteComment}
+                        />
+                    )
+                )}
+            </div>
+            {editorVisible && (
+                <div>
+                    <EditorComponent
+                        key={`${autoFocus}`}
+                        ref={editorRef}
+                        type={type}
+                        unitId={unitId}
+                        subUnitId={subUnitId}
+                        editorId={threadCommentEditorId}
+                        onSave={async ({ text, attachments }) => {
+                            const comment: IThreadComment = {
+                                text,
+                                attachments,
+                                dT: getDT(),
+                                id: generateRandomId(),
+                                ref: refStr!,
+                                personId: currentUser?.userID ?? '',
+                                parentId: comments?.root.id,
+                                unitId,
+                                subUnitId,
+                                threadId: comments?.root.threadId ?? '',
+                            };
+
+                            if (await onAddComment?.(comment) === false) {
+                                if (!comments) {
+                                    onClose?.();
+                                }
+                                return true;
+                            }
+
+                            const success = await commandService.executeCommand(
+                                AddCommentCommand.id,
+                                {
+                                    unitId,
+                                    subUnitId,
+                                    comment,
+                                } as IAddCommentCommandParams
+                            );
+                            if (success && scrollerRef.current) {
+                                scrollerRef.current.scrollTop = scrollerRef.current.scrollHeight;
+                            }
+                            if (success && !comments) {
+                                onClose?.();
+                            }
+                            return success;
+                        }}
+                        autoFocus={autoFocus || (!comments)}
+                        onCancel={() => {
+                            if (!comments) {
+                                onClose?.();
+                            }
+                        }}
+                    />
+                </div>
+            )}
+        </div>
+    );
+};

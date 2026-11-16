@@ -1,0 +1,282 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type { IDocumentData } from '@univerjs/core';
+import type { CSSProperties, ReactNode, RefObject } from 'react';
+import {
+    BuildTextUtils,
+    createInternalEditorID,
+    generateRandomId,
+    getPlainText,
+    HorizontalAlign,
+    ICommandService,
+    IContextService,
+    IUniverInstanceService,
+    LocaleService,
+    RichTextBuilder,
+    Tools,
+} from '@univerjs/core';
+import { borderClassName, clsx } from '@univerjs/design';
+import { DocSkeletonManagerService } from '@univerjs/docs';
+import { IRenderManagerService } from '@univerjs/engine-render';
+import { useDependency, useEvent, useObservable } from '@univerjs/ui';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { map, merge, startWith } from 'rxjs';
+import type { Editor, IEditorCanvasStyle } from '../services/editor/editor';
+import type { IEditorRuntimeConfig } from '../services/editor/editor-runtime-config';
+import type { IKeyboardEventConfig } from './rich-text-editor/hooks/use-keyboard-event';
+import { DocSelectionRenderService } from '../services/selection/doc-selection-render.service';
+import { createEditorUndoRedoKeyboardConfig } from './rich-text-editor/hooks/editor-undo-redo-keyboard';
+import { useEditor } from './rich-text-editor/hooks/use-editor';
+import { useEditorClickOutside } from './rich-text-editor/hooks/use-editor-click-outside';
+import { useIsFocusing } from './rich-text-editor/hooks/use-is-focusing';
+import { useKeyboardEvent } from './rich-text-editor/hooks/use-keyboard-event';
+import { useLeftAndRightArrow } from './rich-text-editor/hooks/use-left-and-right-arrow';
+import { useOnChange } from './rich-text-editor/hooks/use-on-change';
+import { useResize } from './rich-text-editor/hooks/use-resize';
+
+export interface IRichTextEditorProps {
+    /** Instance-only layout and interaction settings, never persisted in the document. */
+    renderConfig?: IEditorRuntimeConfig;
+    className?: string;
+    autoFocus?: boolean;
+    onFocusChange?: (isFocus: boolean, newValue?: string) => void;
+    initialValue?: IDocumentData | string;
+    onClickOutside?: () => void;
+    /** Keep the globally focused unit on the editor's host while this editor receives input focus. */
+    preserveHostFocus?: boolean;
+    /** Let the host own engine sizing, including a fixed backing-store ratio. */
+    cancelDefaultResizeListener?: boolean;
+    /** Fixed canvas backing-store ratio used with a host-managed layout. */
+    pixelRatio?: number;
+    /** Use an untransformed layout size when the editor DOM is displayed through a CSS transform. */
+    layoutSize?: Readonly<Pick<DOMRectReadOnly, 'width' | 'height'>>;
+    /** Keep document reflow independent from an oversized host-managed canvas. */
+    documentLayoutSize?: Readonly<Pick<DOMRectReadOnly, 'width' | 'height'>>;
+    /** Keep the editor viewport anchored while a host expands it to fit content. */
+    autoScroll?: boolean;
+    /** Let the editor create scrollbars when its content exceeds the current layout size. */
+    autoScrollbar?: boolean;
+    /** Publish transient drag ranges to the host. Defaults to false. */
+    emitSelectionWhileDragging?: boolean;
+    /** Keep host keyboard handlers active for non-collapsed selections. Defaults to false. */
+    keyboardEventsOnSelection?: boolean;
+    keyboardEventConfig?: IKeyboardEventConfig;
+    moveCursor?: boolean;
+    style?: CSSProperties;
+    isSingle?: boolean;
+    placeholder?: string;
+    editorId?: string;
+    onHeightChange?: (height: number) => void;
+    onChange?: (data: IDocumentData, str: string) => void;
+    maxHeight?: number;
+    defaultHeight?: number;
+    icon?: ReactNode;
+    editorRef?: RefObject<Editor | null> | ((editor: Editor | null) => void);
+    noStyle?: boolean;
+    canvasStyle?: IEditorCanvasStyle;
+}
+
+export const RichTextEditor = (props: IRichTextEditorProps) => {
+    const {
+        className,
+        autoFocus,
+        onFocusChange: _onFocusChange,
+        initialValue,
+        onClickOutside: _onClickOutside,
+        preserveHostFocus,
+        cancelDefaultResizeListener,
+        documentLayoutSize,
+        autoScroll = true,
+        autoScrollbar = true,
+        emitSelectionWhileDragging,
+        keyboardEventsOnSelection = false,
+        keyboardEventConfig,
+        layoutSize,
+        pixelRatio,
+        moveCursor = true,
+        style,
+        isSingle,
+        editorId: propsEditorId,
+        onHeightChange,
+        onChange: _onChange,
+        defaultHeight = 32,
+        maxHeight = 32,
+        icon,
+        editorRef,
+        placeholder,
+        noStyle,
+        canvasStyle,
+        renderConfig,
+    } = props;
+
+    const commandService = useDependency(ICommandService);
+    const contextService = useDependency(IContextService);
+    const univerInstanceService = useDependency(IUniverInstanceService);
+    const localeService = useDependency(LocaleService);
+    const onFocusChange = useEvent(_onFocusChange);
+    const onClickOutside = useEvent(_onClickOutside);
+    const [height, setHeight] = useState(defaultHeight);
+    const formulaEditorContainerRef = useRef<HTMLDivElement>(null!);
+    const editorId = useMemo(() => propsEditorId ?? createInternalEditorID(`RICH_TEXT_EDITOR-${generateRandomId(4)}`), [propsEditorId]);
+    const editor = useEditor({
+        editorId,
+        initialValue,
+        renderConfig,
+        container: formulaEditorContainerRef,
+        preserveHostFocus,
+        cancelDefaultResizeListener,
+        disableBackScroll: !autoScroll,
+        emitSelectionWhileDragging,
+        documentLayoutSize,
+        autoFocus,
+        isSingle,
+        pixelRatio,
+        canvasStyle,
+    });
+    const direction = useObservable(localeService.direction$, localeService.getDirection());
+    const renderManagerService = useDependency(IRenderManagerService);
+    const renderer = renderManagerService.getRenderUnitById(editorId);
+    const selectionIsFocusing = useIsFocusing(editorId);
+    const docSelectionRenderService = renderer?.with(DocSelectionRenderService);
+    const editorFocused = useObservable(
+        editor
+            ? () => merge(
+                editor.focus$,
+                editor.blur$
+            ).pipe(
+                map(() => docSelectionRenderService?.isFocusing ?? false),
+                startWith(docSelectionRenderService?.isFocusing ?? false)
+            )
+            : null,
+        docSelectionRenderService?.isFocusing ?? false,
+        false,
+        [docSelectionRenderService, editor]
+    );
+    const isFocusing = selectionIsFocusing && editorFocused;
+    const sheetEmbeddingRef = useRef<HTMLDivElement>(null);
+    const resolveShowPlaceholder = () => !BuildTextUtils.transform.getPlainText(editor?.getDocumentData().body?.dataStream ?? '');
+    const showPlaceholder = useObservable(
+        editor
+            ? () => editor.selectionChange$.pipe(map(resolveShowPlaceholder), startWith(resolveShowPlaceholder()))
+            : null,
+        resolveShowPlaceholder(),
+        false,
+        [editor]
+    );
+    const { checkScrollBar } = useResize(
+        editor,
+        isSingle,
+        autoScrollbar,
+        autoScroll,
+        layoutSize,
+        pixelRatio,
+        documentLayoutSize
+    );
+
+    useLayoutEffect(() => {
+        if (!editorRef || !editor) return;
+        if (typeof editorRef === 'function') {
+            editorRef(editor);
+            return;
+        }
+        editorRef.current = editor;
+    }, [editor]);
+
+    const onChange = useEvent((data: IDocumentData) => {
+        const docSkeleton = renderer?.with(DocSkeletonManagerService);
+        const size = docSkeleton?.getSkeleton().getActualSize();
+        if (size) {
+            onHeightChange?.(size.actualHeight);
+            setHeight(Math.max(defaultHeight, Math.min(size.actualHeight + 10, maxHeight)));
+        }
+        _onChange?.(data, getPlainText(data.body?.dataStream ?? ''));
+        checkScrollBar();
+    });
+
+    useEffect(() => {
+        if (!editor) {
+            return;
+        }
+
+        const documentData = RichTextBuilder.create(Tools.deepClone(editor.getDocumentData()))
+            .align({ horizontal: direction === 'rtl' ? HorizontalAlign.RIGHT : HorizontalAlign.LEFT })
+            .getData();
+
+        editor.setDocumentData(documentData, editor.getSelectionRanges());
+    }, [direction, editor]);
+
+    useEffect(() => {
+        const data = editor?.getDocumentData();
+        onFocusChange?.(isFocusing, getPlainText(data?.body?.dataStream ?? ''));
+    }, [isFocusing, onFocusChange]);
+
+    useEditorClickOutside(editorId, sheetEmbeddingRef, onClickOutside);
+
+    const resolvedKeyboardEventConfig = useMemo(() => createEditorUndoRedoKeyboardConfig({
+        commandService,
+        contextService,
+        univerInstanceService,
+        editorUnitId: editorId,
+        preserveHostFocus,
+        keyCodes: keyboardEventConfig?.keyCodes,
+        handler: keyboardEventConfig?.handler,
+    }), [commandService, contextService, editorId, keyboardEventConfig, preserveHostFocus, univerInstanceService]);
+
+    useLeftAndRightArrow(isFocusing && moveCursor, false, editor);
+    // Undo can restore a non-collapsed selection without blurring the editor.
+    useKeyboardEvent(keyboardEventsOnSelection ? editorFocused : isFocusing, resolvedKeyboardEventConfig, editor);
+    useOnChange(editor, onChange);
+
+    return (
+        <div className={className} style={style}>
+            <div
+                className={clsx(
+                    {
+                        'univer-border-primary-500': isFocusing && !noStyle,
+                        [`
+                          univer-relative univer-box-border univer-flex univer-h-8 univer-w-full univer-items-center
+                          univer-justify-around univer-gap-2 univer-rounded-md univer-pb-0.5 univer-pl-1.5 univer-pr-2
+                          univer-pt-1.5
+                        `]: !noStyle,
+                        'univer-size-full': noStyle,
+                        [borderClassName]: !noStyle,
+                    }
+                )}
+                style={{ height }}
+                ref={sheetEmbeddingRef}
+            >
+                <div
+                    ref={formulaEditorContainerRef}
+                    className="univer-relative univer-size-full"
+                    onMouseUp={() => editor?.focus()}
+                />
+                {icon}
+                {!showPlaceholder
+                    ? null
+                    : (
+                        <div
+                            className={`
+                              univer-absolute univer-left-[5px] univer-top-[5px] univer-text-sm univer-text-gray-500
+                            `}
+                        >
+                            {placeholder}
+                        </div>
+                    )}
+            </div>
+        </div>
+    );
+};

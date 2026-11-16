@@ -1,0 +1,164 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type enUS from './en-US';
+
+const locale: typeof enUS = {
+    'drawing-ui': {
+        ole: {
+            progressReading: 'Čítanie prílohy…',
+            progressUploading: 'Nahrávanie prílohy…',
+            progressCreating: 'Vytváranie online súboru…',
+            progressSaving: 'Ukladanie odkazu…',
+            externalAttachment: 'Prepojená príloha',
+            externalHint: 'Pôvodný súbor tejto prílohy nie je vložený do dokumentu. Náhľad a sťahovanie nie sú dostupné.',
+            missingHint: 'V dokumente chýbajú údaje tejto prílohy. Náhľad a sťahovanie nie sú dostupné.',
+            unavailableSummary: 'Počet nedostupných príloh v dokumente: {0}. Ich zástupné symboly boli zachované. Dôvod zobrazíte ukázaním na ikonu upozornenia.',
+            rename: 'Premenovať',
+            saveName: 'Uložiť názov',
+            cancel: 'Zrušiť',
+            invalidName: 'Zadajte platný názov súboru s najviac 255 znakmi.',
+            renameFailed: 'Prílohu sa nepodarilo premenovať. Skúste to znova.',
+            actions: 'Akcie prílohy',
+            linkSaveFailed: 'Online súbor bol vytvorený, ale jeho odkaz sa nepodarilo uložiť. Skúste odkaz uložiť znova.',
+            conversionFailed: 'Túto prílohu sa nepodarilo previesť. Skúste to znova.',
+            converted: 'Prevod dokončený',
+            open: 'Otvoriť',
+            converting: 'Prebieha prevod…',
+            openSlide: 'Otvoriť online prezentáciu na novej karte',
+            openDoc: 'Otvoriť online dokument na novej karte',
+            openSheet: 'Otvoriť online tabuľku na novej karte',
+            convertSlide: 'Previesť na online prezentáciu',
+            convertDoc: 'Previesť na online dokument',
+            convertSheet: 'Previesť na online tabuľku',
+            nativePreviewHint: 'Ak prehliadač nedokáže zobraziť súbor, stiahnite si originál.',
+            attachment: 'Príloha OLE',
+            external: 'Externý súbor nie je dostupný',
+            missing: 'Údaje prílohy nie sú dostupné',
+            opaque: 'Pôvodný binárny súbor OLE (možno stiahnuť)',
+            download: 'Stiahnuť',
+            preview: 'Ukážka',
+            remove: 'Odstrániť',
+            failed: 'Pôvodnú prílohu sa nepodarilo prečítať. Skúste to znova.',
+            unsupported: 'Ukážka tohto súboru nie je dostupná. Môžete si stiahnuť originál.',
+        },
+        mobile: { close: 'Zavrieť', more: 'Viac' },
+        'image-cropper': {
+            error: 'Nedá sa orezať neobrázkový objekt.',
+        },
+        objectListPanel: {
+            title: 'Vrstvy',
+            empty: 'Ziadne objekty',
+            showAll: 'Zobrazit vsetko',
+            hideAll: 'Skryt vsetko',
+            lockAll: 'Zamknúť všetko',
+            unlockAll: 'Odomknúť všetko',
+            moveForward: 'Presunut dopredu',
+            moveBackward: 'Presunut dozadu',
+            close: 'Zavriet',
+            show: 'Zobrazit',
+            hide: 'Skryt',
+            lock: 'Zamknut',
+            unlock: 'Odomknut',
+            lockHint: 'Zamknúť, aby sa zabránilo náhodnému výberu',
+            unlockHint: 'Zamknuté. Kliknutím odomknete',
+            name: 'Nazov',
+            nameInput: 'Nazov objektu',
+            description: 'Popis',
+            descriptionPlaceholder: 'Pridat popis',
+            details: 'Podrobnosti',
+            locate: 'Nájsť',
+            expand: 'Rozbaliť',
+            collapse: 'Zbaliť',
+            dragToReorder: 'Potiahnutím zmeňte poradie',
+            search: 'Hľadať objekty',
+            filterAll: 'Všetky',
+            filterHidden: 'Skryté',
+            filterLocked: 'Zamknuté',
+            sectionCanvas: 'Vrstva plátna',
+            sectionFloating: 'Plávajúca vrstva',
+            typeNames: {
+                object: 'Objekt',
+                shape: 'Tvar',
+                connector: 'Spojnica',
+                image: 'Obrázok',
+                chart: 'Graf',
+                table: 'Tabuľka',
+                smartArt: 'SmartArt',
+                video: 'Video',
+                group: 'Skupina',
+                unit: 'Jednotka',
+                dom: 'DOM',
+                text: 'Text',
+                placeholder: 'Zástupný symbol',
+                container: 'Kontajner',
+            },
+            noSelection: 'Vyberte objekt na úpravu podrobností',
+        },
+        'image-panel': {
+            arrange: {
+                title: 'Usporiadať',
+                forward: 'Posunúť dopredu',
+                backward: 'Posunúť dozadu',
+                front: 'Presunúť do popredia',
+                back: 'Presunúť do pozadia',
+            },
+            transform: {
+                title: 'Transformovať',
+                rotate: 'Otočiť (°)',
+                x: 'X (px)',
+                y: 'Y (px)',
+                width: 'Šírka (px)',
+                height: 'Výška (px)',
+                lock: 'Uzamknúť pomer (%)',
+            },
+            crop: {
+                cancel: 'Zrušiť',
+                apply: 'Hotovo',
+                title: 'Orezanie',
+                start: 'Začať orezanie',
+                mode: 'Voľne',
+            },
+            group: {
+                title: 'Zoskupiť',
+                group: 'Zoskupiť',
+                unGroup: 'Zrušiť zoskupenie',
+            },
+            align: {
+                title: 'Zarovnať',
+                default: 'Vyberte typ zarovnania',
+                left: 'Zarovnať doľava',
+                center: 'Zarovnať na stred',
+                right: 'Zarovnať doprava',
+                top: 'Zarovnať hore',
+                middle: 'Zarovnať na stred',
+                bottom: 'Zarovnať dole',
+                horizon: 'Rozložiť vodorovne',
+                vertical: 'Rozložiť zvisle',
+            },
+            null: 'Nie je vybraný žiadny objekt',
+        },
+        'image-text-wrap': {
+            square: 'Obdĺžnikové',
+            topAndBottom: 'Hore a dole',
+            inline: 'V riadku s textom',
+            behindText: 'Za textom',
+            inFrontText: 'Pred textom',
+        },
+    },
+};
+
+export default locale;

@@ -1,0 +1,15 @@
+{
+  "alwaysUpdateLinks": true,
+  "attachmentFolderPath": "assets",
+  "newLinkFormat": "relative",
+  "promptDelete": false,
+  "showInlineTitle": true,
+  "showLineNumber": true,
+  "spellcheck": true,
+  "readableLineLength": true,
+  "strictLineBreaks": false,
+  "tabSize": 2,
+  "defaultViewMode": "source",
+  "legacyEditor": false,
+  "livePreview": true
+}

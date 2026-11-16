@@ -1,0 +1,287 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type { CellValue, ICellData, IObjectMatrixPrimitiveType, IRange, Nullable } from '@univerjs/core';
+import type { IConditionFormattingRule, IValueConfig } from '../type';
+import type { IContext } from './base-calculate-unit';
+import { BooleanNumber, CellValueType, ColorKit, DateSystem, excelSerialToDateTime, ObjectMatrix, Range } from '@univerjs/core';
+import { BooleanValue, FormulaResultStatus } from '@univerjs/engine-formula';
+import { CFNumberOperator, CFValueType } from '../../base/const';
+import { ConditionalFormattingFormulaService } from '../../services/conditional-formatting-formula.service';
+import { getRangesInWorksheet } from '../../utils/range';
+import { ConditionalFormattingViewModel } from '../conditional-formatting-view-model';
+
+export function isFloatsEqual(a: number, b: number) {
+    return Math.abs(a - b) < Number.EPSILON;
+}
+export const isNullable = (v: Nullable<CellValue>) => v === null || v === undefined || (typeof v === 'string' && v.trim() === '');
+export const getCellValue = (cell?: ICellData) => {
+    if (!cell) {
+        return null;
+    }
+    if (cell.t === CellValueType.BOOLEAN) {
+        return cell.v === BooleanNumber.TRUE ? BooleanValue.TRUE : BooleanValue.FALSE;
+    }
+    const v = cell.v;
+    const dataStream = cell.p?.body?.dataStream.replace(/\r\n$/, '');
+    return !isNullable(v) ? v : !isNullable(dataStream) ? dataStream : null;
+};
+export const serialTimeToTimestamp = (value: number, dateSystem = DateSystem.Date1900) => {
+    const utcDate = excelSerialToDateTime(value, dateSystem);
+    if (Number.isNaN(utcDate.getTime())) {
+        return Number.NaN;
+    }
+    // Conditional-formatting date comparisons use local Date timestamps for compatibility with existing predicates.
+    return new Date(
+        utcDate.getUTCFullYear(),
+        utcDate.getUTCMonth(),
+        utcDate.getUTCDate(),
+        utcDate.getUTCHours(),
+        utcDate.getUTCMinutes(),
+        utcDate.getUTCSeconds(),
+        utcDate.getUTCMilliseconds()
+    ).getTime();
+};
+// eslint-disable-next-line max-lines-per-function
+export const getValueByType = (value: IValueConfig, matrix: ObjectMatrix<number>, context: IContext & { cfId: string }) => {
+    switch (value.type) {
+        case CFValueType.max: {
+            let max = 0;
+            matrix.forValue((row, col, value) => {
+                if (value > max) {
+                    max = value;
+                }
+            });
+            return {
+                status: FormulaResultStatus.SUCCESS,
+                result: max,
+            };
+        }
+        case CFValueType.min: {
+            let min: number | undefined;
+            matrix.forValue((row, col, value) => {
+                if (min === undefined) {
+                    min = value;
+                }
+                if (value < min!) {
+                    min = value;
+                }
+            });
+            return {
+                status: FormulaResultStatus.SUCCESS,
+                result: min,
+            };
+        }
+        case CFValueType.percent: {
+            let max: number | undefined;
+            let min: number | undefined;
+            matrix.forValue((row, col, value) => {
+                if (max === undefined || min === undefined) {
+                    max = value;
+                    min = value;
+                }
+                if (value > max!) {
+                    max = value;
+                }
+                if (value < min!) {
+                    min = value;
+                }
+            });
+
+            const length = (max || 0) - (min || 0);
+            const v = Math.max(Math.min(Number(value.value) || 0, 100), 0);
+            return {
+                status: FormulaResultStatus.SUCCESS,
+                result: length * (v / 100) + (min || 0),
+            };
+        }
+        case CFValueType.percentile: {
+            const list = matrix.toNativeArray().sort((a, b) => a - b);
+            const v = Math.max(Math.min(Number(value.value) || 0, 100), 0);
+            const index = (list.length - 1) * v / 100;
+            const intIndex = Math.floor(index);
+            const decimalIndex = index - intIndex;
+            const result = list[intIndex] + (list[Math.min(intIndex + 1, list.length - 1)] - list[intIndex]) * decimalIndex;
+            return {
+                status: FormulaResultStatus.SUCCESS,
+                result,
+            };
+        }
+
+        case CFValueType.formula: {
+            const { accessor, unitId, subUnitId, cfId } = context;
+            const formulaText = String(value.value);
+            const conditionalFormattingFormulaService = accessor.get(ConditionalFormattingFormulaService);
+            conditionalFormattingFormulaService.registerFormulaWithRange(unitId, subUnitId, cfId, formulaText);
+            const result = conditionalFormattingFormulaService.getFormulaResultWithCoords(unitId, subUnitId, cfId, formulaText);
+            return result;
+        }
+        case CFValueType.num:
+        default: {
+            const v = Number(value.value);
+            return {
+                status: FormulaResultStatus.SUCCESS,
+                result: Number.isNaN(v) ? 0 : v,
+            };
+        }
+    }
+};
+
+export const getCacheStyleMatrix = <S = any>(unitId: string, subUnitId: string, rule: IConditionFormattingRule, context: IContext) => {
+    const { accessor } = context;
+    const conditionalFormattingViewModel = accessor.get(ConditionalFormattingViewModel);
+    const matrix = new ObjectMatrix<S>();
+    getRangesInWorksheet(rule.ranges, context.worksheet).forEach((range) => {
+        Range.foreach(range, (row, col) => {
+            const cellCfItem = conditionalFormattingViewModel.getCellCfs(unitId, subUnitId, row, col);
+            if (cellCfItem) {
+                const item = cellCfItem.find((item) => item.cfId === rule.cfId);
+                item?.result && matrix.setValue(row, col, item.result);
+            }
+        });
+    });
+    return matrix;
+};
+// eslint-disable-next-line complexity
+export const compareWithNumber = (config: { operator: CFNumberOperator; value: number | [number, number] }, v: number) => {
+    switch (config.operator) {
+        case CFNumberOperator.between: {
+            if (typeof config.value !== 'object' || !(config.value as unknown as Array<number>).length) {
+                return;
+            }
+            const start = Math.min(...config.value as [number, number]);
+            const end = Math.max(...config.value as [number, number]);
+            return v >= start && v <= end;
+        }
+        case CFNumberOperator.notBetween: {
+            if (typeof config.value !== 'object' || !(config.value as unknown as Array<number>).length) {
+                return;
+            }
+            const start = Math.min(...config.value as [number, number]);
+            const end = Math.max(...config.value as [number, number]);
+            return !(v >= start && v <= end);
+        }
+        case CFNumberOperator.equal: {
+            const condition = (config.value || 0) as number;
+            return isFloatsEqual(condition, v);
+        }
+        case CFNumberOperator.notEqual: {
+            const condition = (config.value || 0) as number;
+            return !isFloatsEqual(condition, v);
+        }
+        case CFNumberOperator.greaterThan: {
+            const condition = (config.value || 0) as number;
+            return v > condition;
+        }
+        case CFNumberOperator.greaterThanOrEqual: {
+            const condition = (config.value || 0) as number;
+            return v >= condition;
+        }
+        case CFNumberOperator.lessThan: {
+            const condition = (config.value || 0) as number;
+            return v < condition;
+        }
+        case CFNumberOperator.lessThanOrEqual: {
+            const condition = (config.value || 0) as number;
+            return v <= condition;
+        }
+        default: {
+            return false;
+        }
+    }
+};
+export const getOppositeOperator = (operator: CFNumberOperator) => {
+    switch (operator) {
+        case CFNumberOperator.greaterThan: {
+            return CFNumberOperator.lessThanOrEqual;
+        }
+        case CFNumberOperator.greaterThanOrEqual: {
+            return CFNumberOperator.lessThan;
+        }
+        case CFNumberOperator.lessThan: {
+            return CFNumberOperator.greaterThanOrEqual;
+        }
+        case CFNumberOperator.lessThanOrEqual: {
+            return CFNumberOperator.greaterThan;
+        }
+    }
+    return operator;
+};
+
+export const getColorScaleFromValue = (colorList: { color: ColorKit; value: number }[], value: number) => {
+    interface IRgbColor {
+        b: number;
+        g: number;
+        r: number;
+        a?: number;
+    }
+    const prefixRgba = (rgb: IRgbColor): Required<IRgbColor> => {
+        if (rgb.a !== undefined) {
+            return rgb as Required<IRgbColor>;
+        } else {
+            return { ...rgb, a: 1 };
+        }
+    };
+    const index = colorList.findIndex((item) => item.value >= value);
+    const preIndex = index - 1;
+    if (index === 0) {
+        return colorList[0].color.toRgbString();
+    } else if (preIndex >= 0) {
+        const minItem = colorList[preIndex];
+        const maxItem = colorList[index];
+
+        if (minItem.color.isValid && maxItem.color.isValid) {
+            const minRgb = prefixRgba(minItem.color.toRgb());
+            const maxRgb = prefixRgba(maxItem.color.toRgb());
+            const length = maxItem.value - minItem.value;
+            const v = (value - minItem.value) / length;
+            const rgbResult = ['r', 'g', 'b', 'a'].reduce((obj, key) => {
+                const minV = minRgb[key as unknown as keyof IRgbColor];
+                obj[key as unknown as keyof IRgbColor] = (maxRgb[key as unknown as keyof IRgbColor] - minV) * v + minV;
+                return obj;
+            }, {} as IRgbColor);
+            const result = new ColorKit(rgbResult).toRgbString();
+            return result;
+        }
+    } else {
+        return colorList[colorList.length - 1].color.toRgbString();
+    }
+};
+
+export const filterRange = (ranges: IRange[], maxRow: number, maxCol: number): IRange[] => {
+    return ranges.map((range) => {
+        if (range.startColumn > maxCol || range.startRow > maxRow || range.endColumn < 0 || range.endRow < 0) {
+            return null as unknown as IRange;
+        }
+        const _range = { ...range };
+        _range.startRow = Math.max(_range.startRow, 0);
+        _range.startColumn = Math.max(_range.startColumn, 0);
+        _range.endRow = Math.min(_range.endRow, maxRow);
+        _range.endColumn = Math.min(_range.endColumn, maxCol);
+        if (_range.startRow > _range.endRow || _range.startColumn > _range.endColumn) {
+            return null as unknown as IRange;
+        }
+        return _range;
+    }).filter((range) => !!range);
+};
+
+export function getMaxInFormulaResult(result: IObjectMatrixPrimitiveType<Nullable<CellValue>>) {
+    let max = 0;
+    new ObjectMatrix(result).forValue((row, col, value) => {
+        max = Math.max(Number.isNaN(max) ? 0 : max, Number(value));
+    });
+    return max;
+}

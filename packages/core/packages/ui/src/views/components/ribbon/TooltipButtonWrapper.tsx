@@ -1,0 +1,676 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type { Workbook } from '@univerjs/core';
+import type { IDropdownMenuProps, IDropdownProps, ITooltipProps } from '@univerjs/design';
+import type { ButtonHTMLAttributes, ComponentType, ReactNode } from 'react';
+import { FOCUSING_SHEET, IContextService, IUniverInstanceService, UniverInstanceType } from '@univerjs/core';
+import {
+    clsx,
+    ConfigContext,
+    Dropdown,
+    DropdownMenu,
+    Tooltip,
+} from '@univerjs/design';
+import { CheckMarkIcon } from '@univerjs/icons';
+import {
+    createContext,
+    forwardRef,
+    useCallback,
+    useContext,
+    useEffect,
+    useImperativeHandle,
+    useMemo,
+    useRef,
+    useState,
+} from 'react';
+import { combineLatest, map, merge, of, scan, startWith, switchMap } from 'rxjs';
+import type { IMenuItem, IValueOption } from '../../../services/menu/menu';
+import { ILayoutService } from '../../../services/layout/layout.service';
+import { IMenuManagerService } from '../../../services/menu/menu-manager.service';
+import { IShortcutService } from '../../../services/shortcut/shortcut.service';
+import { useDependency, useObservable } from '../../../utils/di';
+import { getEmbedBoundaryOwner, keepInteractionInsideSameEmbedBoundary } from '../../../utils/embed-boundary';
+import { CustomLabel } from '../../custom-label/CustomLabel';
+import { FONT_FAMILY_ITEM_COMPONENT } from '../../font-family/FontFamilyItem';
+
+const TooltipWrapperContext = createContext({
+    dropdownVisible: false,
+    setDropdownVisible: (_visible: boolean) => {},
+    restoreTriggerFocus: (_event: Event) => {},
+});
+
+export function ToolbarDropdownButton(props: ButtonHTMLAttributes<HTMLButtonElement>) {
+    const { dropdownVisible } = useContext(TooltipWrapperContext);
+    return <button {...props} type="button" aria-expanded={dropdownVisible} />;
+}
+
+// Ribbon dropdowns share one open key; disabled items must only clear it when they own it.
+const ToolbarDropdownContext = createContext<{
+    openDropdownKey: string | null;
+    setOpenDropdownKey: (key: string | null) => void;
+} | null>(null);
+
+export interface ITooltipWrapperRef {
+    el: HTMLSpanElement | null;
+}
+
+export interface IToolbarTooltipProps extends Omit<ITooltipProps, 'visible' | 'onVisibleChange'> {
+    popupOpen: boolean;
+}
+
+/**
+ * Keeps toolbar tooltips controlled while a related popup opens and closes.
+ * The tooltip stays hidden after the popup closes until a new hover or focus interaction occurs.
+ */
+export function ToolbarTooltip(props: IToolbarTooltipProps) {
+    const { popupOpen, ...tooltipProps } = props;
+    const [tooltipVisible, setTooltipVisible] = useState(false);
+
+    useEffect(() => {
+        if (popupOpen) {
+            setTooltipVisible(false);
+        }
+    }, [popupOpen]);
+
+    return (
+        <Tooltip
+            {...tooltipProps}
+            className={clsx('univer-fill-mode-backwards univer-delay-100', tooltipProps.className, `
+              univer-pointer-events-none
+            `)}
+            visible={!popupOpen && tooltipVisible}
+            onVisibleChange={(visible) => {
+                if (!popupOpen) {
+                    setTooltipVisible(visible);
+                }
+            }}
+        />
+    );
+}
+
+export function ToolbarDropdownProvider(props: { children: ReactNode }) {
+    const [openDropdownKey, setOpenDropdownKey] = useState<string | null>(null);
+    const contextValue = useMemo(() => ({
+        openDropdownKey,
+        setOpenDropdownKey,
+    }), [openDropdownKey]);
+
+    return (
+        <ToolbarDropdownContext.Provider value={contextValue}>
+            {props.children}
+        </ToolbarDropdownContext.Provider>
+    );
+}
+
+export const TooltipWrapper = forwardRef<ITooltipWrapperRef, ITooltipProps & { dropdownKey?: string }>((props, ref) => {
+    const { children, dropdownKey, ...tooltipProps } = props;
+
+    const spanRef = useRef<HTMLSpanElement>(null);
+    const triggerFocusRef = useRef<HTMLElement | null>(null);
+
+    const [localDropdownVisible, setLocalDropdownVisible] = useState(false);
+    const toolbarDropdownContext = useContext(ToolbarDropdownContext);
+    const dropdownVisible = dropdownKey && toolbarDropdownContext
+        ? toolbarDropdownContext.openDropdownKey === dropdownKey
+        : localDropdownVisible;
+
+    const handleChangeDropdownVisible = useCallback((visible: boolean) => {
+        if (visible) {
+            const active = spanRef.current?.ownerDocument.activeElement;
+            triggerFocusRef.current = active instanceof HTMLElement && spanRef.current?.contains(active) ? active : null;
+        }
+        if (dropdownKey && toolbarDropdownContext) {
+            toolbarDropdownContext.setOpenDropdownKey(visible ? dropdownKey : null);
+        } else {
+            setLocalDropdownVisible(visible);
+        }
+    }, [dropdownKey, toolbarDropdownContext]);
+
+    const restoreTriggerFocus = useCallback((event: Event) => {
+        const trigger = triggerFocusRef.current;
+        triggerFocusRef.current = null;
+        if (!trigger?.isConnected) return;
+        const active = trigger.ownerDocument.activeElement;
+        if (active === trigger.ownerDocument.body || (event.target instanceof HTMLElement && event.target.contains(active))) {
+            event.preventDefault();
+            trigger.focus({ preventScroll: true });
+        }
+    }, []);
+
+    const contextValue = useMemo(() => ({
+        dropdownVisible,
+        setDropdownVisible: handleChangeDropdownVisible,
+        restoreTriggerFocus,
+    }), [dropdownVisible, handleChangeDropdownVisible, restoreTriggerFocus]);
+
+    useImperativeHandle(ref, () => ({
+        el: spanRef.current,
+    }));
+
+    const content = (
+        <span ref={spanRef}>
+            <TooltipWrapperContext.Provider value={contextValue}>
+                {children}
+            </TooltipWrapperContext.Provider>
+        </span>
+    );
+
+    return tooltipProps.title
+        ? (
+            <ToolbarTooltip
+                popupOpen={dropdownVisible}
+                {...tooltipProps}
+            >
+                {content}
+            </ToolbarTooltip>
+        )
+        : content;
+});
+
+export function DropdownWrapper(props: Omit<Partial<IDropdownProps>, 'overlay'> & {
+    overlay: ReactNode;
+    align?: 'start' | 'end' | 'center';
+    dropdownComponent?: ComponentType<IDropdownProps>;
+}) {
+    const { children, overlay, disabled, align, dropdownComponent: DropdownComponent = Dropdown } = props;
+    const { direction } = useContext(ConfigContext);
+    const { dropdownVisible, setDropdownVisible, restoreTriggerFocus } = useContext(TooltipWrapperContext);
+    const triggerRef = useRef<HTMLDivElement>(null);
+    const overlayRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+        if (disabled && dropdownVisible) {
+            setDropdownVisible(false);
+        }
+    }, [disabled, dropdownVisible, setDropdownVisible]);
+
+    useEffect(() => {
+        const ownerDocument = triggerRef.current?.ownerDocument;
+        if (!dropdownVisible || !ownerDocument) {
+            return;
+        }
+
+        const handlePointerDown = (event: PointerEvent) => {
+            const target = event.target as (Node & Partial<Pick<Element, 'closest'>>) | null;
+            const isPortaledOverlay = typeof target?.closest === 'function' &&
+                target.closest('[data-slot="popover-content"], [role="dialog"]') != null;
+            if (
+                !target ||
+                triggerRef.current?.contains(target) ||
+                overlayRef.current?.contains(target) ||
+                isPortaledOverlay
+            ) {
+                return;
+            }
+
+            setDropdownVisible(false);
+        };
+
+        ownerDocument.addEventListener('pointerdown', handlePointerDown, true);
+        return () => ownerDocument.removeEventListener('pointerdown', handlePointerDown, true);
+    }, [dropdownVisible, setDropdownVisible]);
+
+    function handleVisibleChange(visible: boolean) {
+        setDropdownVisible(visible);
+    }
+
+    return (
+        <DropdownComponent
+            align={align ?? (direction === 'rtl' ? 'end' : 'start')}
+            overlay={(
+                <div ref={overlayRef} className="univer-grid univer-gap-2">
+                    {overlay}
+                </div>
+            )}
+            disabled={disabled}
+            open={dropdownVisible}
+            onOpenChange={handleVisibleChange}
+            onCloseAutoFocus={restoreTriggerFocus}
+        >
+            <div ref={triggerRef} className="univer-h-full" onClick={(e) => e.stopPropagation()}>
+                {children}
+            </div>
+        </DropdownComponent>
+    );
+}
+
+export function DropdownMenuLabel({ icon, value, option, preserveStrokeWidth, onOptionSelect }: {
+    icon?: IMenuItem['icon'];
+    value?: string | number;
+    option: IValueOption;
+    preserveStrokeWidth?: boolean;
+    onOptionSelect?: (option: IValueOption) => void;
+}) {
+    const onChange = (v: string | number) => {
+        onOptionSelect?.({ ...option, value: v });
+    };
+
+    const hasCheckMark = typeof option.label === 'string' || (typeof option.label === 'object' && option.label?.selectable !== false);
+    const selected = hasCheckMark && String(value) === String(option.value);
+
+    return (
+        <div className="univer-flex univer-w-full univer-items-center univer-justify-between univer-gap-2">
+            <div className="univer-flex univer-min-w-0 univer-items-center univer-gap-2">
+                <CustomLabel
+                    className="univer-text-sm"
+                    icon={icon}
+                    preserveStrokeWidth={preserveStrokeWidth}
+                    value$={option.value$}
+                    value={option.value}
+                    label={option.label}
+                    onChange={onChange}
+                />
+            </div>
+            {hasCheckMark && (
+                <span className="univer-ml-auto univer-flex univer-w-4 univer-flex-shrink-0 univer-justify-end">
+                    {selected && (
+                        <CheckMarkIcon
+                            className="univer-text-primary-600"
+                            preserveStrokeWidth={preserveStrokeWidth}
+                        />
+                    )}
+                </span>
+            )}
+        </div>
+    );
+}
+
+export function DropdownMenuWrapper({
+    menuId,
+    slot,
+    value,
+    options,
+    children,
+    disabled,
+    preserveStrokeWidth,
+    onOptionSelect,
+    dropdownComponent,
+    dropdownMenuComponent: DropdownMenuComponent = DropdownMenu,
+}: {
+    menuId: string;
+    slot?: boolean;
+    value?: string | number;
+    options: IValueOption[];
+    children: ReactNode;
+    disabled?: boolean;
+    preserveStrokeWidth?: boolean;
+    onOptionSelect: (option: IValueOption) => void;
+    dropdownComponent?: ComponentType<IDropdownProps>;
+    dropdownMenuComponent?: ComponentType<IDropdownMenuProps>;
+}) {
+    const { dropdownVisible, setDropdownVisible, restoreTriggerFocus } = useContext(TooltipWrapperContext);
+    const shortcutService = useDependency(IShortcutService);
+    const contextService = useDependency(IContextService);
+    const instanceService = useDependency(IUniverInstanceService);
+    const layoutService = useDependency(ILayoutService);
+    const editorFocusRef = useRef<{ element: HTMLElement; owner?: string } | null>(null);
+    const menuContentRef = useRef<HTMLElement | null>(null);
+    const sheetTargetRef = useRef<{ unitId: string; sheetId: string; valid: boolean } | null>(null);
+    const sheetTarget = sheetTargetRef.current;
+
+    useEffect(() => {
+        const target = sheetTargetRef.current;
+        if (!dropdownVisible || !target) {
+            return undefined;
+        }
+
+        const subscription = instanceService.getCurrentTypeOfUnit$<Workbook>(UniverInstanceType.UNIVER_SHEET).pipe(
+            switchMap((workbook) => workbook
+                ? workbook.activeSheet$.pipe(map((sheet) => ({ workbook, sheetId: sheet?.getSheetId() })))
+                : of(null))
+        ).subscribe((current) => {
+            if (current?.workbook.getUnitId() !== target.unitId || current?.sheetId !== target.sheetId) {
+                target.valid = false;
+                editorFocusRef.current = null;
+                setDropdownVisible(false);
+            }
+        });
+
+        return () => subscription.unsubscribe();
+    }, [dropdownVisible, instanceService, setDropdownVisible]);
+
+    useEffect(() => () => {
+        if (sheetTargetRef.current) {
+            sheetTargetRef.current.valid = false;
+            sheetTargetRef.current = null;
+        }
+    }, []);
+
+    useEffect(() => {
+        if (!dropdownVisible) {
+            return undefined;
+        }
+
+        const shortcutEscape = shortcutService.forceEscape();
+        return () => shortcutEscape.dispose();
+    }, [dropdownVisible, shortcutService]);
+
+    useEffect(() => {
+        if (disabled && dropdownVisible) {
+            setDropdownVisible(false);
+        }
+    }, [disabled, dropdownVisible, setDropdownVisible]);
+
+    const menuManagerService = useDependency(IMenuManagerService);
+    const resolveMenuItems = () => menuId ? menuManagerService.getMenuByPositionKey(menuId) : [];
+    const menuItems = useObservable(
+        () => menuManagerService.menuChanged$.pipe(map(resolveMenuItems), startWith(resolveMenuItems())),
+        resolveMenuItems(),
+        false,
+        [menuId, menuManagerService]
+    );
+    const hiddenStates$ = useMemo(() => {
+        const itemStates = menuItems.map((item) => {
+            const hidden$ = item.children
+                ? combineLatest(item.children.map((subItem) => subItem.item?.hidden$ ?? of(false))).pipe(
+                    map((hiddenValues) => hiddenValues.every(Boolean))
+                )
+                : item.item?.hidden$ ?? of(false);
+            return hidden$.pipe(map((hidden) => [String(item.key), hidden] as const));
+        });
+        return itemStates.length
+            ? merge(...itemStates).pipe(
+                scan((states, [key, hidden]) => ({ ...states, [key]: hidden }), {} as Record<string, boolean>),
+                startWith({})
+            )
+            : of({});
+    }, [menuItems]);
+    const hiddenStates = useObservable<Record<string, boolean>>(hiddenStates$, {});
+
+    const filteredMenuItems = useMemo(() => {
+        return menuItems.filter((item) => {
+            if (!item.children) {
+                return !hiddenStates[item.key];
+            }
+
+            const itemKey = item.key?.toString() || '';
+            return !hiddenStates[itemKey];
+        });
+    }, [menuItems, hiddenStates]);
+
+    function handleVisibleChange(visible: boolean) {
+        if (visible) {
+            const element = document.activeElement;
+            const workbook = contextService.getContextValue(FOCUSING_SHEET)
+                ? instanceService.getCurrentUnitOfType<Workbook>(UniverInstanceType.UNIVER_SHEET)
+                : null;
+            const sheetId = workbook?.getActiveSheet()?.getSheetId();
+            if (sheetTargetRef.current) {
+                sheetTargetRef.current.valid = false;
+            }
+            sheetTargetRef.current = workbook && sheetId ? { unitId: workbook.getUnitId(), sheetId, valid: true } : null;
+            const owner = getEmbedBoundaryOwner(element);
+            editorFocusRef.current = element instanceof HTMLElement && element.dataset.uComp === 'editor'
+                ? { element, owner }
+                : null;
+        }
+        setDropdownVisible(visible);
+    }
+
+    function handleCloseAutoFocus(event: Event) {
+        const editorFocus = editorFocusRef.current;
+        editorFocusRef.current = null;
+        if (sheetTargetRef.current && !sheetTargetRef.current.valid) {
+            event.preventDefault();
+            const activeElement = document.activeElement;
+            const focusInClosingMenu = event.target instanceof HTMLElement && event.target.contains(activeElement);
+            if (activeElement === document.body || focusInClosingMenu) {
+                layoutService.focus();
+            }
+            return;
+        }
+        if (!editorFocus) {
+            restoreTriggerFocus(event);
+            return;
+        }
+        if (!editorFocus?.element.isConnected || getEmbedBoundaryOwner(editorFocus.element) !== editorFocus.owner) {
+            return;
+        }
+
+        const activeElement = editorFocus.element.ownerDocument.activeElement;
+        const focusInClosingMenu = event.target instanceof HTMLElement && event.target.contains(activeElement);
+        if (activeElement !== editorFocus.element.ownerDocument.body && activeElement !== editorFocus.element && !focusInClosingMenu) {
+            return;
+        }
+
+        event.preventDefault();
+        editorFocus.element.focus({ preventScroll: true });
+    }
+
+    const handleMenuFocus: NonNullable<IDropdownMenuProps['onFocusCapture']> = (event) => {
+        menuContentRef.current = event.currentTarget;
+    };
+
+    const handleClosedMenuPointer: NonNullable<IDropdownMenuProps['onPointerMoveCapture']> = (event) => {
+        if (event.currentTarget.dataset.state === 'closed') {
+            // Exit-animation DOM must not take focus back from the editor or a newly opened menu.
+            event.preventDefault();
+            event.stopPropagation();
+        }
+    };
+
+    const handlePointerDownOutside: NonNullable<IDropdownMenuProps['onPointerDownOutside']> = (event) => {
+        const content = menuContentRef.current;
+        const triggerId = content?.getAttribute('aria-labelledby');
+        const trigger = triggerId ? content?.ownerDocument.getElementById(triggerId) : null;
+        if (trigger?.contains(event.detail.originalEvent.target as Node)) {
+            // The Ribbon trigger owns toggling, including when the previous menu is still exiting.
+            event.preventDefault();
+            return;
+        }
+        if (editorFocusRef.current && (!editorFocusRef.current.owner || getEmbedBoundaryOwner(event.target) !== editorFocusRef.current.owner)) {
+            editorFocusRef.current = null;
+        }
+        keepInteractionInsideSameEmbedBoundary(event);
+    };
+
+    function handleEmbedBoundaryFocusOutside(event: { currentTarget: EventTarget | null; target: EventTarget | null; preventDefault: () => void }) {
+        keepInteractionInsideSameEmbedBoundary(event);
+    }
+
+    function getOptionKey(option: IValueOption) {
+        return String(option.id ?? option.commandId ?? option.value ?? (typeof option.label === 'string' ? option.label : option.label?.name));
+    }
+
+    function handleOptionSelect(option: IValueOption) {
+        const target = sheetTarget;
+        if (target && target !== sheetTargetRef.current) {
+            return;
+        }
+        if (target && (
+            !target.valid ||
+            instanceService.getCurrentUnitOfType<Workbook>(UniverInstanceType.UNIVER_SHEET)?.getUnitId() !== target.unitId ||
+            instanceService.getCurrentUnitOfType<Workbook>(UniverInstanceType.UNIVER_SHEET)?.getActiveSheet()?.getSheetId() !== target.sheetId
+        )) {
+            editorFocusRef.current = null;
+            setDropdownVisible(false);
+            return;
+        }
+        onOptionSelect(option);
+        setDropdownVisible(false);
+    }
+
+    if (slot) {
+        return (
+            <DropdownWrapper
+                disabled={disabled}
+                dropdownComponent={dropdownComponent}
+                overlay={options.map((option) => (
+                    <DropdownMenuLabel
+                        key={getOptionKey(option)}
+                        value={value}
+                        option={option}
+                        preserveStrokeWidth={preserveStrokeWidth}
+                        onOptionSelect={handleOptionSelect}
+                    />
+                ))}
+            >
+                {children}
+            </DropdownWrapper>
+        );
+    }
+
+    // options menu
+    if (options?.length) {
+        const isSingleEmbeddedCustomPanel = filteredMenuItems.length === 0 &&
+            options.length === 1 &&
+            typeof options[0].label === 'object' &&
+            options[0].label?.hoverable === false &&
+            options[0].label.props?.embedded === true;
+        const items: IDropdownMenuProps['items'] = options.map((option) => ({
+            type: 'item',
+            className: clsx({
+                'focus:univer-bg-transparent dark:focus:!univer-bg-transparent':
+                    typeof option.label !== 'string' && option.label?.hoverable === false,
+                '!univer-p-0': isSingleEmbeddedCustomPanel ||
+                    (typeof option.label === 'object' && option.label.name === FONT_FAMILY_ITEM_COMPONENT),
+            }),
+            children: (
+                <DropdownMenuLabel
+                    icon={option.icon}
+                    value={value}
+                    option={option}
+                    preserveStrokeWidth={preserveStrokeWidth}
+                    onOptionSelect={handleOptionSelect}
+                />
+            ),
+            disabled: option.disabled,
+            onSelect: () => {
+                if (typeof option.value === 'undefined') return;
+
+                handleOptionSelect({
+                    ...option,
+                });
+            },
+        }));
+
+        if (filteredMenuItems.length) {
+            items.push({
+                type: 'separator',
+            });
+        }
+
+        for (const menuItem of filteredMenuItems) {
+            if (!menuItem.item) continue;
+
+            const { title, id, commandId, icon } = menuItem.item;
+
+            if (!title) {
+                throw new Error('Menu item title is required');
+            }
+
+            items.push({
+                type: 'item',
+                children: (
+                    <DropdownMenuLabel
+                        icon={icon}
+                        value={value}
+                        preserveStrokeWidth={preserveStrokeWidth}
+                        option={{
+                            label: {
+                                name: title,
+                                selectable: false,
+                            },
+                        }}
+                    />
+                ),
+                onSelect: () => {
+                    handleOptionSelect({
+                        commandId,
+                        id,
+                    });
+                },
+            });
+        }
+
+        return (
+            <DropdownMenuComponent
+                align="start"
+                className={clsx({ '!univer-p-0': isSingleEmbeddedCustomPanel })}
+                items={items}
+                disabled={disabled}
+                open={dropdownVisible}
+                onOpenChange={handleVisibleChange}
+                onFocusCapture={handleMenuFocus}
+                onPointerMoveCapture={handleClosedMenuPointer}
+                onPointerOutCapture={handleClosedMenuPointer}
+                onCloseAutoFocus={handleCloseAutoFocus}
+                onPointerDownOutside={handlePointerDownOutside}
+                onFocusOutside={handleEmbedBoundaryFocusOutside}
+                onInteractOutside={handleEmbedBoundaryFocusOutside}
+            >
+                {children}
+            </DropdownMenuComponent>
+        );
+    } else {
+        const items: IDropdownMenuProps['items'] = [];
+
+        for (const menuItem of filteredMenuItems) {
+            if (menuItem.item) {
+                const { title, id, commandId, icon } = menuItem.item;
+
+                if (!title) {
+                    throw new Error('Menu item title is required');
+                }
+
+                items.push({
+                    type: 'item',
+                    children: (
+                        <DropdownMenuLabel
+                            icon={icon}
+                            value={value}
+                            preserveStrokeWidth={preserveStrokeWidth}
+                            option={{
+                                label: {
+                                    name: title,
+                                    selectable: false,
+                                },
+                            }}
+                        />
+                    ),
+                    onSelect: () => {
+                        handleOptionSelect({
+                            commandId,
+                            id,
+                        });
+                    },
+                });
+            } else if (menuItem.children?.length) {
+            // sub menu
+            }
+        }
+
+        return (
+            <DropdownMenuComponent
+                align="start"
+                items={items}
+                disabled={disabled}
+                open={dropdownVisible}
+                onOpenChange={handleVisibleChange}
+                onFocusCapture={handleMenuFocus}
+                onPointerMoveCapture={handleClosedMenuPointer}
+                onPointerOutCapture={handleClosedMenuPointer}
+                onCloseAutoFocus={handleCloseAutoFocus}
+                onPointerDownOutside={handlePointerDownOutside}
+                onFocusOutside={handleEmbedBoundaryFocusOutside}
+                onInteractOutside={handleEmbedBoundaryFocusOutside}
+            >
+                {children}
+            </DropdownMenuComponent>
+        );
+    }
+}

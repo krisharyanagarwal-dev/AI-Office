@@ -1,0 +1,633 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/**
+ * @vitest-environment jsdom
+ */
+
+import {
+    CommandService,
+    CommandType,
+    ConfigService,
+    ContextService,
+    DesktopLogService,
+    ICommandService,
+    IConfigService,
+    IContextService,
+    ILogService,
+    Injector,
+} from '@univerjs/core';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { EMBED_CHILD_UNIT_ID_ATTRIBUTE } from '../../../utils/embed-boundary';
+import { ILayoutService } from '../../layout/layout.service';
+import { IPlatformService, PlatformService } from '../../platform/platform.service';
+import { IUIRuntimeScopeService, UIRuntimeScopeService } from '../../runtime-scope/ui-runtime-scope.service';
+import { KeyCode, MetaKeys } from '../keycode';
+import { NativeTextEditorShortcutBehavior, ShortcutService } from '../shortcut.service';
+
+function createKeyboardEvent(
+    keyCode: number,
+    options?: { ctrlKey?: boolean; metaKey?: boolean; shiftKey?: boolean; altKey?: boolean }
+): KeyboardEvent {
+    const event = new Event('keydown', {
+        bubbles: true,
+        cancelable: true,
+    }) as KeyboardEvent;
+
+    for (const [key, value] of Object.entries({
+        altKey: options?.altKey ?? false,
+        ctrlKey: options?.ctrlKey ?? false,
+        keyCode,
+        metaKey: options?.metaKey ?? false,
+        shiftKey: options?.shiftKey ?? false,
+    })) {
+        Object.defineProperty(event, key, {
+            configurable: true,
+            get: () => value,
+        });
+    }
+
+    return event;
+}
+
+function createService(options?: {
+    isMac?: boolean;
+    isWindows?: boolean;
+    isLinux?: boolean;
+    layoutAllowed?: boolean;
+}) {
+    const eventTarget = new EventTarget();
+    vi.stubGlobal('window', {
+        addEventListener: eventTarget.addEventListener.bind(eventTarget),
+        removeEventListener: eventTarget.removeEventListener.bind(eventTarget),
+        dispatchEvent: eventTarget.dispatchEvent.bind(eventTarget),
+    });
+    vi.stubGlobal('document', {
+        createElement: () => ({}),
+    });
+
+    const executeCommand = vi.fn();
+    const platformService = {
+        isMac: options?.isMac ?? false,
+        isWindows: options?.isWindows ?? true,
+        isLinux: options?.isLinux ?? false,
+    };
+    const layoutService = {
+        checkElementInCurrentContainers: vi.fn(() => options?.layoutAllowed),
+    };
+    const getRuntimeScope = vi.fn();
+
+    class TestCommandService {
+        executeCommand = executeCommand;
+    }
+
+    class TestPlatformService {
+        isMac = platformService.isMac;
+        isWindows = platformService.isWindows;
+        isLinux = platformService.isLinux;
+    }
+
+    class TestContextService {}
+
+    class TestLayoutService {
+        checkElementInCurrentContainers = layoutService.checkElementInCurrentContainers;
+    }
+
+    class TestRuntimeScopeService {
+        register = vi.fn();
+        get = getRuntimeScope;
+    }
+
+    const injector = new Injector();
+    injector.add([ICommandService, { useClass: TestCommandService as never }]);
+    injector.add([IPlatformService, { useClass: TestPlatformService }]);
+    injector.add([IContextService, { useClass: TestContextService }]);
+    injector.add([IUIRuntimeScopeService, { useClass: TestRuntimeScopeService }]);
+    if (options?.layoutAllowed !== undefined) {
+        injector.add([ILayoutService, { useClass: TestLayoutService as never }]);
+    }
+    injector.add([ShortcutService]);
+    const service = injector.get(ShortcutService);
+
+    return { service, executeCommand, getRuntimeScope, layoutService };
+}
+
+describe('ShortcutService', () => {
+    afterEach(() => {
+        vi.unstubAllGlobals();
+    });
+
+    it.each([
+        { keyCode: KeyCode.BACKSPACE, ctrlKey: false, shiftKey: false },
+        { keyCode: KeyCode.DELETE, ctrlKey: false, shiftKey: false },
+        { keyCode: KeyCode.A, ctrlKey: true, shiftKey: false },
+        { keyCode: KeyCode.X, ctrlKey: true, shiftKey: false },
+        { keyCode: KeyCode.C, ctrlKey: true, shiftKey: false },
+        { keyCode: KeyCode.V, ctrlKey: true, shiftKey: false },
+        { keyCode: KeyCode.Z, ctrlKey: true, shiftKey: false },
+        { keyCode: KeyCode.Z, ctrlKey: true, shiftKey: true },
+        { keyCode: KeyCode.Y, ctrlKey: true, shiftKey: false },
+    ])('keeps toolbar input key $keyCode (ctrl=$ctrlKey, shift=$shiftKey) out of grid shortcuts', (keys) => {
+        const injector = new Injector([
+            [ICommandService, { useClass: CommandService }],
+            [IConfigService, { useClass: ConfigService }],
+            [IContextService, { useClass: ContextService }],
+            [ILogService, { useClass: DesktopLogService }],
+            [IPlatformService, { useClass: PlatformService }],
+            [IUIRuntimeScopeService, { useClass: UIRuntimeScopeService }],
+            [ShortcutService],
+        ]);
+        const control = document.createElement('div');
+        control.dataset.uCommand = 'sheet.command.set-range-fontsize';
+        const input = document.createElement('input');
+        control.appendChild(input);
+        document.body.appendChild(control);
+        try {
+            const service = injector.get(ShortcutService);
+            const binding = keys.keyCode | (keys.ctrlKey ? MetaKeys.CTRL_COMMAND : 0) | (keys.shiftKey ? MetaKeys.SHIFT : 0);
+            service.registerShortcut({ id: 'test.grid-edit', binding });
+            const event = new KeyboardEvent('input-key-test', { ...keys, cancelable: true });
+            input.dispatchEvent(event);
+            expect(service.dispatch(event)).toBeUndefined();
+            expect(event.defaultPrevented).toBe(false);
+            const canvas = document.createElement('canvas');
+            const canvasEvent = new KeyboardEvent('input-key-test', keys);
+            canvas.dispatchEvent(canvasEvent);
+            expect(service.dispatch(canvasEvent)?.id).toBe('test.grid-edit');
+        } finally {
+            control.remove();
+            injector.dispose();
+        }
+    });
+
+    it.each([KeyCode.ENTER, KeyCode.SPACE, KeyCode.TAB, KeyCode.ESC, KeyCode.ARROW_DOWN, KeyCode.ARROW_UP, KeyCode.ARROW_LEFT, KeyCode.ARROW_RIGHT, KeyCode.HOME, KeyCode.END])(
+        'yields menu navigation key %s while retaining canvas shortcuts',
+        (keyCode) => {
+            const injector = new Injector();
+            injector.add([ICommandService, { useClass: CommandService }]);
+            injector.add([IConfigService, { useClass: ConfigService }]);
+            injector.add([IContextService, { useClass: ContextService }]);
+            injector.add([ILogService, { useClass: DesktopLogService }]);
+            injector.add([IPlatformService, { useClass: PlatformService }]);
+            injector.add([IUIRuntimeScopeService, { useClass: UIRuntimeScopeService }]);
+            injector.add([ShortcutService]);
+            const container = document.createElement('div');
+            document.body.appendChild(container);
+            try {
+                const service = injector.get(ShortcutService);
+                service.registerShortcut({ id: 'test.grid-navigation', binding: keyCode });
+                const trigger = document.createElement('div');
+                trigger.dataset.uCommand = 'sheet.command.set-horizontal-text-align';
+                trigger.setAttribute('role', 'button');
+                const menu = document.createElement('div');
+                menu.setAttribute('role', 'menu');
+                const item = document.createElement('button');
+                item.setAttribute('role', 'menuitem');
+                menu.appendChild(item);
+                const floatingMenu = document.createElement('div');
+                floatingMenu.setAttribute('data-embed-floating-menu', 'true');
+                const compactTrigger = document.createElement('button');
+                floatingMenu.appendChild(compactTrigger);
+                const fontControl = document.createElement('div');
+                fontControl.dataset.uCommand = 'sheet.command.set-range-font-family';
+                const fontInput = document.createElement('input');
+                fontControl.appendChild(fontInput);
+                container.append(trigger, menu, floatingMenu, fontControl);
+                for (const target of [trigger, item, compactTrigger, fontInput]) {
+                    const event = new KeyboardEvent('navigation-test', { keyCode, cancelable: true });
+                    target.dispatchEvent(event);
+                    expect(service.dispatch(event)).toBeUndefined();
+                    expect(event.defaultPrevented).toBe(false);
+                }
+                const canvas = document.createElement('canvas');
+                container.appendChild(canvas);
+                const event = new KeyboardEvent('navigation-test', { keyCode });
+                canvas.dispatchEvent(event);
+                expect(service.dispatch(event)?.id).toBe('test.grid-navigation');
+            } finally {
+                container.remove();
+                injector.dispose();
+            }
+        }
+    );
+
+    it.each([
+        ['Enter', KeyCode.ENTER],
+        ['Escape', KeyCode.ESC],
+        ['ArrowLeft', KeyCode.ARROW_LEFT],
+        ['ArrowRight', KeyCode.ARROW_RIGHT],
+        ['Backspace', KeyCode.BACKSPACE],
+        ['Tab', KeyCode.TAB],
+    ])('yields composing %s to the IME and resumes the shortcut after composition', async (key, keyCode) => {
+        const injector = new Injector();
+        injector.add([ICommandService, { useClass: CommandService }]);
+        injector.add([IConfigService, { useClass: ConfigService }]);
+        injector.add([IContextService, { useClass: ContextService }]);
+        injector.add([ILogService, { useClass: DesktopLogService }]);
+        injector.add([IPlatformService, { useClass: PlatformService }]);
+        injector.add([IUIRuntimeScopeService, { useClass: UIRuntimeScopeService }]);
+        injector.add([ShortcutService]);
+        try {
+            const service = injector.get(ShortcutService);
+            const commandService = injector.get(ICommandService);
+            let executionCount = 0;
+            commandService.registerCommand({
+                id: 'test.ime-shortcut',
+                type: CommandType.OPERATION,
+                handler: () => {
+                    executionCount += 1;
+                    return true;
+                },
+            });
+            service.registerShortcut({
+                id: 'test.ime-shortcut',
+                binding: keyCode,
+                nativeTextEditorBehavior: NativeTextEditorShortcutBehavior.OVERRIDE_NATIVE,
+            });
+            const composingEvent = new KeyboardEvent('keydown', {
+                bubbles: true,
+                cancelable: true,
+                isComposing: true,
+                key,
+                keyCode,
+            });
+            expect(service.dispatch(composingEvent)).toBeUndefined();
+            window.dispatchEvent(composingEvent);
+            expect(executionCount).toBe(0);
+            expect(composingEvent.defaultPrevented).toBe(false);
+
+            // Safari may deliver the IME confirmation key after compositionend with keyCode 229.
+            const confirmationEvent = new KeyboardEvent('keydown', {
+                bubbles: true,
+                cancelable: true,
+                isComposing: false,
+                key,
+                keyCode: 229,
+            });
+            window.dispatchEvent(confirmationEvent);
+            expect(executionCount).toBe(0);
+            expect(confirmationEvent.defaultPrevented).toBe(false);
+
+            const regularEvent = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key, keyCode });
+            window.dispatchEvent(regularEvent);
+            await expect.poll(() => executionCount).toBe(1);
+            expect(regularEvent.defaultPrevented).toBe(true);
+        } finally {
+            injector.dispose();
+        }
+    });
+
+    it('should register and unregister shortcuts', () => {
+        const { service } = createService();
+        const changed = vi.fn();
+        const sub = service.shortcutChanged$.subscribe(changed);
+
+        const disposable = service.registerShortcut({
+            id: 'cmd.save',
+            binding: KeyCode.S | MetaKeys.CTRL_COMMAND,
+        });
+
+        expect(service.getAllShortcuts()).toHaveLength(1);
+        expect(changed).toHaveBeenCalledTimes(1);
+
+        disposable.dispose();
+        expect(service.getAllShortcuts()).toHaveLength(0);
+        expect(changed).toHaveBeenCalledTimes(2);
+
+        sub.unsubscribe();
+        service.dispose();
+    });
+
+    it('should ignore invalid shortcuts without binding', () => {
+        const { service } = createService();
+
+        service.registerShortcut({
+            id: 'cmd.invalid',
+        });
+
+        expect(service.getAllShortcuts()).toHaveLength(0);
+        service.dispose();
+    });
+
+    it('should resolve candidate by priority and preconditions', () => {
+        const { service } = createService();
+        const low = {
+            id: 'cmd.low',
+            binding: KeyCode.A | MetaKeys.CTRL_COMMAND,
+            priority: 1,
+        };
+        const highBlocked = {
+            id: 'cmd.blocked',
+            binding: KeyCode.A | MetaKeys.CTRL_COMMAND,
+            priority: 10,
+            preconditions: () => false,
+        };
+        const eventBlocked = {
+            id: 'cmd.event-blocked',
+            binding: KeyCode.A | MetaKeys.CTRL_COMMAND,
+            priority: 11,
+            eventPreconditions: () => false,
+        };
+        const highAllowed = {
+            id: 'cmd.high',
+            binding: KeyCode.A | MetaKeys.CTRL_COMMAND,
+            priority: 9,
+            preconditions: () => true,
+        };
+
+        service.registerShortcut(low);
+        service.registerShortcut(highBlocked);
+        service.registerShortcut(eventBlocked);
+        service.registerShortcut(highAllowed);
+
+        const event = createKeyboardEvent(KeyCode.A, { ctrlKey: true });
+        const candidate = service.dispatch(event);
+
+        expect(candidate?.id).toBe('cmd.high');
+        service.dispose();
+    });
+
+    it('should ignore dispatch when escaped, disabled, or target not in layout container', () => {
+        const escapedService = createService().service;
+        escapedService.registerShortcut({
+            id: 'cmd.esc',
+            binding: KeyCode.A | MetaKeys.CTRL_COMMAND,
+        });
+        const escapedDisposable = escapedService.forceEscape();
+        const nestedEscapedDisposable = escapedService.forceEscape();
+        expect(escapedService.dispatch(createKeyboardEvent(KeyCode.A, { ctrlKey: true }))).toBeUndefined();
+        escapedDisposable.dispose();
+        expect(escapedService.dispatch(createKeyboardEvent(KeyCode.A, { ctrlKey: true }))).toBeUndefined();
+        nestedEscapedDisposable.dispose();
+        expect(escapedService.dispatch(createKeyboardEvent(KeyCode.A, { ctrlKey: true }))?.id).toBe('cmd.esc');
+        escapedService.dispose();
+
+        const disabledService = createService().service;
+        disabledService.registerShortcut({
+            id: 'cmd.disabled',
+            binding: KeyCode.A | MetaKeys.CTRL_COMMAND,
+        });
+        const disableDisposable = disabledService.forceDisable();
+        expect(disabledService.dispatch(createKeyboardEvent(KeyCode.A, { ctrlKey: true }))).toBeUndefined();
+        disableDisposable.dispose();
+        disabledService.dispose();
+
+        const withLayout = createService({ layoutAllowed: false }).service;
+        withLayout.registerShortcut({
+            id: 'cmd.layout',
+            binding: KeyCode.A | MetaKeys.CTRL_COMMAND,
+        });
+        const layoutEvent = createKeyboardEvent(KeyCode.A, { ctrlKey: true });
+        Object.defineProperty(layoutEvent, 'target', {
+            configurable: true,
+            value: document.createElement('div'),
+        });
+        expect(withLayout.dispatch(layoutEvent)).toBeUndefined();
+        withLayout.dispose();
+    });
+
+    it('should format shortcut display according to platform-specific bindings', () => {
+        const mac = createService({ isMac: true, isWindows: false }).service;
+        const macItem = {
+            id: 'cmd.mac',
+            binding: KeyCode.C,
+            mac: KeyCode.C | MetaKeys.CTRL_COMMAND | MetaKeys.SHIFT | MetaKeys.ALT | MetaKeys.MAC_CTRL,
+        };
+        expect(mac.getShortcutDisplay(macItem)).toBe('⌘+⇧+⌥+⌃+C');
+        mac.dispose();
+
+        const win = createService({ isWindows: true }).service;
+        const winItem = {
+            id: 'cmd.win',
+            binding: KeyCode.C | MetaKeys.CTRL_COMMAND | MetaKeys.ALT,
+            win: KeyCode.C | MetaKeys.CTRL_COMMAND | MetaKeys.SHIFT,
+        };
+        expect(win.getShortcutDisplay(winItem)).toBe('Ctrl+Shift+C');
+        win.dispose();
+    });
+
+    it('should return display string of command id and null when not found', () => {
+        const { service } = createService();
+        service.registerShortcut({
+            id: 'cmd.find',
+            binding: KeyCode.Z | MetaKeys.CTRL_COMMAND,
+        });
+
+        expect(service.getShortcutDisplayOfCommand('cmd.find')).toBe('Ctrl+Z');
+        expect(service.getShortcutDisplayOfCommand('cmd.none')).toBeNull();
+        service.dispose();
+    });
+
+    it('should execute command when native keydown matches registered shortcut', () => {
+        const { service, executeCommand } = createService();
+        service.registerShortcut({
+            id: 'cmd.native',
+            binding: KeyCode.V | MetaKeys.CTRL_COMMAND,
+            staticParameters: { from: 'test' },
+        });
+
+        const event = createKeyboardEvent(KeyCode.V, { ctrlKey: true });
+        window.dispatchEvent(event);
+
+        expect(executeCommand).toHaveBeenCalledWith('cmd.native', { from: 'test' });
+        expect(event.defaultPrevented).toBe(true);
+        service.dispose();
+    });
+
+    it('uses the embedded child runtime context and command service for shortcuts', () => {
+        const runtime = document.createElement('div');
+        const canvas = document.createElement('canvas');
+        runtime.setAttribute(EMBED_CHILD_UNIT_ID_ATTRIBUTE, 'child-board');
+        runtime.appendChild(canvas);
+
+        const scopedExecuteCommand = vi.fn(() => Promise.resolve(true));
+        const scopedContextService = {
+            getContextValue: vi.fn((key: string) => key === 'FOCUSING_BOARD'),
+        };
+        const scopedCommandService = {
+            executeCommand: scopedExecuteCommand,
+        };
+        const runtimeScope = {
+            has: vi.fn(() => true),
+            get: vi.fn((identifier: unknown) => identifier === IContextService ? scopedContextService : scopedCommandService),
+        };
+        const { service, executeCommand, getRuntimeScope } = createService();
+        getRuntimeScope.mockReturnValue(runtimeScope);
+        service.registerShortcut({
+            id: 'board.operation.grouping-shortcut',
+            binding: KeyCode.ENTER,
+            preconditions: (contextService) => contextService.getContextValue('FOCUSING_BOARD'),
+        });
+
+        const event = createKeyboardEvent(KeyCode.ENTER);
+        Object.defineProperty(event, 'target', {
+            configurable: true,
+            get: () => canvas,
+        });
+        window.dispatchEvent(event);
+
+        expect(getRuntimeScope).toHaveBeenCalledWith('child-board');
+        expect(scopedContextService.getContextValue).toHaveBeenCalledWith('FOCUSING_BOARD');
+        expect(scopedExecuteCommand).toHaveBeenCalledWith('board.operation.grouping-shortcut', undefined);
+        expect(executeCommand).not.toHaveBeenCalled();
+        expect(event.defaultPrevented).toBe(true);
+        service.dispose();
+    });
+
+    it('lets embed-owned native text editors handle select-all without dispatching Univer shortcuts', () => {
+        const embedRoot = document.createElement('div');
+        embedRoot.setAttribute('data-embed-interaction-boundary-owner', 'embed-1');
+        const textEditor = document.createElement('div');
+        textEditor.contentEditable = 'true';
+        Object.defineProperty(textEditor, 'isContentEditable', {
+            configurable: true,
+            get: () => true,
+        });
+        embedRoot.appendChild(textEditor);
+        const { service, executeCommand } = createService();
+        service.registerShortcut({
+            id: 'cmd.select-all',
+            binding: KeyCode.A | MetaKeys.CTRL_COMMAND,
+            nativeTextEditorBehavior: NativeTextEditorShortcutBehavior.ALLOW_NATIVE,
+        });
+
+        const event = createKeyboardEvent(KeyCode.A, { ctrlKey: true });
+        Object.defineProperty(event, 'target', {
+            configurable: true,
+            get: () => textEditor,
+        });
+        const candidate = service.dispatch(event);
+
+        expect(candidate).toBeUndefined();
+        expect(executeCommand).not.toHaveBeenCalled();
+        expect(event.defaultPrevented).toBe(false);
+        service.dispose();
+    });
+
+    it('lets an explicit shortcut override native select-all in an embedded text editor', () => {
+        const embedRoot = document.createElement('div');
+        embedRoot.setAttribute('data-embed-interaction-boundary-owner', 'embed-1');
+        embedRoot.setAttribute(EMBED_CHILD_UNIT_ID_ATTRIBUTE, 'child-doc');
+        const textEditor = document.createElement('div');
+        textEditor.contentEditable = 'true';
+        Object.defineProperty(textEditor, 'isContentEditable', {
+            configurable: true,
+            get: () => true,
+        });
+        embedRoot.appendChild(textEditor);
+        const otherTextEditor = document.createElement('div');
+        otherTextEditor.contentEditable = 'true';
+        embedRoot.appendChild(otherTextEditor);
+
+        const scopedExecuteCommand = vi.fn(() => Promise.resolve(true));
+        const scopedContextService = {
+            getContextValue: vi.fn(),
+        };
+        const scopedCommandService = {
+            executeCommand: scopedExecuteCommand,
+        };
+        const runtimeScope = {
+            has: vi.fn(() => true),
+            get: vi.fn((identifier: unknown) => identifier === IContextService ? scopedContextService : scopedCommandService),
+        };
+        const { service, executeCommand, getRuntimeScope } = createService();
+        getRuntimeScope.mockReturnValue(runtimeScope);
+        service.registerShortcut({
+            id: 'doc.command.select-all',
+            binding: KeyCode.A | MetaKeys.CTRL_COMMAND,
+            eventPreconditions: (event) => event.target === textEditor,
+            nativeTextEditorBehavior: NativeTextEditorShortcutBehavior.OVERRIDE_NATIVE,
+        });
+
+        const event = createKeyboardEvent(KeyCode.A, { ctrlKey: true });
+        Object.defineProperty(event, 'target', {
+            configurable: true,
+            get: () => textEditor,
+        });
+        window.dispatchEvent(event);
+
+        expect(getRuntimeScope).toHaveBeenCalledWith('child-doc');
+        expect(scopedExecuteCommand).toHaveBeenCalledWith('doc.command.select-all', undefined);
+        expect(executeCommand).not.toHaveBeenCalled();
+        expect(event.defaultPrevented).toBe(true);
+
+        const otherEvent = createKeyboardEvent(KeyCode.A, { ctrlKey: true });
+        Object.defineProperty(otherEvent, 'target', {
+            configurable: true,
+            get: () => otherTextEditor,
+        });
+
+        expect(service.dispatch(otherEvent)).toBeUndefined();
+        service.dispose();
+    });
+
+    it('lets embed-owned Univer internal editors handle select-all without dispatching global shortcuts', () => {
+        const embedRoot = document.createElement('div');
+        embedRoot.setAttribute('data-embed-interaction-boundary-owner', 'embed-1');
+        const editorContainer = document.createElement('div');
+        editorContainer.id = 'univer-doc-selection-container-__INTERNAL_EDITOR__DOCS_NORMAL';
+        const textEditor = document.createElement('div');
+        textEditor.id = '__editor___INTERNAL_EDITOR__DOCS_NORMAL';
+        textEditor.contentEditable = 'true';
+        Object.defineProperty(textEditor, 'isContentEditable', {
+            configurable: true,
+            get: () => true,
+        });
+        editorContainer.appendChild(textEditor);
+        embedRoot.appendChild(editorContainer);
+        const { service, executeCommand } = createService();
+        service.registerShortcut({
+            id: 'cmd.select-all',
+            binding: KeyCode.A | MetaKeys.CTRL_COMMAND,
+        });
+
+        const event = createKeyboardEvent(KeyCode.A, { ctrlKey: true });
+        Object.defineProperty(event, 'target', {
+            configurable: true,
+            get: () => textEditor,
+        });
+        const candidate = service.dispatch(event);
+
+        expect(candidate).toBeUndefined();
+        expect(executeCommand).not.toHaveBeenCalled();
+        expect(event.defaultPrevented).toBe(false);
+        service.dispose();
+    });
+
+    it('still dispatches select-all for non-text embed targets', () => {
+        const embedRoot = document.createElement('div');
+        embedRoot.setAttribute('data-embed-interaction-boundary-owner', 'embed-1');
+        const canvas = document.createElement('canvas');
+        embedRoot.appendChild(canvas);
+        const { service, executeCommand } = createService();
+        service.registerShortcut({
+            id: 'cmd.select-all',
+            binding: KeyCode.A | MetaKeys.CTRL_COMMAND,
+        });
+
+        const event = createKeyboardEvent(KeyCode.A, { ctrlKey: true });
+        Object.defineProperty(event, 'target', {
+            configurable: true,
+            get: () => canvas,
+        });
+        const candidate = service.dispatch(event);
+
+        expect(candidate?.id).toBe('cmd.select-all');
+        expect(executeCommand).not.toHaveBeenCalled();
+        expect(event.defaultPrevented).toBe(false);
+        service.dispose();
+    });
+});

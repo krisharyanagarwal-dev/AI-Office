@@ -1,50 +1,50 @@
-# macOS
-.DS_Store
-.AppleDouble
-.LSOverride
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+build/
+*.egg-info/
 
 # Python
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.python-version
+*.pyc
 .pytest_cache/
-.coverage
-.tox/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data (runtime)
+data/
+*.db
+*.sqlite
 
 # Logs
 logs/
 *.log
 
-# Office runtime
-tasks/
-inbox/
-mailbox/
-memory/
-worktrees/
-
-# Editor/IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# OS generated
-Thumbs.db
-ehthumbs.db
-
-# Environment
-.env
-.env.local
-*.key
+# Keys/secrets
+data/keys/
 *.pem
+*.key
 
-# Temporary
-*.tmp
-*.bak-*
-*~
-
-# Node
-node_modules/
-package-lock.json
+# Local config
+local.config.js
+Desktop/
+Documents/
+Movies/
+Music/
+Pictures/

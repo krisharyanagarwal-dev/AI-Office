@@ -1,0 +1,384 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type { DocumentDataModel, IDocumentData, JSONXActions, Univer } from '@univerjs/core';
+import type { IDocDrawing } from '@univerjs/docs-drawing';
+import type { IChangeObserverConfig, RenderUnit } from '@univerjs/engine-render';
+import type { Subject } from 'rxjs';
+import {
+    CustomRangeType,
+    DrawingTypeEnum,
+    ICommandService,
+    JSONX,
+    LocaleService,
+    ObjectRelativeFromH,
+    ObjectRelativeFromV,
+    PositionedObjectLayoutType,
+    RedoCommand,
+    UndoCommand,
+} from '@univerjs/core';
+import {
+    DocSkeletonManagerService,
+    RichTextEditingMutation,
+} from '@univerjs/docs';
+import {
+    IDocDrawingService,
+    InsertDocDrawingCommand,
+    RemoveDocDrawingCommand,
+    TextWrappingStyle,
+    UpdateDocDrawingWrappingStyleCommand,
+    UpdateDrawingDocTransformCommand,
+} from '@univerjs/docs-drawing';
+import { getDrawingShapeKeyByDrawingSearch, IDrawingManagerService } from '@univerjs/drawing';
+import {
+    IRenderManagerService,
+    Rect,
+} from '@univerjs/engine-render';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createDocDrawing, createDocDrawingTestBed } from '../../__tests__/create-doc-drawing-test-bed';
+import { DocRefreshDrawingsService } from '../../services/doc-refresh-drawings.service';
+import {
+    findDrawingAnchor,
+    getDrawingWrappingPosition,
+    resolveDrawingWrappingPosition,
+} from '../../utils/drawing-wrapping-position';
+import { DocDrawingTransformerController } from '../doc-drawing-transformer-update.controller';
+
+describe('DocDrawingAddRemoveController with real commands and services', () => {
+    const unitId = 'drawing-notifications';
+    let univer: Univer;
+    let model: DocumentDataModel;
+    let render: RenderUnit;
+    let commands: ICommandService;
+    let manager: IDrawingManagerService;
+    let docDrawings: IDocDrawingService;
+    let refresh: DocRefreshDrawingsService;
+
+    function drawing(drawingId: string): IDocDrawing {
+        return createDocDrawing(unitId, drawingId);
+    }
+
+    beforeEach(() => {
+        ({ univer, model, render } = createDocDrawingTestBed(unitId));
+        const injector = univer.__getInjector();
+        commands = injector.get(ICommandService);
+        manager = injector.get(IDrawingManagerService);
+        docDrawings = injector.get(IDocDrawingService);
+        refresh = injector.get(DocRefreshDrawingsService);
+    });
+
+    afterEach(() => {
+        univer?.dispose();
+        vi.restoreAllMocks();
+    });
+
+    it('commits drawing transforms after a document render is recreated with the same unit id', async () => {
+        const injector = univer.__getInjector();
+        injector.add([DocDrawingTransformerController]);
+        injector.get(DocDrawingTransformerController);
+        model.getSnapshot().drawings!.a.layoutType = PositionedObjectLayoutType.INLINE;
+        const renderManager = injector.get(IRenderManagerService);
+        for (const width of [60, 80]) {
+            const object = new Rect(getDrawingShapeKeyByDrawingSearch(drawing('a')), {
+                left: 20,
+                top: 30,
+                width: width - 20,
+                height: 30,
+            });
+            render.scene.addObject(object);
+            manager.addNotification([drawing('a')]);
+            const transformer = render.scene.getTransformerByCreate();
+            const objects = new Map([[object.oKey, object]]);
+            // Feed pointer gesture boundaries into the real transformer and command pipeline.
+            transformer.activeAnObject(object);
+            object.transformByState({ width });
+            const gesture = transformer as unknown as { _changeEnd$: Subject<IChangeObserverConfig & { event: { button: number } }> };
+            gesture._changeEnd$.next({ objects, type: 2, event: { button: 0 } });
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            expect(model.getSnapshot().drawings!.a.docTransform.size.width).toBe(width);
+            renderManager.removeRender(unitId);
+            render = renderManager.createRender(unitId) as RenderUnit;
+            render.deactivate();
+            render.addRenderDependencies([[DocSkeletonManagerService]]);
+            render.with(DocSkeletonManagerService);
+        }
+    });
+
+    function mutate(actions: JSONXActions): void {
+        commands.syncExecuteCommand(RichTextEditingMutation.id, { unitId, actions, textRanges: null });
+    }
+
+    function resize(): void {
+        expect(commands.syncExecuteCommand(UpdateDrawingDocTransformCommand.id, {
+            unitId,
+            subUnitId: unitId,
+            drawings: [{ drawingId: 'a', key: 'size', value: { width: 60, height: 45 } }],
+        })).toBe(true);
+    }
+
+    it('keeps unrelated rendered positions and visibility when one drawing is resized', () => {
+        manager.refreshTransform([{ ...drawing('b'), hidden: true, transform: { left: 420, top: 880, width: 40, height: 30 } }]);
+        const before = manager.getDrawingByParam({ unitId, subUnitId: unitId, drawingId: 'b' });
+        const order = manager.getDrawingOrder(unitId, unitId);
+        resize();
+        expect(model.getDrawings()!.a.docTransform.size).toEqual({ width: 60, height: 45 });
+        expect(manager.getDrawingByParam({ unitId, subUnitId: unitId, drawingId: 'b' })).toBe(before);
+        expect(before).toMatchObject({ hidden: true, transform: { left: 420, top: 880 } });
+        expect(manager.getDrawingOrder(unitId, unitId)).toBe(order);
+    });
+
+    it('does not write layout-only transforms into the persisted drawing snapshot after a resize', () => {
+        resize();
+        const original = { ...model.getDrawings()!.a.transform };
+        manager.refreshTransform([{ ...drawing('a'), transform: { left: 720, top: 990, width: 60, height: 45 } }]);
+        expect(model.getDrawings()!.a.transform).toEqual(original);
+    });
+
+    it('preserves published canvas coordinates when synchronizing updated drawing metadata', () => {
+        const transform = { left: 320, top: 180, width: 40, height: 30 };
+        manager.refreshTransform([{ ...drawing('a'), transform }]);
+
+        resize();
+
+        const rendered = manager.getDrawingByParam({ unitId, subUnitId: unitId, drawingId: 'a' });
+        expect(rendered?.transform).toEqual(transform);
+        expect(rendered).toMatchObject({ docTransform: { size: { width: 60, height: 45 } } });
+        expect(model.getDrawings()!.a.transform).not.toEqual(transform);
+
+        const resizedTransform = { ...transform, width: 60, height: 45 };
+        manager.refreshTransform([{ ...drawing('a'), transform: resizedTransform }]);
+        expect(manager.getDrawingByParam({ unitId, subUnitId: unitId, drawingId: 'a' })?.transform).toEqual(resizedTransform);
+    });
+
+    it('keeps a thousand-drawing document stable during repeated single-image resizing', ({ task }) => {
+        const extraDrawings = Array.from({ length: 998 }, (_, index) => drawing(`extra-${index}`));
+        expect(commands.syncExecuteCommand(InsertDocDrawingCommand.id, {
+            unitId,
+            drawings: extraDrawings,
+            textRange: { startOffset: 0, endOffset: 0 },
+        })).toBe(true);
+        const original = manager.getDrawingByParam({ unitId, subUnitId: unitId, drawingId: 'extra-997' });
+        const order = manager.getDrawingOrder(unitId, unitId);
+        const mutationMs: number[] = [];
+        for (let index = 0; index < 20; index++) {
+            const start = performance.now();
+            commands.syncExecuteCommand(UpdateDrawingDocTransformCommand.id, {
+                unitId,
+                subUnitId: unitId,
+                drawings: [{ drawingId: 'a', key: 'size', value: { width: 60 + index, height: 45 } }],
+            });
+            mutationMs.push(performance.now() - start);
+        }
+        Object.assign(task.meta, { drawingCount: 1000, mutationMs });
+        expect(Object.keys(model.getDrawings()!)).toHaveLength(1000);
+        expect(model.getDrawings()!.a.docTransform.size.width).toBe(79);
+        expect(manager.getDrawingByParam({ unitId, subUnitId: unitId, drawingId: 'extra-997' })).toBe(original);
+        expect(manager.getDrawingOrder(unitId, unitId)).toBe(order);
+    });
+
+    it('mirrors actual drawing insertion and removal and emits their notifications', () => {
+        const added = vi.fn();
+        const removed = vi.fn();
+        const addSubscription = manager.add$.subscribe(added);
+        const removeSubscription = manager.remove$.subscribe(removed);
+        expect(commands.syncExecuteCommand(InsertDocDrawingCommand.id, {
+            unitId,
+            drawings: [drawing('c')],
+            textRange: { startOffset: 0, endOffset: 0 },
+        })).toBe(true);
+        expect(manager.getDrawingByParam({ unitId, subUnitId: unitId, drawingId: 'c' })).toBeDefined();
+        expect(added).toHaveBeenCalled();
+        expect(commands.syncExecuteCommand(RemoveDocDrawingCommand.id, {
+            unitId,
+            drawings: [{ unitId, subUnitId: unitId, drawingId: 'c', drawingType: DrawingTypeEnum.DRAWING_IMAGE }],
+            textRange: { startOffset: 0, endOffset: 0 },
+        })).toBe(true);
+        expect(manager.getDrawingByParam({ unitId, subUnitId: unitId, drawingId: 'c' })).toBeUndefined();
+        expect(docDrawings.getDrawingByParam({ unitId, subUnitId: unitId, drawingId: 'c' })).toBeUndefined();
+        expect(removed).toHaveBeenCalled();
+        addSubscription.unsubscribe();
+        removeSubscription.unsubscribe();
+    });
+
+    it('registers scoped note images and removes them when their note is deleted', () => {
+        const body = model.getBody()!;
+        const referencedBody = {
+            ...body,
+            dataStream: `\uFFFC${body.dataStream}`,
+            paragraphs: body.paragraphs?.map((paragraph) => ({ ...paragraph, startIndex: paragraph.startIndex + 1 })),
+            sectionBreaks: body.sectionBreaks?.map((section) => ({ ...section, startIndex: section.startIndex + 1 })),
+            customBlocks: body.customBlocks?.map((block) => ({ ...block, startIndex: block.startIndex + 1 })),
+            customRanges: [{
+                rangeId: 'ref',
+                rangeType: CustomRangeType.FOOTNOTE,
+                startIndex: 0,
+                endIndex: 0,
+                wholeEntity: true,
+                properties: { noteId: 'note' },
+            }],
+        };
+        const note = { type: 'footnote' as const, noteId: 'note', body: {
+            dataStream: '\b\r\n',
+            paragraphs: [{ startIndex: 1, paragraphId: 'np' }],
+            customBlocks: [{ startIndex: 0, blockId: 'note-image' }],
+        }, drawings: { 'note-image': { ...drawing('note-image'), layoutType: PositionedObjectLayoutType.INLINE } }, drawingsOrder: ['note-image'] };
+        const jsonX = JSONX.getInstance();
+        mutate(JSONX.compose(jsonX.replaceOp(['body'], body, referencedBody), jsonX.insertOp(['notes', 'note'], note)));
+        const search = { unitId, subUnitId: unitId, drawingId: 'note-image' };
+        expect(manager.getDrawingByParam(search)?.drawingId).toBe('note-image');
+        expect(docDrawings.getDrawingOrder(unitId, unitId)).toEqual(['a', 'b', 'note-image']);
+        expect(commands.syncExecuteCommand(UpdateDrawingDocTransformCommand.id, {
+            unitId,
+            subUnitId: unitId,
+            drawings: [{ drawingId: 'note-image', key: 'size', value: { width: 70, height: 35 } }],
+        })).toBe(true);
+        expect(manager.getDrawingByParam(search)).toMatchObject({ docTransform: { size: { width: 70, height: 35 } } });
+        expect(model.getDrawings()).not.toHaveProperty('note-image');
+        mutate(jsonX.replaceOp(['body'], model.getBody(), body));
+        expect(model.getSnapshot().notes?.note).toBeUndefined();
+        expect(manager.getDrawingByParam(search)).toBeUndefined();
+        expect(docDrawings.getDrawingByParam(search)).toBeUndefined();
+        expect(manager.getDrawingByParam({ ...search, drawingId: 'a' })).toBeDefined();
+    });
+
+    it('updates persisted order and keeps behind-text drawings below foreground drawings', () => {
+        mutate(JSONX.getInstance().moveOp(['drawingsOrder', 0], ['drawingsOrder', 1]));
+        expect(docDrawings.getDrawingOrder(unitId, unitId)).toEqual(['b', 'a']);
+        expect(manager.getDrawingOrder(unitId, unitId)).toEqual(['a', 'b']);
+    });
+
+    it('still rebuilds render order when wrapping changes the behind-text layer', () => {
+        mutate(JSONX.getInstance().moveOp(['drawingsOrder', 0], ['drawingsOrder', 1]));
+        expect(manager.getDrawingOrder(unitId, unitId)).toEqual(['a', 'b']);
+        expect(commands.syncExecuteCommand(UpdateDocDrawingWrappingStyleCommand.id, {
+            unitId,
+            subUnitId: unitId,
+            drawings: [{ drawingId: 'a' }],
+            wrappingStyle: TextWrappingStyle.IN_FRONT_OF_TEXT,
+        })).toBe(true);
+        expect(manager.getDrawingOrder(unitId, unitId)).toEqual(['b', 'a']);
+        expect(docDrawings.getDrawingOrder(unitId, unitId)).toEqual(['b', 'a']);
+    });
+
+    it('removes optional metadata from current data while retaining it for old-state comparisons', () => {
+        mutate(JSONX.getInstance().insertOp(['drawings', 'a', 'description'], 'caption'));
+        mutate(JSONX.getInstance().removeOp(['drawings', 'a', 'description'], 'caption'));
+        const search = { unitId, subUnitId: unitId, drawingId: 'a' };
+        expect(manager.getDrawingByParam(search)).not.toHaveProperty('description');
+        expect(manager.getOldDrawingByParam(search)).toHaveProperty('description', 'caption');
+    });
+
+    it('refreshes drawing positions before controls on actual undo and redo', async () => {
+        manager.focusDrawing([{ unitId, subUnitId: unitId, drawingId: 'a' }]);
+        resize();
+        const refreshDrawings = vi.spyOn(refresh, 'refreshDrawings');
+        const refreshControls = vi.spyOn(render.scene.getTransformerByCreate(), 'refreshControls');
+        for (const [commandId, expectedWidth] of [[UndoCommand.id, 40], [RedoCommand.id, 60]] as const) {
+            refreshDrawings.mockClear();
+            refreshControls.mockClear();
+            expect(await commands.executeCommand(commandId)).toBe(true);
+            expect(model.getDrawings()!.a.docTransform.size.width).toBe(expectedWidth);
+            expect(refreshDrawings).toHaveBeenCalledWith(render.with(DocSkeletonManagerService).getSkeleton());
+            expect(refreshDrawings.mock.invocationCallOrder[0]).toBeLessThan(refreshControls.mock.invocationCallOrder[0]);
+        }
+    });
+
+    it.each([-20, 0, 35].flatMap((offset) => [false, true].flatMap((atEnd) =>
+        [ObjectRelativeFromV.PARAGRAPH, ObjectRelativeFromV.LINE].flatMap((relativeFrom) =>
+            [PositionedObjectLayoutType.WRAP_TOP_AND_BOTTOM, PositionedObjectLayoutType.WRAP_SQUARE].map((layoutType) =>
+                ({ offset, atEnd, relativeFrom, layoutType }))
+        )
+    )))(
+        'round-trips text-relative wrapping: $offset, paragraph end: $atEnd, reference: $relativeFrom, layout: $layoutType',
+        ({ offset, atEnd, relativeFrom, layoutType }) => {
+            const anchorText = 'Anchor text before and after the drawing wraps across this paragraph.';
+            const anchored = atEnd ? `${anchorText}\b` : `${anchorText.slice(0, 9)}\b${anchorText.slice(9)}`;
+            const text = `First paragraph before the drawing.\r${anchored}\rFollowing paragraph for reflow.\r`;
+            const snapshot = model.getSnapshot();
+            const source: IDocumentData & { drawings: { a: IDocDrawing } } = {
+                ...snapshot,
+                body: {
+                    dataStream: `${text}\n`,
+                    paragraphs: [...text.matchAll(/\r/g)].map((match, index) => ({ startIndex: match.index!, paragraphId: `p${index}` })),
+                    sectionBreaks: [{ startIndex: text.length, sectionId: 's1' }],
+                    customBlocks: [{ startIndex: text.indexOf('\b'), blockId: 'a' }],
+                },
+                drawings: { a: {
+                    ...drawing('a'),
+                    layoutType,
+                    docTransform: {
+                        angle: 0,
+                        size: { width: 120, height: 60 },
+                        positionH: { relativeFrom: ObjectRelativeFromH.PAGE, posOffset: 0 },
+                        positionV: { relativeFrom, posOffset: offset },
+                    },
+                } },
+                drawingsOrder: ['a'],
+                documentStyle: {
+                    ...snapshot.documentStyle,
+                    pageSize: { width: 720, height: 960 },
+                    marginLeft: 50,
+                    marginRight: 50,
+                    marginTop: 50,
+                    marginBottom: 50,
+                    textStyle: { ff: 'Arial', fs: 12 },
+                },
+            };
+            const skeletonManager = render.with(DocSkeletonManagerService);
+            const layout = () => {
+                model.reset(source);
+                skeletonManager.getViewModel().reset(model);
+                const skeleton = skeletonManager.getSkeleton();
+                skeleton.makeDirty(true);
+                skeleton.calculate();
+                return findDrawingAnchor(unitId, 'a', skeleton.getSkeletonData()!, skeletonManager.getViewModel().getEditArea(), source.drawings.a)!;
+            };
+            const initial = layout();
+            const top = initial.skeDrawing.aTop;
+            source.drawings.a.docTransform = getDrawingWrappingPosition(initial, source.drawings.a.layoutType, undefined, ObjectRelativeFromV.MARGIN);
+            const margin = layout();
+            const converted = getDrawingWrappingPosition(margin, source.drawings.a.layoutType, undefined, relativeFrom);
+            const beforePreview = JSON.stringify(model.getSnapshot());
+            const resolved = resolveDrawingWrappingPosition(margin, converted, model.getSnapshot(), univer.__getInjector().get(LocaleService), skeletonManager.getViewModel().getEditArea());
+            expect(JSON.stringify(model.getSnapshot())).toBe(beforePreview);
+            expect(resolved).not.toBeNull();
+            source.drawings.a.docTransform = resolved!;
+            const back = layout();
+            expect({ top, margin: margin.skeDrawing.aTop, back: back.skeDrawing.aTop, offset: source.drawings.a.docTransform.positionV.posOffset }).toMatchObject({ margin: top, back: top });
+        }
+    );
+
+    it('preserves the resolved anchor when changing wrapping and refreshes the drawing afterward', () => {
+        const skeleton = render.with(DocSkeletonManagerService).getSkeleton();
+        const page = skeleton.getSkeletonData()!.pages[0];
+        const anchor = page.skeDrawings.get('a')!;
+        expect(anchor).toBeDefined();
+        const expectedLeft = anchor.aLeft;
+        const expectedTop = anchor.aTop - anchor.blockAnchorTop;
+        const refreshDrawings = vi.spyOn(refresh, 'refreshDrawings');
+        expect(commands.syncExecuteCommand(UpdateDocDrawingWrappingStyleCommand.id, {
+            unitId,
+            subUnitId: unitId,
+            drawings: [{ drawingId: 'a' }],
+            wrappingStyle: TextWrappingStyle.WRAP_SQUARE,
+        })).toBe(true);
+        expect(model.getDrawings()!.a.docTransform).toMatchObject({
+            positionH: { posOffset: expectedLeft },
+            positionV: { posOffset: expectedTop },
+        });
+        expect(refreshDrawings).toHaveBeenCalledWith(skeleton);
+    });
+});

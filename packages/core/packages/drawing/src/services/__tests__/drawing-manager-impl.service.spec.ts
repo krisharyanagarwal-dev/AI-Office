@@ -1,0 +1,647 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type { IDrawingParam, IDrawingSearch } from '@univerjs/core';
+import { BooleanNumber, DrawingTypeEnum, Injector, JSON1 } from '@univerjs/core';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { DrawingManagerService, UnitDrawingService } from '../drawing-manager-impl.service';
+
+const unitId = 'unit';
+const subUnitId = 'subUnit';
+
+type NestedDrawingTestParam = IDrawingParam & {
+    element: {
+        name: string;
+        shapeData: {
+            text: string;
+            fontFamily?: string;
+            dataModel?: {
+                horizontalAlign?: number;
+                doc: { body: { dataStream: string } };
+            };
+        };
+        style?: {
+            dash?: number[];
+            stroke?: string;
+        };
+    };
+};
+
+function createNestedDrawingService(): UnitDrawingService<NestedDrawingTestParam> {
+    const injector = new Injector();
+    injector.add([UnitDrawingService]);
+    return injector.get<UnitDrawingService<NestedDrawingTestParam>>(UnitDrawingService);
+}
+
+function createDrawing(drawingId: string, overrides: Partial<IDrawingParam> = {}): IDrawingParam {
+    return {
+        unitId,
+        subUnitId,
+        drawingId,
+        drawingType: DrawingTypeEnum.DRAWING_IMAGE,
+        ...overrides,
+    };
+}
+
+function createSearch(drawingId: string): IDrawingSearch {
+    return {
+        unitId,
+        subUnitId,
+        drawingId,
+    };
+}
+
+describe('UnitDrawingService', () => {
+    it.each(['__proto__', 'constructor', 'prototype'])('rejects unsafe drawing identifiers (%s) before changing state', (key) => {
+        const injector = new Injector([[UnitDrawingService]]);
+        const service = injector.get(UnitDrawingService);
+        const marker = '__drawing_pollution__';
+        try {
+            expect(() => service.applyJson1(key, marker, null)).toThrow();
+            expect(() => service.applyJson1('unit', key, null)).toThrow();
+            expect(Object.getOwnPropertyDescriptor(Object.prototype, marker)).toBeUndefined();
+            expect(service.drawingManagerData).toEqual({});
+        } finally {
+            Reflect.deleteProperty(Object.prototype, marker);
+            Reflect.deleteProperty(Object, marker);
+            injector.dispose();
+        }
+    });
+
+    it('rejects unsafe snapshots and operations without partially initializing the drawing map', () => {
+        const injector = new Injector([[UnitDrawingService]]);
+        const service = injector.get(UnitDrawingService);
+        try {
+            expect(() => service.registerDrawingData('unit', JSON.parse('{"__proto__":{"data":{},"order":[]}}'))).toThrow();
+            expect(() => service.registerDrawingData('__proto__', {})).toThrow();
+            expect(() => service.applyJson1('unit', 'sheet', ['__proto__', 'polluted', { i: true }])).toThrow();
+            expect(() => service.applyJson1('unit', 'sheet', ['missing', 'nested', { i: true }])).toThrow();
+            expect(service.drawingManagerData).toEqual({});
+            expect(service.getDrawingByParam({ unitId: 'constructor', subUnitId: 'prototype', drawingId: 'data' })).toBeUndefined();
+        } finally {
+            injector.dispose();
+        }
+    });
+
+    let service: UnitDrawingService<IDrawingParam>;
+
+    beforeEach(() => {
+        const injector = new Injector();
+        injector.add([UnitDrawingService]);
+        service = injector.get(UnitDrawingService);
+    });
+
+    it('should register, initialize and remove drawing data for a unit', () => {
+        const added: IDrawingSearch[][] = [];
+        const removed: IDrawingSearch[][] = [];
+
+        service.add$.subscribe((params) => added.push(params));
+        service.remove$.subscribe((params) => removed.push(params));
+
+        service.registerDrawingData(unitId, {
+            [subUnitId]: {
+                data: {
+                    a: createDrawing('a'),
+                    b: createDrawing('b'),
+                },
+                order: ['a', 'b'],
+            },
+        });
+
+        service.initializeNotification(unitId);
+
+        expect(added).toHaveLength(1);
+        expect(added[0].map((item) => item.drawingId)).toEqual(['a', 'b']);
+        expect(service.getDrawingData(unitId, subUnitId)).toMatchObject({
+            a: createDrawing('a'),
+            b: createDrawing('b'),
+        });
+
+        service.removeDrawingDataForUnit(unitId);
+
+        expect(removed).toEqual([[createSearch('a'), createSearch('b')]]);
+        expect(service.getDrawingDataForUnit(unitId)).toEqual({});
+    });
+
+    it('should build and apply add, update and remove operations', () => {
+        const drawingA = createDrawing('a', { allowTransform: true });
+        const drawingB = createDrawing('b');
+
+        const addOp = service.getBatchAddOp([drawingA, drawingB]);
+        service.applyJson1(unitId, subUnitId, addOp.redo);
+
+        expect(service.getDrawingOrder(unitId, subUnitId)).toEqual(['b', 'a']);
+        expect(service.getDrawingByParam(createSearch('a'))).toEqual(drawingA);
+        expect(service.getDrawingOKey(`${unitId}#-#${subUnitId}#-#a`)).toEqual(drawingA);
+
+        const updatedDrawingA = createDrawing('a', {
+            allowTransform: false,
+            groupId: 'group-1',
+        });
+        const updateOp = service.getBatchUpdateOp([updatedDrawingA]);
+        service.applyJson1(unitId, subUnitId, updateOp.redo);
+
+        expect(service.getDrawingByParam(createSearch('a'))).toMatchObject(updatedDrawingA);
+        expect(service.getOldDrawingByParam(createSearch('a'))).toMatchObject(drawingA);
+
+        const removeOp = service.getBatchRemoveOp([createSearch('b')]);
+        service.applyJson1(unitId, subUnitId, removeOp.redo);
+
+        expect(service.getDrawingByParam(createSearch('b'))).toBeUndefined();
+        expect(service.getOldDrawingByParam(createSearch('b'))).toMatchObject(drawingB);
+    });
+
+    it('should build and apply update operations for newly added metadata fields', () => {
+        const drawingA = createDrawing('a');
+
+        service.applyJson1(unitId, subUnitId, service.getBatchAddOp([drawingA]).redo);
+
+        const updateOp = service.getBatchUpdateOp([{ ...drawingA, hidden: true }]);
+        service.applyJson1(unitId, subUnitId, updateOp.redo);
+
+        expect(service.getDrawingByParam(createSearch('a'))).toMatchObject({
+            drawingId: 'a',
+            hidden: true,
+        });
+    });
+
+    it('updates and restores nested chart coordinates without losing the drawing operation', () => {
+        const drawing = {
+            ...createDrawing('chart', { drawingType: DrawingTypeEnum.DRAWING_CHART }),
+            transform: { left: 100, top: 100, width: 200, height: 80, angle: 15 },
+            sheetTransform: {
+                from: { column: 1, columnOffset: 10, row: 2, rowOffset: 20 },
+                to: { column: 4, columnOffset: 30, row: 6, rowOffset: 40 },
+            },
+        };
+        const updated = {
+            ...drawing,
+            transform: { left: 360, top: 200, width: 240, height: 80, flipX: true },
+            sheetTransform: {
+                from: { column: 5, columnOffset: 15, row: 4, rowOffset: 25 },
+                to: { column: 9, columnOffset: 35, row: 8, rowOffset: 45 },
+            },
+        };
+        service.applyJson1(unitId, subUnitId, service.getBatchAddOp([drawing]).redo);
+
+        const updateOp = service.getBatchUpdateOp([updated]);
+
+        expect(updateOp.objects).toEqual([createSearch('chart')]);
+        service.applyJson1(unitId, subUnitId, updateOp.redo);
+        expect(service.getDrawingByParam(createSearch('chart'))).toEqual(updated);
+
+        service.applyJson1(unitId, subUnitId, updateOp.undo);
+        expect(service.getDrawingByParam(createSearch('chart'))).toEqual(drawing);
+    });
+
+    it('preserves disjoint nested fields across concurrent drawing updates', () => {
+        const base: NestedDrawingTestParam = {
+            ...createDrawing('shape-1'),
+            element: {
+                name: 'before',
+                shapeData: { text: 'before' },
+            },
+            transform: { height: 80, left: 100, top: 100, width: 200 },
+        };
+        const textService = createNestedDrawingService();
+        const nameService = createNestedDrawingService();
+        [textService, nameService].forEach((drawingService) => {
+            drawingService.applyJson1(unitId, subUnitId, drawingService.getBatchAddOp([base]).redo);
+        });
+
+        const textOp = textService.getBatchUpdateOp([{
+            ...base,
+            element: {
+                ...base.element,
+                shapeData: { text: 'offline once' },
+            },
+            transform: { ...base.transform, left: 360 },
+        }]).redo;
+        const nameOp = nameService.getBatchUpdateOp([{
+            ...base,
+            element: { ...base.element, name: 'server while offline' },
+        }]).redo;
+        if (!textOp || !nameOp) {
+            throw new Error('Expected both drawing updates to produce JSON1 operations');
+        }
+
+        const textPrime = JSON1.type.transform(textOp, nameOp, 'left');
+        const namePrime = JSON1.type.transform(nameOp, textOp, 'right');
+        if (!textPrime || !namePrime) {
+            throw new Error('Expected concurrent drawing operations to transform');
+        }
+
+        textService.applyJson1(unitId, subUnitId, nameOp);
+        textService.applyJson1(unitId, subUnitId, textPrime);
+        nameService.applyJson1(unitId, subUnitId, textOp);
+        nameService.applyJson1(unitId, subUnitId, namePrime);
+
+        [textService, nameService].forEach((drawingService) => {
+            expect(drawingService.getDrawingByParam(createSearch('shape-1'))).toMatchObject({
+                element: {
+                    name: 'server while offline',
+                    shapeData: { text: 'offline once' },
+                },
+                transform: { left: 360 },
+            });
+        });
+    });
+
+    it('inserts nested drawing data when optional properties are undefined', () => {
+        const drawingService = createNestedDrawingService();
+        const base: NestedDrawingTestParam = {
+            ...createDrawing('shape-with-text'),
+            element: {
+                name: 'shape',
+                shapeData: { text: 'before' },
+            },
+        };
+        drawingService.applyJson1(unitId, subUnitId, drawingService.getBatchAddOp([base]).redo);
+
+        const updated: NestedDrawingTestParam = {
+            ...base,
+            element: {
+                ...base.element,
+                shapeData: {
+                    text: 'after',
+                    dataModel: {
+                        horizontalAlign: undefined,
+                        doc: { body: { dataStream: 'after\r\n' } },
+                    },
+                },
+            },
+        };
+        const updateOp = drawingService.getBatchUpdateOp([updated]);
+        drawingService.applyJson1(unitId, subUnitId, updateOp.redo);
+
+        expect(drawingService.getDrawingByParam(createSearch('shape-with-text'))).toMatchObject({
+            element: {
+                shapeData: {
+                    text: 'after',
+                    dataModel: {
+                        doc: { body: { dataStream: 'after\r\n' } },
+                    },
+                },
+            },
+        });
+    });
+
+    it('treats undefined drawing properties as absent when updating nested data', () => {
+        const drawingService = createNestedDrawingService();
+        const base: NestedDrawingTestParam = {
+            ...createDrawing('connector'),
+            element: {
+                name: 'connector',
+                shapeData: { text: '' },
+                style: {
+                    dash: undefined,
+                    stroke: '#000000',
+                },
+            },
+        };
+        drawingService.applyJson1(unitId, subUnitId, drawingService.getBatchAddOp([base]).redo);
+
+        const updated: NestedDrawingTestParam = {
+            ...base,
+            element: {
+                ...base.element,
+                style: {
+                    dash: [1, 6],
+                    stroke: '#00aa55',
+                },
+            },
+        };
+        const updateOp = drawingService.getBatchUpdateOp([updated]);
+        drawingService.applyJson1(unitId, subUnitId, updateOp.redo);
+
+        expect(drawingService.getDrawingByParam(createSearch('connector'))).toMatchObject({
+            element: {
+                style: {
+                    dash: [1, 6],
+                    stroke: '#00aa55',
+                },
+            },
+        });
+    });
+
+    it('updates drawing objects with non-enumerable runtime defaults atomically', () => {
+        const drawingService = createNestedDrawingService();
+        const shapeData = { text: 'before' };
+        Object.defineProperty(shapeData, 'fontFamily', {
+            configurable: true,
+            value: 'Calibri',
+            writable: true,
+        });
+        const base: NestedDrawingTestParam = {
+            ...createDrawing('shape-with-defaults'),
+            element: {
+                name: 'shape',
+                shapeData,
+            },
+        };
+        drawingService.applyJson1(unitId, subUnitId, drawingService.getBatchAddOp([base]).redo);
+
+        const updatedShapeData = { fontFamily: 'Inter', text: 'after' };
+        const updateOp = drawingService.getBatchUpdateOp([{
+            ...base,
+            element: {
+                ...base.element,
+                shapeData: updatedShapeData,
+            },
+        }]);
+        drawingService.applyJson1(unitId, subUnitId, updateOp.redo);
+
+        const updatedDrawing = drawingService.getDrawingByParam(createSearch('shape-with-defaults'));
+        expect(updatedDrawing?.element.shapeData).toMatchObject({
+            fontFamily: 'Inter',
+            text: 'after',
+        });
+
+        drawingService.applyJson1(unitId, subUnitId, updateOp.undo);
+        const restoredShapeData = drawingService.getDrawingByParam(createSearch('shape-with-defaults'))?.element.shapeData;
+        expect(restoredShapeData).toMatchObject({ text: 'before' });
+        expect(restoredShapeData).not.toHaveProperty('fontFamily');
+    });
+
+    it('preserves previous drawing data when docs replace a subunit snapshot', () => {
+        service.registerDrawingData(unitId, {
+            [subUnitId]: {
+                data: { a: createDrawing('a', { selectable: false }) },
+                order: ['a'],
+            },
+        });
+
+        service.setDrawingData(unitId, subUnitId, {
+            a: createDrawing('a'),
+        });
+
+        expect(service.getDrawingByParam(createSearch('a'))?.selectable).toBeUndefined();
+        expect(service.getOldDrawingByParam(createSearch('a'))?.selectable).toBe(false);
+    });
+
+    it('expands grouped remove operations to include all nested drawing records', () => {
+        service.applyJson1(unitId, subUnitId, service.getBatchAddOp([
+            createDrawing('group', { drawingType: DrawingTypeEnum.DRAWING_GROUP }),
+            createDrawing('image-child', { groupId: 'group' }),
+            createDrawing('chart-child', { drawingType: DrawingTypeEnum.DRAWING_CHART, groupId: 'group' }),
+        ]).redo);
+
+        const removeOp = service.getBatchRemoveOp([createSearch('group')]);
+
+        expect(removeOp.objects).toEqual([
+            createSearch('chart-child'),
+            createSearch('image-child'),
+            createSearch('group'),
+        ]);
+    });
+
+    it('keeps batch remove operations stable for empty drawing inputs', () => {
+        expect(service.getBatchRemoveOp([])).toMatchObject({
+            unitId: '',
+            subUnitId: '',
+            objects: [],
+        });
+    });
+
+    it('deduplicates expanded remove params for grouped, normal, and missing drawings', () => {
+        service.applyJson1(unitId, subUnitId, service.getBatchAddOp([
+            createDrawing('group', { drawingType: DrawingTypeEnum.DRAWING_GROUP }),
+            createDrawing('image'),
+        ]).redo);
+        vi.spyOn(service, 'getDrawingsByGroupNested').mockReturnValue(null);
+
+        const expanded = (service as unknown as {
+            _getExpandedBatchRemoveParams: (removeParams: IDrawingSearch[]) => IDrawingSearch[];
+        })._getExpandedBatchRemoveParams([
+            createSearch('group'),
+            createSearch('group'),
+            createSearch('image'),
+            createSearch('image'),
+            createSearch('missing'),
+            createSearch('missing'),
+        ]);
+
+        expect(expanded).toEqual([
+            createSearch('group'),
+            createSearch('image'),
+            createSearch('missing'),
+        ]);
+    });
+
+    it('should manage focus, refresh and visibility notifications', () => {
+        const focused: IDrawingParam[][] = [];
+        const refreshed: IDrawingParam[][] = [];
+        const visibleUpdates: Array<Array<{ drawingId: string; visible: boolean }>> = [];
+
+        const drawing = createDrawing('a');
+        const addOp = service.getBatchAddOp([drawing]);
+        service.applyJson1(unitId, subUnitId, addOp.redo);
+
+        service.focus$.subscribe((params) => focused.push(params));
+        service.refreshTransform$.subscribe((params) => refreshed.push(params));
+        service.visible$.subscribe((params) => visibleUpdates.push(params.map(({ drawingId, visible }) => ({ drawingId, visible }))));
+
+        service.focusDrawing([createSearch('a'), createSearch('missing')]);
+        expect(focused[0].map((item) => item.drawingId)).toEqual(['a']);
+        expect(service.getFocusDrawings().map((item) => item.drawingId)).toEqual(['a']);
+
+        const transformed = createDrawing('a', {
+            transform: { left: 1, top: 2 } as NonNullable<IDrawingParam['transform']>,
+            transforms: [{ left: 3, top: 4 } as NonNullable<IDrawingParam['transform']>] as NonNullable<IDrawingParam['transforms']>,
+            isMultiTransform: BooleanNumber.TRUE,
+            behindText: true,
+            hidden: true,
+        } as Partial<IDrawingParam>);
+        service.refreshTransform([transformed]);
+
+        expect(refreshed).toEqual([[transformed]]);
+        expect(service.getDrawingByParam(createSearch('a'))).toMatchObject({
+            transform: { left: 1, top: 2 },
+            transforms: [{ left: 3, top: 4 }],
+            isMultiTransform: BooleanNumber.TRUE,
+            behindText: true,
+            hidden: true,
+        });
+
+        service.visibleNotification([{ ...createSearch('a'), visible: false }]);
+        expect(visibleUpdates).toEqual([[{ drawingId: 'a', visible: false }]]);
+
+        service.focusDrawing(null);
+        expect(focused.at(-1)).toEqual([]);
+        expect(service.getFocusDrawings()).toEqual([]);
+    });
+
+    it('refreshes cell anchors with pixel bounds and retains them when a later refresh omits them', () => {
+        const from = { row: 1, column: 2, rowOffset: 0, columnOffset: 0 };
+        const drawing = {
+            ...createDrawing('a', { transform: { left: 160, top: 20, width: 320, height: 40 } }),
+            sheetTransform: { from, to: { ...from, row: 3, column: 6 } },
+            axisAlignSheetTransform: { from, to: { ...from, row: 3, column: 6 } },
+        };
+        service.applyJson1(unitId, subUnitId, service.getBatchAddOp([drawing]).redo);
+        const refreshed = {
+            ...drawing,
+            sheetTransform: { from, to: { ...from, row: 3, column: 10 } },
+            axisAlignSheetTransform: { from, to: { ...from, row: 3, column: 10 } },
+        };
+
+        service.refreshTransform([refreshed]);
+        expect(service.getDrawingByParam(createSearch('a'))).toMatchObject(refreshed);
+
+        service.refreshTransform([createDrawing('a', { transform: { ...drawing.transform, left: 200 } })]);
+        expect(service.getDrawingByParam(createSearch('a'))).toMatchObject({
+            ...refreshed,
+            transform: { ...drawing.transform, left: 200 },
+        });
+    });
+
+    it('does not add omitted multi-transform fields during a transform refresh', () => {
+        const drawing = createDrawing('a', { transform: { left: 0, top: 0 } });
+        service.applyJson1(unitId, subUnitId, service.getBatchAddOp([drawing]).redo);
+
+        service.refreshTransform([{ ...drawing, transform: { left: 1, top: 2 } }]);
+
+        expect(service.getDrawingByParam(createSearch('a'))).toEqual({
+            ...drawing,
+            transform: { left: 1, top: 2 },
+        });
+        expect(Object.hasOwn(service.getDrawingByParam(createSearch('a'))!, 'transforms')).toBe(false);
+        expect(Object.hasOwn(service.getDrawingByParam(createSearch('a'))!, 'isMultiTransform')).toBe(false);
+    });
+
+    it('should update drawing order in all directions', () => {
+        service.registerDrawingData(unitId, {
+            [subUnitId]: {
+                data: {
+                    a: createDrawing('a'),
+                    b: createDrawing('b'),
+                    c: createDrawing('c'),
+                },
+                order: ['a', 'b', 'c'],
+            },
+        });
+
+        service.applyJson1(unitId, subUnitId, service.getForwardDrawingsOp({ unitId, subUnitId, drawingIds: ['a'] }).redo);
+        expect(service.getDrawingOrder(unitId, subUnitId)).toEqual(['b', 'a', 'c']);
+
+        service.applyJson1(unitId, subUnitId, service.getBackwardDrawingOp({ unitId, subUnitId, drawingIds: ['a'] }).redo);
+        expect(service.getDrawingOrder(unitId, subUnitId)).toEqual(['a', 'b', 'c']);
+
+        service.applyJson1(unitId, subUnitId, service.getFrontDrawingsOp({ unitId, subUnitId, drawingIds: ['a'] }).redo);
+        expect(service.getDrawingOrder(unitId, subUnitId)).toEqual(['b', 'c', 'a']);
+
+        service.applyJson1(unitId, subUnitId, service.getBackDrawingsOp({ unitId, subUnitId, drawingIds: ['a'] }).redo);
+        expect(service.getDrawingOrder(unitId, subUnitId)).toEqual(['a', 'b', 'c']);
+    });
+
+    it('should group, ungroup and expose feature notifications and flags', () => {
+        const addOp = service.getBatchAddOp([
+            createDrawing('child-1'),
+            createDrawing('child-2'),
+        ]);
+        service.applyJson1(unitId, subUnitId, addOp.redo);
+
+        const groupNotifications: IDrawingSearch[][] = [];
+        const pluginUpdates: IDrawingParam[][] = [];
+        const pluginAdds: IDrawingParam[][] = [];
+        const pluginRemoves: IDrawingSearch[][] = [];
+        const pluginOrderUpdates: string[][] = [];
+        const pluginGroupUpdates: string[][] = [];
+        const pluginUngroupUpdates: string[][] = [];
+
+        service.update$.subscribe((params) => groupNotifications.push(params));
+        service.featurePluginUpdate$.subscribe((params) => pluginUpdates.push(params));
+        service.featurePluginAdd$.subscribe((params) => pluginAdds.push(params));
+        service.featurePluginRemove$.subscribe((params) => pluginRemoves.push(params));
+        service.featurePluginOrderUpdate$.subscribe((params) => pluginOrderUpdates.push(params.drawingIds));
+        service.featurePluginGroupUpdate$.subscribe((params) => pluginGroupUpdates.push(params.map((item) => item.parent.drawingId)));
+        service.featurePluginUngroupUpdate$.subscribe((params) => pluginUngroupUpdates.push(params.map((item) => item.parent.drawingId)));
+
+        const groupParent = createDrawing('group', { drawingType: DrawingTypeEnum.DRAWING_GROUP });
+        const groupedChildren = [
+            createDrawing('child-1', { groupId: 'group' }),
+            createDrawing('child-2', { groupId: 'group' }),
+        ];
+        const groupParams = [{
+            parent: groupParent,
+            children: groupedChildren,
+        }];
+
+        service.applyJson1(unitId, subUnitId, service.getGroupDrawingOp(groupParams).redo);
+        expect(service.getDrawingByParam(createSearch('group'))).toMatchObject(groupParent);
+        expect(service.getDrawingsByGroup(createSearch('group')).map((item) => item.drawingId).sort()).toEqual(['child-1', 'child-2']);
+
+        const ungroupParams = [{
+            parent: groupParent,
+            children: [createDrawing('child-1'), createDrawing('child-2')],
+        }];
+        service.applyJson1(unitId, subUnitId, service.getUngroupDrawingOp(ungroupParams).redo);
+        expect(service.getDrawingByParam(createSearch('group'))).toBeUndefined();
+
+        service.updateNotification([createSearch('child-1')]);
+        service.featurePluginUpdateNotification([createDrawing('child-1')]);
+        service.featurePluginAddNotification([createDrawing('child-2')]);
+        service.featurePluginRemoveNotification([createSearch('child-2')]);
+        service.featurePluginOrderUpdateNotification({ unitId, subUnitId, drawingIds: ['child-1'], arrangeType: 0 });
+        service.featurePluginGroupUpdateNotification(groupParams);
+        service.featurePluginUngroupUpdateNotification(ungroupParams);
+
+        expect(groupNotifications).toEqual([[createSearch('child-1')]]);
+        expect(pluginUpdates[0].map((item) => item.drawingId)).toEqual(['child-1']);
+        expect(pluginAdds[0].map((item) => item.drawingId)).toEqual(['child-2']);
+        expect(pluginRemoves).toEqual([[createSearch('child-2')]]);
+        expect(pluginOrderUpdates).toEqual([['child-1']]);
+        expect(pluginGroupUpdates).toEqual([['group']]);
+        expect(pluginUngroupUpdates).toEqual([['group']]);
+
+        expect(service.getDrawingVisible()).toBe(true);
+        expect(service.getDrawingEditable()).toBe(true);
+
+        service.setDrawingVisible(false);
+        service.setDrawingEditable(false);
+
+        expect(service.getDrawingVisible()).toBe(false);
+        expect(service.getDrawingEditable()).toBe(false);
+
+        service.dispose();
+        expect(service.drawingManagerData).toEqual({});
+    });
+});
+
+describe('DrawingManagerService', () => {
+    it('uses the shared drawing manager behavior to register and remove drawings by unit', () => {
+        const injector = new Injector();
+        injector.add([DrawingManagerService]);
+        const service = injector.get(DrawingManagerService);
+        const removed: unknown[] = [];
+        service.remove$.subscribe((value) => removed.push(value));
+
+        service.registerDrawingData('unit-1', {
+            'sheet-1': {
+                data: {
+                    image1: { unitId: 'unit-1', subUnitId: 'sheet-1', drawingId: 'image1', drawingType: DrawingTypeEnum.DRAWING_IMAGE },
+                },
+                order: ['image1'],
+            },
+        });
+        expect(service.getDrawingData('unit-1', 'sheet-1')).toHaveProperty('image1');
+
+        service.removeDrawingDataForUnit('unit-1');
+        expect(service.getDrawingDataForUnit('unit-1')).toEqual({});
+        expect(removed).toEqual([[{ unitId: 'unit-1', subUnitId: 'sheet-1', drawingId: 'image1' }]]);
+    });
+});

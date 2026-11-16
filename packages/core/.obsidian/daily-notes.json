@@ -1,0 +1,6 @@
+{
+  "folder": "daily-notes",
+  "template": "Templates/daily-note.md",
+  "format": "YYYY-MM-DD",
+  "startAtWeekStart": false
+}

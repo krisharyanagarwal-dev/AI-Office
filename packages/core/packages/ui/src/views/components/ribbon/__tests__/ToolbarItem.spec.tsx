@@ -1,0 +1,484 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type { ComponentType, ReactElement } from 'react';
+import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
+import {
+    ContextService,
+    ICommandService,
+    IContextService,
+    ILogService,
+    Injector,
+    IUniverInstanceService,
+    LocaleService,
+    UniverInstanceService,
+} from '@univerjs/core';
+import { BehaviorSubject, Subject } from 'rxjs';
+import { afterEach, describe, expect, it } from 'vitest';
+import type { IIconProps } from '../../../../common/icon-manager';
+import { ComponentManager } from '../../../../common/component-manager';
+import { IconManager } from '../../../../common/icon-manager';
+import { ILayoutService } from '../../../../services/layout/layout.service';
+import { MenuItemType } from '../../../../services/menu/menu';
+import { IMenuManagerService } from '../../../../services/menu/menu-manager.service';
+import { IPlatformService, PlatformService } from '../../../../services/platform/platform.service';
+import { IUIRuntimeScopeService, UIRuntimeScopeService } from '../../../../services/runtime-scope/ui-runtime-scope.service';
+import { IShortcutService, ShortcutService } from '../../../../services/shortcut/shortcut.service';
+import { connectInjector } from '../../../../utils/di';
+import { ToolbarItem } from '../ToolbarItem';
+
+class TestLocaleService {
+    t(key: string) {
+        return key;
+    }
+}
+
+class TestCommandService {
+    calls: Array<{ commandId: string; params?: Record<string, unknown> }> = [];
+
+    executeCommand(commandId: string, params?: Record<string, unknown>): void {
+        this.calls.push({ commandId, params });
+    }
+}
+
+class TestLayoutService {
+    focus(): void {}
+
+    checkElementInCurrentContainers(): boolean {
+        return true;
+    }
+}
+
+class TestMenuManagerService {
+    readonly menuChanged$ = new Subject<void>();
+
+    getMenuByPositionKey() {
+        return [];
+    }
+}
+
+class TestLogService {
+    warn(): void {}
+}
+
+const testInjectors: Injector[] = [];
+
+function renderWithDependencies(element: ReactElement) {
+    const injector = new Injector();
+    testInjectors.push(injector);
+    injector.add([LocaleService, { useClass: TestLocaleService as never }]);
+    injector.add([ICommandService, { useClass: TestCommandService as never }]);
+    injector.add([ILayoutService, { useClass: TestLayoutService as never }]);
+    injector.add([IContextService, { useClass: ContextService }]);
+    injector.add([IUniverInstanceService, { useClass: UniverInstanceService }]);
+    injector.add([IPlatformService, { useClass: PlatformService }]);
+    injector.add([IUIRuntimeScopeService, { useClass: UIRuntimeScopeService }]);
+    injector.add([IShortcutService, { useClass: ShortcutService }]);
+    injector.add([IMenuManagerService, { useClass: TestMenuManagerService as never }]);
+    injector.add([ILogService, { useClass: TestLogService as never }]);
+    injector.add([ComponentManager]);
+    injector.add([IconManager]);
+    injector.get(ComponentManager).register('TestDynamicOption', ({ onChange, className }: { onChange: (value: string) => void; className?: string }) => (
+        <button type="button" className={className} onClick={() => onChange('dynamic-value')}>Choose dynamic value</button>
+    ));
+
+    injector.get(IconManager).register({
+        TestIcon: ({ className, style, extend }: IIconProps) => (
+            <span className={className} data-color-channel={extend?.colorChannel1} data-icon="test" style={style} />
+        ),
+    });
+
+    const ConnectedTestRoot = connectInjector(() => element, injector) as ComponentType;
+    return {
+        ...render(<ConnectedTestRoot />),
+        commandService: injector.get(ICommandService) as unknown as TestCommandService,
+    };
+}
+
+afterEach(() => {
+    cleanup();
+    testInjectors.forEach((injector) => injector.dispose());
+    testInjectors.length = 0;
+});
+
+describe('ToolbarItem', () => {
+    it('opens a selector menu from its keyboard-focusable trigger', async () => {
+        const { container, findByText } = renderWithDependencies(
+            <ToolbarItem
+                id="test-keyboard-selector"
+                type={MenuItemType.SELECTOR}
+                tooltip="Format"
+                icon="TestIcon"
+                selections={[{ label: 'Format rows', value: 'row' }]}
+            />
+        );
+        const trigger = container.querySelector('.univer-toolbar-selector-root') as HTMLElement;
+
+        expect(trigger.getAttribute('role')).toBe('button');
+        expect(trigger.getAttribute('tabindex')).toBe('0');
+        trigger.focus();
+        expect(document.activeElement).toBe(trigger);
+        fireEvent.keyDown(trigger, { key: 'Enter' });
+
+        expect(await findByText('Format rows')).toBeTruthy();
+    });
+
+    it('opens a custom selector from its named arrow without nesting interactive controls', async () => {
+        const { container, getByRole, findByText } = renderWithDependencies(
+            <ToolbarItem
+                tooltip="Format"
+                id="test-custom-selector"
+                type={MenuItemType.SELECTOR}
+                label={{ name: 'TestDynamicOption' }}
+                selections={[{ label: 'Format rows', value: 'row' }]}
+            />
+        );
+        const trigger = container.querySelector('.univer-toolbar-selector-root') as HTMLElement;
+
+        expect(trigger.getAttribute('role')).toBeNull();
+        expect(trigger.getAttribute('tabindex')).toBeNull();
+        expect(trigger.querySelector('button button')).toBeNull();
+        const arrow = getByRole('button', { name: 'Format' });
+        arrow.focus();
+        fireEvent.keyDown(arrow, { key: 'Enter' });
+        expect(await findByText('Format rows')).toBeTruthy();
+        fireEvent.keyDown(getByRole('menu'), { key: 'Escape' });
+        await waitFor(() => expect(document.activeElement).toBe(arrow));
+    });
+
+    it('closes open selector options when the parent becomes disabled', async () => {
+        const disabled$ = new BehaviorSubject(false);
+        const { container, findByText, queryByText } = renderWithDependencies(
+            <ToolbarItem
+                id="test-selector"
+                type={MenuItemType.SELECTOR}
+                icon="TestIcon"
+                title="Format"
+                selections={[{ label: 'Format rows', value: 'row' }]}
+                disabled$={disabled$}
+            />
+        );
+
+        fireEvent.pointerDown(container.querySelector('.univer-toolbar-selector-root') as HTMLElement, {
+            button: 0,
+            ctrlKey: false,
+        });
+        expect(await findByText('Format rows')).toBeTruthy();
+
+        act(() => disabled$.next(true));
+        await waitFor(() => expect(queryByText('Format rows')).toBeNull());
+    });
+
+    it('shows a title for a large Grid button', () => {
+        const { getByText } = renderWithDependencies(
+            <ToolbarItem
+                id="test-grid-button"
+                type={MenuItemType.BUTTON}
+                icon="TestIcon"
+                title="Format"
+                grid
+                large
+                showLabel
+            />
+        );
+
+        expect(getByText('Format')).toBeTruthy();
+    });
+
+    it('uses the tooltip as the accessible name for an icon-only button', () => {
+        const { getByRole } = renderWithDependencies(
+            <ToolbarItem
+                id="test-icon-button"
+                type={MenuItemType.BUTTON}
+                icon="TestIcon"
+                tooltip="Undo"
+            />
+        );
+
+        expect(getByRole('button', { name: 'Undo' })).toBeTruthy();
+    });
+
+    it('shows a title for a large Grid button selector', () => {
+        const { getByText } = renderWithDependencies(
+            <ToolbarItem
+                id="test-grid-selector"
+                type={MenuItemType.BUTTON_SELECTOR}
+                icon="TestIcon"
+                title="Insert"
+                selections={[{ label: 'Image', value: 'image' }]}
+                grid
+                large
+                showLabel
+            />
+        );
+
+        expect(getByText('Insert')).toBeTruthy();
+    });
+
+    it('hides the title of a large Grid selector when showLabel is false', () => {
+        const { queryByText } = renderWithDependencies(
+            <ToolbarItem
+                id="test-grid-selector"
+                type={MenuItemType.SELECTOR}
+                icon="TestIcon"
+                title="Common Functions"
+                selections={[{ label: 'SUM', value: 'SUM' }]}
+                grid
+                large
+            />
+        );
+
+        expect(queryByText('Common Functions')).toBeNull();
+    });
+
+    it('keeps the title of a regular Grid selector', () => {
+        const { getByText } = renderWithDependencies(
+            <ToolbarItem
+                id="test-grid-selector"
+                type={MenuItemType.SELECTOR}
+                icon="TestIcon"
+                title="Financial"
+                selections={[{ label: 'FV', value: 'FV' }]}
+                grid
+            />
+        );
+
+        expect(getByText('Financial')).toBeTruthy();
+    });
+
+    it('keeps icon-only overflow selectors named and keyboard-operable without visible titles', async () => {
+        const { getByRole, findByText } = renderWithDependencies(
+            <ToolbarItem
+                id="test-overflow-selector"
+                type={MenuItemType.SELECTOR}
+                icon="TestIcon"
+                title="Alignment"
+                selections={[{ label: 'Align left', value: 'left' }]}
+                grid
+                overflow
+            />
+        );
+        const trigger = getByRole('button', { name: 'Alignment' });
+        expect(trigger.textContent).toBe('');
+        trigger.focus();
+        fireEvent.keyDown(trigger, { key: 'Enter' });
+        expect(await findByText('Align left')).toBeTruthy();
+    });
+
+    it('does not wrap an interactive custom button label in another button', () => {
+        const { container } = renderWithDependencies(
+            <ToolbarItem
+                id="test-custom-button"
+                type={MenuItemType.BUTTON}
+                label={{ name: 'TestDynamicOption' }}
+                grid
+            />
+        );
+
+        expect(container.querySelector('[data-u-command="test-custom-button"]')).toBeTruthy();
+        expect(container.querySelector('button button')).toBeNull();
+    });
+
+    it('applies a configured Grid icon size', () => {
+        const { container } = renderWithDependencies(
+            <ToolbarItem
+                id="test-grid-sized-icon"
+                type={MenuItemType.BUTTON}
+                icon="TestIcon"
+                grid
+                iconSize={18}
+            />
+        );
+
+        const icon = container.querySelector('[data-icon="test"]') as HTMLElement;
+        expect(icon.style.width).toBe('18px');
+        expect(icon.style.height).toBe('18px');
+    });
+
+    it('uses the tooltip as the label for a compact Grid button selector when requested', () => {
+        const { getByText } = renderWithDependencies(
+            <ToolbarItem
+                id="test-grid-button-selector"
+                type={MenuItemType.BUTTON_SELECTOR}
+                icon="TestIcon"
+                tooltip="Crosshair Highlight"
+                selections={[{ label: 'Green', value: 'green' }]}
+                grid
+                showLabel
+            />
+        );
+
+        expect(getByText('Crosshair Highlight')).toBeTruthy();
+    });
+
+    it('uses the tooltip as the Grid label when title is absent', () => {
+        const { getByText } = renderWithDependencies(
+            <ToolbarItem
+                id="test-grid-tooltip-label"
+                type={MenuItemType.BUTTON}
+                icon="TestIcon"
+                tooltip="Protect"
+                grid
+                large
+                showLabel
+            />
+        );
+
+        expect(getByText('Protect')).toBeTruthy();
+    });
+
+    it('executes the primary action once before a native double-click secondary action', () => {
+        const { getByRole, commandService } = renderWithDependencies(
+            <ToolbarItem id="paint-once" subId="paint-continuous" type={MenuItemType.BUTTON} title="Paint" />
+        );
+        const button = getByRole('button', { name: 'Paint' });
+        fireEvent.click(button, { detail: 1 });
+        fireEvent.click(button, { detail: 2 });
+        fireEvent.doubleClick(button, { detail: 2 });
+        expect(commandService.calls.map((call) => call.commandId)).toEqual(['paint-once', 'paint-continuous']);
+    });
+
+    it('resolves menu params when clicking a button', () => {
+        const { getByRole, commandService } = renderWithDependencies(
+            <ToolbarItem
+                id="test-button"
+                type={MenuItemType.BUTTON}
+                title="Dynamic params"
+                params={() => ({ unitId: 'unit-1' })}
+            />
+        );
+
+        fireEvent.click(getByRole('button', { name: 'Dynamic params' }));
+
+        expect(commandService.calls).toEqual([
+            {
+                commandId: 'test-button',
+                params: { unitId: 'unit-1' },
+            },
+        ]);
+    });
+
+    it('forwards menu params when clicking a button selector main action', () => {
+        const rule = { type: 'checkbox' };
+        const { container, commandService } = renderWithDependencies(
+            <ToolbarItem
+                id="test-button-selector"
+                type={MenuItemType.BUTTON_SELECTOR}
+                icon="TestIcon"
+                title="Checkbox"
+                params={{ rule }}
+                selections={[]}
+            />
+        );
+
+        fireEvent.click(container.querySelector('.univer-toolbar-button-selector-main') as HTMLElement);
+
+        expect(commandService.calls).toEqual([
+            {
+                commandId: 'test-button-selector',
+                params: { rule },
+            },
+        ]);
+    });
+
+    it('overrides a button selector icon color without changing its command value', () => {
+        const { container, commandService } = renderWithDependencies(
+            <ToolbarItem
+                id="test-color-selector"
+                type={MenuItemType.BUTTON_SELECTOR}
+                icon="TestIcon"
+                iconColor="var(--univer-primary-600)"
+                value$={new BehaviorSubject('#ffffff')}
+                selections={[]}
+            />
+        );
+
+        expect(container.querySelector('[data-icon="test"]')?.getAttribute('data-color-channel'))
+            .toBe('var(--univer-primary-600)');
+
+        fireEvent.click(container.querySelector('.univer-toolbar-button-selector-main') as HTMLElement);
+        expect(commandService.calls).toEqual([{
+            commandId: 'test-color-selector',
+            params: { value: '#ffffff' },
+        }]);
+    });
+
+    it('resolves option params with a value emitted by a custom option', async () => {
+        const { container, findByRole, commandService } = renderWithDependencies(
+            <ToolbarItem
+                id="test-dynamic-selector"
+                type={MenuItemType.SUBITEMS}
+                icon="TestIcon"
+                title="Dropdown"
+                slot
+                selectionsCommandId="insert-dynamic-rule"
+                selections={[
+                    {
+                        id: 'insert-dynamic-rule',
+                        label: {
+                            name: 'TestDynamicOption',
+                            selectable: false,
+                        },
+                        params: (value?: string | number) => ({ rule: { formula1: value } }),
+                    },
+                ]}
+            />
+        );
+
+        fireEvent.click(container.querySelector('.univer-toolbar-selector-root') as HTMLElement);
+        fireEvent.click(await findByRole('button', { name: 'Choose dynamic value' }));
+
+        expect(commandService.calls).toEqual([
+            {
+                commandId: 'insert-dynamic-rule',
+                params: { rule: { formula1: 'dynamic-value' } },
+            },
+        ]);
+    });
+
+    it('forwards static option params without wrapping them as a value', async () => {
+        const { container, findByRole, commandService } = renderWithDependencies(
+            <ToolbarItem
+                id="test-static-selector"
+                type={MenuItemType.SUBITEMS}
+                icon="TestIcon"
+                title="Dropdown"
+                slot
+                selectionsCommandId="insert-rule"
+                selections={[
+                    {
+                        id: 'clear-rule',
+                        label: {
+                            name: 'TestDynamicOption',
+                            selectable: false,
+                        },
+                        params: { types: ['list'] },
+                    },
+                ]}
+            />
+        );
+
+        fireEvent.click(container.querySelector('.univer-toolbar-selector-root') as HTMLElement);
+        fireEvent.click(await findByRole('button', { name: 'Choose dynamic value' }));
+
+        expect(commandService.calls).toEqual([
+            {
+                commandId: 'clear-rule',
+                params: { types: ['list'] },
+            },
+        ]);
+    });
+});

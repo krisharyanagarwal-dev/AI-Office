@@ -1,0 +1,149 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type { IMutationInfo, IRange, ObjectMatrix } from '@univerjs/core';
+import type { ISetWorksheetRowAutoHeightMutationParams } from '@univerjs/sheets';
+import { Disposable, generateRandomId, Inject, IUniverInstanceService } from '@univerjs/core';
+import { IRenderManagerService } from '@univerjs/engine-render';
+import {
+    CancelMarkDirtyRowAutoHeightOperation,
+    getSheetCommandTarget,
+    MarkDirtyRowAutoHeightOperation,
+    SetWorksheetRowAutoHeightMutation,
+    SetWorksheetRowAutoHeightMutationFactory,
+    SheetInterceptorService,
+} from '@univerjs/sheets';
+import { SheetSkeletonManagerService } from '../services/sheet-skeleton-manager.service';
+
+export class AutoHeightController extends Disposable {
+    constructor(
+        @IRenderManagerService private readonly _renderManagerService: IRenderManagerService,
+        @Inject(SheetInterceptorService) private readonly _sheetInterceptorService: SheetInterceptorService,
+        @Inject(IUniverInstanceService) private readonly _univerInstanceService: IUniverInstanceService
+    ) {
+        super();
+        this._initialize();
+    }
+
+    private _processLazyAutoHeight(redoUndoItem: { redos: IMutationInfo[]; undos: IMutationInfo[] }, unitId: string, subUnitId: string, lazyAutoHeightRanges?: IRange[]) {
+        if (lazyAutoHeightRanges?.length) {
+            const redo = {
+                id: MarkDirtyRowAutoHeightOperation.id,
+                params: {
+                    unitId,
+                    subUnitId,
+                    ranges: lazyAutoHeightRanges,
+                    id: generateRandomId(),
+                },
+                options: {
+                    onlyLocal: true,
+                },
+            };
+            const undo = {
+                id: CancelMarkDirtyRowAutoHeightOperation.id,
+                params: {
+                    unitId,
+                    subUnitId,
+                    id: redo.params.id,
+                },
+                options: {
+                    onlyLocal: true,
+                },
+            };
+
+            return {
+                redos: [...redoUndoItem.redos, redo],
+                undos: [...redoUndoItem.undos, undo],
+            };
+        }
+
+        return redoUndoItem;
+    }
+
+    getUndoRedoParamsOfAutoHeight(
+        ranges: IRange[],
+        subUnitIdParam?: string,
+        currentCellHeights?: ObjectMatrix<number>,
+        unitIdParam?: string
+    ): { redos: IMutationInfo[]; undos: IMutationInfo[] } {
+        const target = getSheetCommandTarget(this._univerInstanceService, { unitId: unitIdParam, subUnitId: subUnitIdParam });
+        if (!target) {
+            return { redos: [], undos: [] };
+        }
+
+        const { unitId, subUnitId, worksheet } = target;
+        const render = this._renderManagerService.getRenderUnitById(unitId);
+        const skeleton = render?.with<SheetSkeletonManagerService>(SheetSkeletonManagerService).ensureSkeleton(subUnitId);
+        if (!skeleton) {
+            return {
+                redos: [],
+                undos: [],
+            };
+        }
+        const rowsAutoHeightInfo = skeleton.calculateAutoHeightInRange(ranges, currentCellHeights);
+
+        const updatedRowsAutoHeightInfo = rowsAutoHeightInfo.filter((info) => {
+            const { row, autoHeight } = info;
+            if (!autoHeight) {
+                return false;
+            }
+            const currentRowHeight = worksheet.getRowHeight(row);
+            if (currentRowHeight === autoHeight) {
+                return false;
+            }
+            return true;
+        });
+
+        if (updatedRowsAutoHeightInfo.length === 0) {
+            return {
+                redos: [],
+                undos: [],
+            };
+        }
+
+        const redoParams: ISetWorksheetRowAutoHeightMutationParams = {
+            subUnitId,
+            unitId,
+            rowsAutoHeightInfo: updatedRowsAutoHeightInfo,
+        };
+        const undoParams: ISetWorksheetRowAutoHeightMutationParams = SetWorksheetRowAutoHeightMutationFactory(redoParams, worksheet);
+        return {
+            undos: [
+                {
+                    id: SetWorksheetRowAutoHeightMutation.id,
+                    params: undoParams,
+                },
+            ],
+            redos: [
+                {
+                    id: SetWorksheetRowAutoHeightMutation.id,
+                    params: redoParams,
+                },
+            ],
+        };
+    }
+
+    private _initialize() {
+        this.disposeWithMe(this._sheetInterceptorService.interceptAutoHeight({
+            getMutations: (info) => {
+                const { unitId, subUnitId, ranges, autoHeightRanges, lazyAutoHeightRanges, cellHeights } = info;
+
+                const undoRedoItem = this.getUndoRedoParamsOfAutoHeight(autoHeightRanges ?? ranges, subUnitId, cellHeights, unitId);
+                return this._processLazyAutoHeight(undoRedoItem, unitId, subUnitId, lazyAutoHeightRanges);
+            },
+        }));
+    }
+}

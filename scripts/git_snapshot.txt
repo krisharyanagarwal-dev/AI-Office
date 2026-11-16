@@ -1,0 +1,90 @@
+GIT_COMMIT=48070e9738174ee2fe297ef63d5757f5259596ff
+
+GIT_STATUS:
+ M README.md
+ M launchd/com.aryan.openalice-algo20.plist
+ M launchd/com.aryan.openalice-candles.plist
+ M launchd/com.aryan.openalice-freetrader.plist
+ M launchd/com.aryan.openalice-honesty.plist
+ M launchd/com.aryan.openalice-journal.plist
+ M launchd/com.aryan.openalice-legs.plist
+ M launchd/com.aryan.openalice-pipeline.plist
+ M launchd/com.aryan.openalice-pubserver.plist
+ M launchd/com.aryan.openalice-screener.plist
+ M launchd/com.aryan.openalice-tape.plist
+ M launchd/com.aryan.openalice-tournament.plist
+ M launchd/com.aryan.openalice-trades.plist
+ M launchd/com.aryan.openalice-watchdog.plist
+ M services/free_harness.py
+ M services/oa_algo20.py
+ M services/oa_freetrader.py
+ M services/oa_legs_runner.py
+ M ui/public/chart.html
+ M ui/public/index.html
+ M ui/public/legs.html
+?? .DS_Store
+?? 24X7_OPERATION_CHECKPOINT.json
+?? ARCHITECTURE.md
+?? AUDIT_TOOL_FLOW.md
+?? CHANGES_SUMMARY.md
+?? FINAL_SUMMARY.md
+?? FINAL_VERIFICATION.md
+?? IMPLEMENTATION_PLAN.md
+?? LEGS_PNL_SUMMARY.md
+?? MULTINATIONAL_QUANT_PLAN.md
+?? NEXT_STEPS.md
+?? SYSTEM_READY.md
+?? TRANSFORMATION_ROADMAP.md
+?? TRANSFORMATION_STATUS.md
+?? TRANSFORMATION_UPDATE.md
+?? VERIFICATION_NOTES.md
+?? __pycache__/
+?? anthropic_bridge.pid
+?? bin/launch-openalice.sh
+?? bin/oa-model
+?? bin/oa-start
+?? bin/start-openalice.sh
+?? docs/
+?? graphify-out/
+?? kimi_k3_signal.py
+?? kimi_k3_signal_fixed.py
+?? kimi_k3_signal_json.py
+?? localai/
+?? logs/
+?? markets.py
+?? migrate_legs_state.py
+?? office/
+?? ollama.pid
+?? scripts/
+?? services/.DS_Store
+?? services/README.md
+?? services/_archive/
+?? services/anthropic_bridge.py
+?? services/free_harness_server.py
+?? services/intelligent_router.py
+?? services/leg_base.py
+?? services/market_data.py
+?? services/ml_leg.py
+?? services/oa_scalp100.py
+?? services/rate_limit_controller.py
+?? services/stat_arb_leg.py
+?? services/ws_server.py
+?? start_free_harness.sh
+?? state/
+?? stop_free_harness.sh
+?? symbol_selector.py
+?? "terminal wire) -rwenden. The response should include the count and total amount.
+
+I want you to act as a text adventure game where I am the main character. I will type commands, and you will describe whatisthis"
+?? terminal.py
+?? test_nim_failover.py
+?? test_system.py
+?? tests/
+?? trading_terminal/
+?? trading_terminal_backup_20260912_030545/
+?? ui/.DS_Store
+?? ui/public/candles.json
+?? ui/public/candles_1m.json
+?? ui/public/candles_5m.json
+?? ui/public/dashboard.html
+?? use_free_harness.py

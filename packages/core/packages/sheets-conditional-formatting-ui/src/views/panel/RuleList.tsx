@@ -1,0 +1,382 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type { IRange, Workbook } from '@univerjs/core';
+import type { ISelectProps } from '@univerjs/design';
+import type {
+    IConditionFormattingRule,
+    IDeleteCfCommandParams,
+    IMoveCfCommandParams,
+} from '@univerjs/sheets-conditional-formatting';
+import type { ComponentType } from 'react';
+import {
+    ICommandService,
+    Injector,
+    IUniverInstanceService,
+    LocaleService,
+    Rectangle,
+    UniverInstanceType,
+} from '@univerjs/core';
+import { Checkbox, clsx, DraggableList, Select, Tooltip } from '@univerjs/design';
+import { serializeRange } from '@univerjs/engine-formula';
+import { DeleteIcon, GripVerticalIcon, IncreaseIcon } from '@univerjs/icons';
+import {
+    checkRangesEditablePermission,
+    SetSelectionsOperation,
+    SetWorksheetActiveOperation,
+    SheetsSelectionsService,
+} from '@univerjs/sheets';
+import {
+    AddConditionalRuleMutation,
+    CFRuleType,
+    ClearWorksheetCfCommand,
+    ConditionalFormattingRuleModel,
+    DeleteCfCommand,
+    DeleteConditionalRuleMutation,
+    MoveCfCommand,
+    MoveConditionalRuleMutation,
+    SetConditionalRuleMutation,
+} from '@univerjs/sheets-conditional-formatting';
+import { useHighlightRange } from '@univerjs/sheets-ui';
+import { useDependency, useObservable } from '@univerjs/ui';
+import { useMemo, useState } from 'react';
+import { debounceTime, filter, map, merge, Observable, share, startWith } from 'rxjs';
+import type { LocaleKey } from '../../locale/types';
+import { ConditionalFormattingI18nController } from '../../controllers/cf.i18n.controller';
+import { getRuleDescribe } from '../../utils/get-rule-describe';
+import { ConditionalFormattingRulePreview } from '../ConditionalFormattingRulePreview';
+
+export interface IRuleListProps {
+    onClick: (rule: IConditionFormattingRule) => void;
+    onCreate: () => void;
+    SelectComponent?: ComponentType<ISelectProps>;
+};
+
+export function RuleList(props: IRuleListProps) {
+    const { SelectComponent = Select } = props;
+    const { onClick } = props;
+    const conditionalFormattingRuleModel = useDependency(ConditionalFormattingRuleModel);
+    const univerInstanceService = useDependency(IUniverInstanceService);
+    const selectionManagerService = useDependency(SheetsSelectionsService);
+    const commandService = useDependency(ICommandService);
+    const localeService = useDependency(LocaleService);
+    const injector = useDependency(Injector);
+
+    const conditionalFormattingI18nController = useDependency(ConditionalFormattingI18nController);
+
+    const workbook = useObservable(
+        () => univerInstanceService.getCurrentTypeOfUnit$<Workbook>(UniverInstanceType.UNIVER_SHEET),
+        undefined,
+        undefined,
+        []
+    )!;
+    const unitId = workbook.getUnitId();
+    const worksheet = workbook.getActiveSheet();
+
+    const subUnitId = worksheet.getSheetId();
+
+    const [currentRuleRanges, setCurrentRuleRanges] = useState<IRange[]>([]);
+    const [selectValue, setSelectValue] = useState('2');
+    const [draggingId, setDraggingId] = useState<string>('');
+
+    const selectOption = [
+        { label: localeService.t<LocaleKey>('sheets-conditional-formatting-ui.panel.workSheet'), value: '2' },
+        { label: localeService.t<LocaleKey>('sheets-conditional-formatting-ui.panel.selectedRange'), value: '1' },
+    ];
+
+    const getRuleList = () => {
+        const ruleList = conditionalFormattingRuleModel.getSubunitRules(unitId, subUnitId);
+        if (!ruleList || !ruleList.length) {
+            return [];
+        }
+        if (selectValue === '1') {
+            const selection = selectionManagerService.getCurrentLastSelection();
+            if (!selection) {
+                return [];
+            }
+            const range = selection.range;
+            const _ruleList = ruleList.filter((rule) => {
+                return rule.ranges.some((ruleRange) => Rectangle.intersects(ruleRange, range));
+            });
+            return _ruleList;
+        } else if (selectValue === '2') {
+            return [...ruleList];
+        }
+        return [];
+    };
+
+    const ruleList = useObservable(
+        () => {
+            const commandEvent$ = new Observable<'immediate' | 'debounced'>((subscriber) => {
+                const commandList = [
+                    SetSelectionsOperation.id,
+                    AddConditionalRuleMutation.id,
+                    SetConditionalRuleMutation.id,
+                    DeleteConditionalRuleMutation.id,
+                    MoveConditionalRuleMutation.id,
+                ];
+                const disposable = commandService.onCommandExecuted((commandInfo) => {
+                    if (commandInfo.id === SetWorksheetActiveOperation.id) {
+                        subscriber.next('immediate');
+                        return;
+                    }
+
+                    const commandUnitId = (commandInfo.params as { unitId?: string } | undefined)?.unitId;
+                    if (selectValue === '1' && commandList.includes(commandInfo.id) && commandUnitId === unitId) {
+                        subscriber.next('debounced');
+                    }
+                });
+                return () => disposable.dispose();
+            }).pipe(share());
+
+            return merge(
+                conditionalFormattingRuleModel.$ruleChange,
+                commandEvent$.pipe(filter((event) => event === 'immediate')),
+                commandEvent$.pipe(
+                    filter((event) => event === 'debounced'),
+                    debounceTime(16)
+                )
+            ).pipe(
+                map(getRuleList),
+                startWith(getRuleList())
+            );
+        },
+        [],
+        false,
+        [commandService, conditionalFormattingRuleModel, selectValue, subUnitId, unitId]
+    );
+
+    useHighlightRange(currentRuleRanges);
+
+    const handleDelete = (rule: IConditionFormattingRule) => {
+        const unitId = univerInstanceService.getCurrentUnitOfType<Workbook>(UniverInstanceType.UNIVER_SHEET)!.getUnitId();
+        const subUnitId = univerInstanceService.getCurrentUnitOfType<Workbook>(UniverInstanceType.UNIVER_SHEET)!.getActiveSheet()?.getSheetId();
+        if (!unitId || !subUnitId) {
+            throw new Error('No active sheet found');
+        }
+        commandService.executeCommand(DeleteCfCommand.id, { unitId, subUnitId, cfId: rule.cfId } as IDeleteCfCommandParams);
+    };
+
+    const handleDragStart = (_layout: unknown, from: { y: number }) => {
+        const dragRule = ruleListByPermissionCheck[from.y];
+        setDraggingId(dragRule?.cfId ?? '');
+    };
+
+    const handleDragStop = (_layout: unknown, from: { y: number }, to: { y: number }) => {
+        setDraggingId('');
+        const unitId = univerInstanceService.getCurrentUnitOfType<Workbook>(UniverInstanceType.UNIVER_SHEET)!.getUnitId();
+        const subUnitId = univerInstanceService.getCurrentUnitOfType<Workbook>(UniverInstanceType.UNIVER_SHEET)!.getActiveSheet()?.getSheetId();
+        if (!unitId || !subUnitId) {
+            throw new Error('No active sheet found');
+        }
+
+        const getSaveIndex = (index: number) => {
+            const length = ruleListByPermissionCheck.length;
+            return Math.min(length - 1, Math.max(0, index));
+        };
+        const cfId = ruleListByPermissionCheck[getSaveIndex(from.y)]?.cfId;
+        const targetCfId = ruleListByPermissionCheck[getSaveIndex(to.y)]?.cfId;
+        if (!cfId || !targetCfId) {
+            return;
+        }
+        if (cfId !== targetCfId) {
+            commandService.executeCommand(MoveCfCommand.id, { unitId, subUnitId, start: { id: cfId, type: 'self' }, end: { id: targetCfId, type: to.y > from.y ? 'after' : 'before' } } as IMoveCfCommandParams);
+        }
+    };
+
+    const handleCreate = () => {
+        props.onCreate();
+    };
+
+    const handleClear = () => {
+        if (selectValue === '2') {
+            commandService.executeCommand(ClearWorksheetCfCommand.id);
+        } else if (selectValue === '1') {
+            const list = ruleList.map((rule) => ({ unitId, subUnitId, cfId: rule.cfId }));
+            list.forEach((config) => {
+                commandService.executeCommand(DeleteCfCommand.id, config);
+            });
+        }
+    };
+    const ruleListByPermissionCheck = useMemo(() => {
+        const workbook = univerInstanceService.getCurrentUnitOfType<Workbook>(UniverInstanceType.UNIVER_SHEET)!;
+        const worksheet = workbook.getActiveSheet();
+        return ruleList.filter((rule) => {
+            const ranges = rule.ranges;
+            const hasPermission = checkRangesEditablePermission(injector, workbook.getUnitId(), worksheet.getSheetId(), ranges);
+            return hasPermission;
+        });
+    }, [ruleList]);
+
+    const isHasAllRuleEditPermission = useMemo(() => {
+        const workbook = univerInstanceService.getCurrentUnitOfType<Workbook>(UniverInstanceType.UNIVER_SHEET)!;
+        const worksheet = workbook.getActiveSheet();
+        return ruleList.every((rule) => {
+            const ranges = rule.ranges;
+            const hasPermission = checkRangesEditablePermission(injector, workbook.getUnitId(), worksheet.getSheetId(), ranges);
+            return hasPermission;
+        });
+    }, [ruleList]);
+
+    return (
+        <div>
+            <div
+                className="
+                  univer-mb-2 univer-flex univer-items-center univer-justify-between univer-gap-2 univer-text-sm
+                "
+            >
+                <div className="univer-flex univer-items-center univer-gap-2">
+                    {conditionalFormattingI18nController.tWithReactNode(
+                        'sheets-conditional-formatting-ui.panel.managerRuleSelect',
+                        <SelectComponent
+                            className="univer-w-36"
+                            options={selectOption}
+                            value={selectValue}
+                            onChange={(v) => { setSelectValue(v); }}
+                        />
+                    ).map((ele, index) => <span key={index}>{ele}</span>)}
+                </div>
+                <div className="univer-flex univer-justify-end univer-gap-2">
+                    <Tooltip title={localeService.t<LocaleKey>('sheets-conditional-formatting-ui.panel.createRule')} placement="bottom">
+                        <a
+                            className="univer-size-5 univer-cursor-pointer"
+                            onClick={handleCreate}
+                        >
+                            <IncreaseIcon />
+                        </a>
+                    </Tooltip>
+                    {(ruleList.length && isHasAllRuleEditPermission)
+                        ? (
+                            <Tooltip title={localeService.t<LocaleKey>('sheets-conditional-formatting-ui.panel.clear')} placement="bottom">
+                                <a
+                                    className="univer-size-5 univer-cursor-pointer"
+                                    onClick={handleClear}
+                                >
+                                    <DeleteIcon className="univer-text-red-500" />
+                                </a>
+                            </Tooltip>
+                        )
+                        : (
+                            <div>
+                                <DeleteIcon className="univer-text-gray-300" />
+                            </div>
+                        )}
+
+                </div>
+
+            </div>
+
+            <div>
+                <DraggableList
+                    className="univer-w-full"
+                    draggableHandle=".draggableHandle"
+                    list={ruleListByPermissionCheck}
+                    onListChange={() => undefined}
+                    idKey="cfId"
+                    rowHeight={60}
+                    margin={[0, 10]}
+                    onDragStop={handleDragStop}
+                    onDragStart={handleDragStart}
+                    itemRender={(rule) => (
+                        <div
+                            className={clsx(`
+                              univer-group univer-relative univer-flex univer-flex-wrap univer-items-center
+                              univer-justify-between univer-rounded univer-py-2 univer-pl-5 univer-pr-8
+                              hover:univer-bg-gray-100
+                              rtl:univer-pl-8 rtl:univer-pr-5
+                              dark:hover:!univer-bg-gray-700
+                            `, {
+                                'univer-bg-gray-100 dark:!univer-bg-gray-700': draggingId === rule.cfId,
+                            })}
+                            onMouseMove={() => {
+                                rule.ranges !== currentRuleRanges && setCurrentRuleRanges(rule.ranges);
+                            }}
+                            onMouseLeave={() => setCurrentRuleRanges([])}
+                            onClick={() => {
+                                onClick(rule);
+                            }}
+                        >
+                            <div
+                                className={clsx(`
+                                  univer-absolute univer-left-0 univer-hidden univer-size-5 univer-cursor-grab
+                                  univer-items-center univer-justify-center univer-rounded
+                                  group-hover:univer-flex
+                                  rtl:univer-left-auto rtl:univer-right-0
+                                `, 'draggableHandle')}
+                                onClick={(e) => e.stopPropagation()}
+                            >
+                                <GripVerticalIcon />
+                            </div>
+                            <div
+                                className="univer-min-w-0 univer-max-w-full univer-flex-shrink univer-overflow-hidden"
+                            >
+                                <div
+                                    className={`
+                                      univer-text-sm univer-text-gray-900
+                                      dark:!univer-text-gray-0
+                                    `}
+                                >
+                                    {getRuleDescribe(rule, localeService)}
+                                </div>
+                                <div
+                                    className="
+                                      univer-max-w-[250px] univer-overflow-hidden univer-text-ellipsis univer-text-xs
+                                      univer-text-gray-400
+                                    "
+                                >
+                                    {rule.ranges.map((range) => serializeRange(range)).join(',')}
+                                </div>
+                            </div>
+                            <div>
+                                <ConditionalFormattingRulePreview rule={rule.rule} />
+                            </div>
+                            {rule.rule.type === CFRuleType.highlightCell && (
+                                <div className="univer-pointer-events-none univer-mt-2 univer-w-full">
+                                    <Checkbox
+                                        className="univer-max-w-full"
+                                        contentClassName="univer-min-w-0"
+                                        checked={!!rule.stopIfTrue}
+                                        disabled
+                                    >
+                                        {localeService.t<LocaleKey>('sheets-conditional-formatting-ui.panel.stopIfTrue')}
+                                    </Checkbox>
+                                </div>
+                            )}
+                            <div
+                                className={clsx(`
+                                  univer-absolute univer-right-1 univer-hidden univer-size-6 univer-cursor-pointer
+                                  univer-items-center univer-justify-center univer-rounded univer-text-red-500
+                                  group-hover:univer-flex
+                                  hover:univer-bg-gray-200
+                                  rtl:univer-left-1 rtl:univer-right-auto
+                                `, {
+                                    'univer-flex univer-items-center univer-justify-center': draggingId === rule.cfId,
+                                })}
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleDelete(rule);
+                                    setCurrentRuleRanges([]);
+                                }}
+                            >
+                                <DeleteIcon />
+                            </div>
+                        </div>
+                    )}
+                />
+            </div>
+        </div>
+    );
+}

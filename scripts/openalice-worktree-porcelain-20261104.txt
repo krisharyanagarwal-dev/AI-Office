@@ -1,0 +1,169 @@
+worktree /Users/aryanagarwal/openalice-fleet
+HEAD f6608e99524f0723adabd9ab64ddf9e7b3eb0388
+branch refs/heads/main
+
+worktree /private/tmp/autobaseline-1530
+HEAD 0bd57dc78fe27346c3b6f52f7ede0c4a70d87b3f
+detached
+
+worktree /private/var/folders/z0/rp2twm2n4n7_q7chsbt22vz00000gn/T/opencode/wt-mergetest
+HEAD c475f9d24758d564e7462b21cee9c0175aecef26
+detached
+
+worktree /private/var/folders/z0/rp2twm2n4n7_q7chsbt22vz00000gn/T/opencode/wt-watchdog
+HEAD 16c62bf445f1216109ca3b1e527bb0ead459e30e
+branch refs/heads/agent/pipeline-verify/watchdog-py39-import-fix
+prunable gitdir file points to non-existent location
+
+worktree /Users/aryanagarwal/fleet-worktrees/10k-l1-orchestrator
+HEAD 7e90c1d1dc0dd08c471b22dad735eccb787ed481
+branch refs/heads/qoder/10k-l1-orchestrator
+
+worktree /Users/aryanagarwal/fleet-worktrees/10k-l2-state-authority
+HEAD 7e90c1d1dc0dd08c471b22dad735eccb787ed481
+branch refs/heads/qoder/10k-l2-state-authority
+
+worktree /Users/aryanagarwal/fleet-worktrees/10k-l3-adapter-dispatch
+HEAD 7e90c1d1dc0dd08c471b22dad735eccb787ed481
+branch refs/heads/qoder/10k-l3-adapter-dispatch
+
+worktree /Users/aryanagarwal/fleet-worktrees/10k-l4-verifier-qa
+HEAD 7e90c1d1dc0dd08c471b22dad735eccb787ed481
+branch refs/heads/qoder/10k-l4-verifier-qa
+
+worktree /Users/aryanagarwal/fleet-worktrees/cred-gates-20261024
+HEAD 0e06c5b39ae3896f02a3342339e7ba2391f1e53e
+branch refs/heads/qoder/credential-shape-gates
+
+worktree /Users/aryanagarwal/fleet-worktrees/hud-session-truth
+HEAD cbc649fe3547fb9405e49cf44d4a5d968c934ece
+branch refs/heads/qoder/hud-session-truth
+
+worktree /Users/aryanagarwal/fleet-worktrees/office-deploy
+HEAD 0bd57dc78fe27346c3b6f52f7ede0c4a70d87b3f
+detached
+
+worktree /Users/aryanagarwal/fleet-worktrees/office-hive-agents
+HEAD c0ed4136a19be4c76bb0e1c57dc9c4f639121dfd
+branch refs/heads/qoder/hive-agent-sessions
+
+worktree /Users/aryanagarwal/fleet-worktrees/office-merge
+HEAD 4c8c128d5a73590c9144fc10aea7931bb4555d5e
+branch refs/heads/office/merge-all
+
+worktree /Users/aryanagarwal/fleet-worktrees/office-sessions
+HEAD 0c02512afc424dd476a1264340d5b79354bf12d7
+branch refs/heads/qoder/office-sessions
+
+worktree /Users/aryanagarwal/fleet-worktrees/office-work-view
+HEAD 93345b3a915573f870d5f6c191ba4089040ff4ec
+branch refs/heads/qoder/office-work-view
+
+worktree /Users/aryanagarwal/fleet-worktrees/s06-task-state-assessment
+HEAD 0bd57dc78fe27346c3b6f52f7ede0c4a70d87b3f
+detached
+
+worktree /Users/aryanagarwal/fleet-worktrees/s07-scheduler-assessment
+HEAD ec75c448754787f3a7d5540ab21c88d36be2bb19
+detached
+
+worktree /Users/aryanagarwal/fleet-worktrees/s08-budget-assessment
+HEAD ec75c448754787f3a7d5540ab21c88d36be2bb19
+branch refs/heads/s08-budget-assessment
+
+worktree /Users/aryanagarwal/fleet-worktrees/s09-lease-assessment
+HEAD 0bd57dc78fe27346c3b6f52f7ede0c4a70d87b3f
+detached
+
+worktree /Users/aryanagarwal/fleet-worktrees/s10-runtime-isolation-assessment
+HEAD 0bd57dc78fe27346c3b6f52f7ede0c4a70d87b3f
+detached
+
+worktree /Users/aryanagarwal/fleet-worktrees/s11-adapters-assessment
+HEAD ec75c448754787f3a7d5540ab21c88d36be2bb19
+detached
+
+worktree /Users/aryanagarwal/fleet-worktrees/s12-provider-governance-assessment
+HEAD ec75c448754787f3a7d5540ab21c88d36be2bb19
+branch refs/heads/s12-provider-governance-assessment
+
+worktree /Users/aryanagarwal/fleet-worktrees/s13-verification-assessment
+HEAD ec75c448754787f3a7d5540ab21c88d36be2bb19
+branch refs/heads/s13-verification-assessment
+
+worktree /Users/aryanagarwal/fleet-worktrees/s14-outbox-assessment
+HEAD ec75c448754787f3a7d5540ab21c88d36be2bb19
+branch refs/heads/s14-outbox-assessment
+
+worktree /Users/aryanagarwal/fleet-worktrees/s15-security-assessment
+HEAD ec75c448754787f3a7d5540ab21c88d36be2bb19
+branch refs/heads/s15-security-assessment
+
+worktree /Users/aryanagarwal/fleet-worktrees/s18-test-repair-assessment
+HEAD ec75c448754787f3a7d5540ab21c88d36be2bb19
+detached
+
+worktree /Users/aryanagarwal/fleet-worktrees/supervisor-add-all
+HEAD 0bd57dc78fe27346c3b6f52f7ede0c4a70d87b3f
+detached
+
+worktree /Users/aryanagarwal/fleet-worktrees/sync-reroster
+HEAD 2b5dda56b28c706d4ef000c66a36a1c508c845d2
+branch refs/heads/sync/reroster
+
+worktree /Users/aryanagarwal/openalice-fleet/.qoder/worktrees/auto-20261102-1554
+HEAD 8a9663306cfe25956803587ce900fc37356d8201
+branch refs/heads/agent/auto-maintainer-20261102/auto-20261102-pep604
+
+worktree /Users/aryanagarwal/openalice-fleet/.qoder/worktrees/auto-20261102-1832
+HEAD dee858f67ad389340c6aaf4f6a268e63a9e8a5c1
+branch refs/heads/agent/auto-maintainer-20261102/agents-md-hud-serving-tree
+
+worktree /Users/aryanagarwal/openalice-fleet/.qoder/worktrees/auto-20261102-2102
+HEAD 95535a67b356d702c1a20bdddb1a9281e1e04ce1
+branch refs/heads/agent/auto-maintainer-20261102-2102/agents-md-dedup
+
+worktree /Users/aryanagarwal/openalice-fleet/.qoder/worktrees/auto-20261102-2313
+HEAD dc1f7c67a1ec9dcdaec6af50e60682d6b663f185
+branch refs/heads/worktree-auto-20261102-2313
+
+worktree /Users/aryanagarwal/openalice-fleet/.qoder/worktrees/auto-20261103-0130
+HEAD c330a76085299ffd68617429d8e8699c1623914d
+branch refs/heads/agent/auto-maintainer-20261103-0130/agents-md-hud-serving-tree
+
+worktree /Users/aryanagarwal/openalice-fleet/.qoder/worktrees/auto-20261103-0342
+HEAD 3d5ea65924fab19f3ada88df12817e6ad32b120b
+branch refs/heads/agent/auto-maintainer/evidence-maturity-and-decided-strategy
+
+worktree /Users/aryanagarwal/openalice-fleet/.qoder/worktrees/auto-20261103-1530
+HEAD aaee6bd3d3b0791ae8904b0e776540f05a8b55c7
+branch refs/heads/agent/auto-maintainer/strategy-net-of-cost-gate
+
+worktree /Users/aryanagarwal/openalice-fleet/.worktrees/arming-residual
+HEAD b91f28214df35a53cc56b2ad3bafd771945afeaf
+branch refs/heads/qoder/sma-arming-residual
+
+worktree /Users/aryanagarwal/openalice-fleet/.worktrees/cherry-local
+HEAD 7e90c1d1dc0dd08c471b22dad735eccb787ed481
+detached
+
+worktree /Users/aryanagarwal/openalice-fleet/.worktrees/hud-bounded-launcher-14b07adc
+HEAD 39314e2ef73b1d22aa2ec27a2df9ec2540861d43
+detached
+
+worktree /Users/aryanagarwal/openalice-fleet/.worktrees/installed-plist-audit
+HEAD a34e8b631c6ac6ca11aa011565c2d51c5f6ad7ad
+branch refs/heads/qoder/installed-plist-audit
+
+worktree /Users/aryanagarwal/openalice-fleet/.worktrees/installed-plist-audit-v2
+HEAD c8e133e929402beb145d7be87c0cba2781827cda
+branch refs/heads/qoder/installed-plist-audit-v2
+
+worktree /Users/aryanagarwal/openalice-fleet/fleet-worktrees/ollama-list-cleanup
+HEAD 0bd57dc78fe27346c3b6f52f7ede0c4a70d87b3f
+branch refs/heads/qoder/ollama-list-cleanup
+
+worktree /Users/aryanagarwal/openalice-fleet/fleet-worktrees/ui-fleet-page
+HEAD 96f021f7bfc0ccc0aecacb58728eba2864f8a8da
+branch refs/heads/ui/fleet-health-page
+

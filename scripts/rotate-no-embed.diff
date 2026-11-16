@@ -1,0 +1,1032 @@
+diff --git a/pytest.ini b/pytest.ini
+index d0fb4f2..f905bb1 100644
+--- a/pytest.ini
++++ b/pytest.ini
+@@ -18,6 +18,7 @@ testpaths =
+     tests/test_polymarket_manifest.py
+     tests/test_openalice_clone_manifest.py
+     tests/test_git_status_manifest.py
++    tests/test_rotate_github_token_no_embed.py
+     tests/test_repo_status_manifest.py
+     tests/test_polymarket_health.py
+     tests/test_paper_demo.py
+diff --git a/scripts/rotate_github_token.py b/scripts/rotate_github_token.py
+index 6086416..a1e20d4 100644
+--- a/scripts/rotate_github_token.py
++++ b/scripts/rotate_github_token.py
+@@ -1,5 +1,5 @@
+ #!/usr/bin/env python3
+-"""Rotate the GitHub PAT across both hosts' git remotes, atomically.
++"""Rotate the GitHub PAT into the laptop's keyring, and prove the mini off it.
+ 
+ Written because the current PAT is exposed: it has been pasted into a
+ transcript and it is embedded in the deployment host's remote URLs, so it
+@@ -9,12 +9,15 @@ web UI; once you have one, run this.
+   # Laptop only
+   scripts/rotate_github_token.py < ~/.new-gh-token
+ 
+-  # Laptop and the deployment host (the exposed one)
++  # Laptop, then report whether the deployment host is off the PAT yet
+   scripts/rotate_github_token.py --hosts laptop,mini < ~/.new-gh-token
+ 
+   # See what would change, write nothing
+   scripts/rotate_github_token.py --hosts laptop,mini --dry-run < ~/.new-gh-token
+ 
++The mini is reported, never written. Exit 0 means every requested host is clean;
++exit 3 means the laptop is rotated and the mini still needs a deploy key.
++
+ Why stdin and not an argument: a token on the command line is visible to every
+ user via ps and lands in shell history. Both are worse than the exposure being
+ fixed.
+@@ -26,16 +29,28 @@ host's `git fetch` into a silent "Repository not found", because GitHub answers
+ indistinguishable from a deleted repository and costs more to diagnose than the
+ exposure being fixed.
+ 
+-The token is written to a gitignored, 0600 credential file and the remote URLs
+-are rewritten to the bare https form, so the secret stops living in .git/config
+-(a file that gets copied, diffed and occasionally committed by mistake).
++The token is stored in the OS keyring via `gh auth login --with-token`, which is
++the path these remotes already authenticate through. It is never written into a
++remote URL: a token in .git/config is the exposure this rotation exists to close,
++and passing it in an argv string would put it in `ps` for every user on the host,
++which is the same leak that made stdin necessary in the first place.
++
++The deployment host is deliberately not given a copy of the token. It belongs on a
++repo-scoped deploy key (see scripts/harden_mini_git.sh), so this script only reports
++whether it got there -- and an ssh-shaped origin is certified only on evidence, from
++a check addressed to the mini (--verify-mini), never from the URL's prefix. Exit 3
++means the laptop is rotated and the mini is NOT certified: still on a revocable PAT,
++or ssh-shaped but unverified. That is an unfinished rotation, not a failure to retry.
+ """
+ 
+ from __future__ import annotations
+ 
+ import argparse
++import hashlib
+ import json
++import os
+ import re
++import shlex
+ import subprocess
+ import sys
+ import urllib.error
+@@ -46,14 +61,48 @@ from typing import NoReturn
+ LAPTOP_REPO = Path.home() / "openalice-fleet"
+ MINI_REPO = Path("/Users/a/trading/openalice-fleet")
+ MINI_HOST = "a@macmini"
++GH_HOST = "github.com"
++# The end state for the deployment host: an ssh remote, not a credential in a URL.
++MINI_SSH_PREFIX = "git@github.com:"
+ 
+ # GitHub fine-grained PATs are prefixed github_pat_, classic ones ghp_/gho_.
+ TOKEN_RE = re.compile(r"^(github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,})$")
++# Same shapes, but searchable inside someone else's error text.
++TOKEN_SHAPE = re.compile(r"\b(?:github_pat_|gh[pousr]_)[A-Za-z0-9_]{16,}\b")
++# The repo this rotation is for. Hard-coded deliberately: an auth check that
++# passes for *any* reachable repo is not a check on the thing being rotated.
++EXPECTED_SLUG = "krisharyanagarwal-dev/openalice-fleet"
++MINI_SSH_URL = "%s%s.git" % (MINI_SSH_PREFIX, EXPECTED_SLUG)
++# The prefix decides WHERE a secret is revoked. gho_/ghu_/ghs_/ghr_ are OAuth
++# grants to the GitHub CLI app and are not listed on the Personal access tokens
++# page at all, so telling an operator to go there means they revoke nothing while
++# the real grant stays live.
++OAUTH_PREFIXES = ("gho_", "ghu_", "ghs_", "ghr_")
++PAT_PREFIXES = ("github_pat_", "ghp_")
+ 
+ 
+ def _redact(token: str) -> str:
+-    """Enough to tell two tokens apart, not enough to use one."""
+-    return "%s...%s (%d chars)" % (token[:8], token[-4:], len(token))
++    """sha256/8 plus length: identifies the credential without quoting it.
++
++    The previous version printed the first 8 and last 4 characters. That is a
++    quarter of a 40-character secret's text in stdout, and stdout is how the last
++    exposure spread into journals and transcripts. The digest still distinguishes
++    two tokens, which is the only reason to print anything at all.
++    """
++    return "sha256/%s (len=%d)" % (
++        hashlib.sha256(token.encode()).hexdigest()[:8], len(token))
++
++
++def _mask(text: str) -> str:
++    """Strip credentials from subprocess output before it is printed.
++
++    git echoes the remote URL in its own auth-failure text, so passing stderr
++    through verbatim re-publishes whatever the URL carries. The userinfo shape
++    that actually leaked here was a token used as the username with NO colon, so
++    this reuses bare() rather than a `user:pass@` pattern that would miss it.
++    """
++    masked = re.sub(r"\b(?:https?|ssh)://\S+", lambda m: bare(m.group()), text or "")
++    return TOKEN_SHAPE.sub("<token-redacted>", masked)
+ 
+ 
+ def _fail(msg: str) -> NoReturn:
+@@ -101,7 +150,6 @@ def verify(token: str) -> dict:
+         _fail("could not reach GitHub to verify: %s" % exc)
+ 
+     login = me.get("login", "?")
+-    headers = json.dumps(me.get("headers", {}), default=str)
+     # Confirm the token can actually read the private repo, not just /user.
+     for repo in ("krisharyanagarwal-dev/openalice-fleet",
+                  "krisharyanagarwal-dev/openalice-fleet-public"):
+@@ -148,69 +196,232 @@ def has_token(url: str) -> bool:
+     return bool(re.search(r"//[^/@]+@", url))
+ 
+ 
+-def set_urls(repo: Path, host: str | None, dry_run: bool, token: str) -> list[str]:
+-    """Point every remote at its credentialed URL for the supplied token.
++def bare(url: str) -> str:
++    """Return a remote URL with any embedded credential removed."""
++    return re.sub(r"^(https?://)[^/@]+@", r"\g<1>", url)
++
++
++def run_on(host: str | None, argv: list[str]) -> subprocess.CompletedProcess:
++    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
++    if host:
++        remote = " ".join(shlex.quote(a) for a in argv)
++        return subprocess.run(["ssh", "-o", "BatchMode=yes", host, remote],
++                              capture_output=True, text=True, timeout=90, env=env)
++    return subprocess.run(argv, capture_output=True, text=True, timeout=60, env=env)
++
++
++def credential_kind(value: str) -> str:
++    """'oauth', 'pat' or 'unknown' -- by prefix only, never by value."""
++    v = (value or "").strip()
++    if v.startswith(OAUTH_PREFIXES):
++        return "oauth"
++    if v.startswith(PAT_PREFIXES):
++        return "pat"
++    return "unknown"
++
++
++def url_credential(url: str):
++    """The secret a remote URL's userinfo carries, colon-free form included."""
++    m = re.match(r"^\w+://([^/@]*)@", url or "")
++    if not m:
++        return None
++    userinfo = m.group(1)
++    return userinfo.split(":", 1)[-1] if ":" in userinfo else userinfo
++
++
++def revocation_note(kinds) -> str:
++    """Where, and in what order, the retired secret has to be revoked.
++
++    The two classes live on different pages. Sending an operator to the PAT page
++    for a `gho_` grant means they revoke nothing and the grant stays live -- and
++    that grant is currently what authenticates this repo, so the same sentence
++    invites severing the only working auth before a replacement is proven.
++    """
++    kinds = set(kinds)
++    lines = []
++    if "oauth" in kinds or not kinds:
++        lines.append("   OAuth grant (gho_/ghu_/ghs_/ghr_): NOT on the Personal access "
++                     "tokens page. Revoke under Settings > Applications > Authorized "
++                     "OAuth grants, or with `gh auth logout --hostname github.com`.")
++    if "pat" in kinds or not kinds:
++        lines.append("   Personal access token (github_pat_/ghp_): revoked under "
++                     "Settings > Developer settings > Personal access tokens.")
++    if "unknown" in kinds:
++        lines.append("   One retired credential's class could not be determined; check "
++                     "both places above.")
++    lines.append("   Revocation only FOLLOWS a verified replacement. The secret that "
++                 "authenticates this repository may be the same one, so revoking it "
++                 "first is the 2026-10-16 outage: fetch starts answering \"Repository "
++                 "not found\" and the fleet loses its only sync path.")
++    lines.append("   Until it is revoked, every copy of the leaked value stays live.")
++    return "\n".join(lines)
++
++
++def prove_keyring_auth(repo: Path, dry_run: bool) -> None:
++    """Authenticate against the bare URL BEFORE any stored remote is changed.
++
++    The credential this repo used to fall back on was the gh session token pasted
++    into remote.origin.url. Removing that userinfo is only safe once the helper
++    chain is demonstrated to answer on its own, so the proof runs against an
++    explicit bare URL and never touches the stored config. GIT_TERMINAL_PROMPT=0
++    makes a missing credential fail loudly instead of hanging on a prompt.
++    """
++    urls = current_urls(repo)
++    origin = urls.get("origin")
++    if not origin:
++        _fail("%s has no origin remote to verify" % repo)
++    target = bare(origin)
++    if EXPECTED_SLUG not in target:
++        _fail("origin resolves to %s, not the expected %s. Refusing to certify a "
++              "rotation against some other reachable repository."
++              % (_mask(target), EXPECTED_SLUG))
++    if dry_run:
++        print("   git ls-remote %s" % target)
++        return
++    res = run_on(None, ["git", "ls-remote", target, "HEAD"])
++    if res.returncode != 0:
++        _fail("the keyring credential could not authenticate %s:\n%s\n"
++              "Nothing was rewritten: the stored remotes still hold whatever "
++              "credential worked before. Fix the helper (or the token's scopes) "
++              "and re-run." % (target, _mask(res.stderr)))
++    print("   keyring credential authenticates the bare URL")
++
++
++def install_credential(token: str, dry_run: bool) -> None:
++    """Store the token in the OS keyring, on stdin, where git already looks.
++
++    This works without touching a URL because ~/.gitconfig resets the credential
++    chain for github.com -- `credential."https://github.com".helper` is set to an
++    empty value and then to `!/usr/bin/env gh auth git-credential`. The empty
++    entry clears the inherited system osxkeychain helper, so the keyring gh writes
++    IS the credential git presents for this host. That reset is load-bearing and
++    invisible in `git config --get-all credential.helper`, which still reports
++    osxkeychain from the system file.
++
++    The token travels on stdin. Another user's `ps` is the leak being closed here,
++    so it must never appear in an argv string either.
++    """
++    cmd = ["gh", "auth", "login", "--hostname", GH_HOST,
++           "--git-protocol", "https", "--with-token"]
++    if dry_run:
++        print("   %s   <token on stdin>" % " ".join(cmd))
++        return
++    res = subprocess.run(cmd, input=token, capture_output=True, text=True,
++                         timeout=60)
++    if res.returncode != 0:
++        _fail("gh could not store the token: %s"
++              % (_mask(res.stderr.strip()) or "exit %s, no output" % res.returncode))
++
++
++def _remote_urls(repo: Path, host: str | None, name: str) -> tuple[str, str]:
++    """Read back the fetch and push URLs git will actually use.
+ 
+-    Two findings from doing this on the deployment host, both of which broke
+-    push before they were understood:
++    `git remote -v` collapses to one entry per remote in current_urls(), so a
++    remote whose push URL differs from its fetch URL cannot be verified with it.
++    """
++    fetch = run_on(host, ["git", "-C", str(repo), "remote", "get-url", name])
++    push = run_on(host, ["git", "-C", str(repo), "remote", "get-url", "--push", name])
++    return fetch.stdout.strip(), push.stdout.strip()
++
++
++def strip_url_credentials(repo: Path, host: str | None, dry_run: bool) -> int:
++    """Take credentials OUT of remote URLs. A rotation never puts one in.
+ 
+-    1. `git remote set-url NAME URL` updates the FETCH url only. A remote that
+-       has a separate pushurl keeps the old credential and the two disagree.
+-       `--push` is required, and any stale `remote.<name>.pushurl` must go.
+-    2. A `credential.helper store` file does NOT work there. The system
+-       osxkeychain helper answers first with a credential for a DIFFERENT
+-       account, so the helper path returns a valid token for an account with no
+-       access to this repo -- which GitHub reports as "Repository not found",
+-       the same error as a deleted repo. The token in the URL is the only
+-       credential that works on that host.
++    Rewriting a URL to carry the replacement token would recreate the exposure
++    this script exists to close, and would additionally leave a stale-credential
++    trap: when that token expires, GitHub answers 404 rather than 401, so every
++    fetch reads as "Repository not found" instead of bad auth.
+ 
+-    So the token goes in the URL on both hosts, and each URL is verified after.
++    `git remote set-url NAME URL` updates the fetch URL only, so `--push` has to
++    follow and any stale remote.<name>.pushurl has to go, or push keeps presenting
++    the old credential while fetch looks clean. That split is exactly why the
++    count is only incremented after BOTH URLs are read back credential-free: an
++    exit code proves the command ran, not that the remote ended up clean.
+     """
+-    cmds: list[str] = []
+-    base = "https://github.com/krisharyanagarwal-dev/openalice-fleet.git"
+-    public = "https://github.com/krisharyanagarwal-dev/openalice-fleet-public.git"
+-    auth = ("https://x-access-token:%s@" if host else "https://%s@") % token
+-    for name, url in (("origin", base), ("public", public)):
+-        cmds.append("git -C %s remote set-url %s %s"
+-                    % (repo, name, url.replace("https://", auth)))
+-        cmds.append("git -C %s remote set-url --push %s %s"
+-                    % (repo, name, url.replace("https://", auth)))
+-        cmds.append("git -C %s config --unset-all remote.%s.pushurl"
+-                    % (repo, name))
+-    # A stale helper that answers for the wrong account breaks the fetch long
+-    # after the URL is correct, so it is cleared rather than left to interfere.
+-    cmds.append("git config --global --unset-all credential.helper")
+-
+-    actions = []
+-    for cmd in cmds:
+-        # Never echo the token. This script exists to REMOVE an exposure, and
+-        # printing the replacement into a terminal, a CI log or a pasted
+-        # transcript would recreate the problem it was written to close.
+-        actions.append(cmd.replace(token, "<new-token>"))
++    stripped = 0
++    for name, url in current_urls(repo, host).items():
++        if not has_token(url):
++            continue
++        clean = bare(url)
++        for label, argv in (
++            ("fetch url",
++             ["git", "-C", str(repo), "remote", "set-url", name, clean]),
++            ("push url",
++             ["git", "-C", str(repo), "remote", "set-url", "--push", name, clean]),
++            ("stale pushurl",
++             ["git", "-C", str(repo), "config", "--unset-all",
++              "remote.%s.pushurl" % name])):
++            print("   %s" % " ".join(argv))
++            if dry_run:
++                continue
++            res = run_on(host, argv)
++            # Scoped to this one command: --unset-all exits 5 when no pushurl
++            # exists, which is the desired end state. The two set-url operations
++            # have no acceptable non-zero status.
++            if res.returncode == 5 and label == "stale pushurl":
++                continue
++            if res.returncode != 0:
++                _fail("%s: could not rewrite the %s (exit %s): %s\n"
++                      "This remote is NOT counted as stripped -- its push URL may "
++                      "still carry a credential while the fetch URL reads bare."
++                      % (name, label, res.returncode, _mask(res.stderr.strip())))
+         if dry_run:
++            stripped += 1
+             continue
+-        if host:
+-            subprocess.run(["ssh", "-o", "BatchMode=yes", host, cmd],
+-                           capture_output=True, text=True, timeout=60)
+-        else:
+-            subprocess.run(cmd, shell=True, capture_output=True, text=True,
+-                           timeout=60)
+-    return actions
++        fetch, push = _remote_urls(repo, host, name)
++        if has_token(fetch) or has_token(push):
++            _fail("%s still carries a credential after rewriting (fetch %s, push %s). "
++                  "Not counted as stripped."
++                  % (name, "DIRTY" if has_token(fetch) else "bare",
++                     "DIRTY" if has_token(push) else "bare"))
++        stripped += 1
++    return stripped
++
++
++def mini_is_on_deploy_key(urls: dict[str, str]) -> bool:
++    origin = urls.get("origin", "")
++    return origin.startswith(MINI_SSH_PREFIX) or origin.startswith("ssh://")
++
++
++def verify_mini_ssh(dry_run: bool) -> bool:
++    """Ask the mini to reach the target repository over ssh before certifying it.
++
++    Shape is not evidence. A `git@github.com:krisharyanagarwal-dev/...` origin reads
++    as migrated even while GitHub refuses it, because ssh presents an identity that
++    is not authorized for this repository -- and GitHub answers "Repository not
++    found" rather than naming the cause. This mirrors harden_mini_git.sh's own steps
++    1 and 5: verify before trusting a migration, verify again after making one.
++
++    Returns False whenever the check was not performed, so a caller can never
++    mistake an unexamined remote for a certified one.
++    """
++    argv = ["git", "ls-remote", MINI_SSH_URL, "HEAD"]
++    if dry_run:
++        print("   would verify by: ssh -o BatchMode=yes %s \"%s\""
++              % (MINI_HOST, " ".join(argv)))
++        return False
++    print("   verifying the mini's ssh identity reaches %s" % MINI_SSH_URL)
++    res = run_on(MINI_HOST, argv)
++    if res.returncode != 0:
++        print("   NOT certified: the mini could not reach the repository over ssh "
++              "(exit %s): %s" % (res.returncode, _mask(res.stderr.strip())))
++        return False
++    print("   certified: the ssh identity authenticates the target repository")
++    return True
+ 
+ 
+ def verify_push(repo: Path, host: str | None) -> None:
+     """A rotation that cannot fetch is an outage, not a fix."""
+-    cmd = "git -C %s fetch --dry-run origin" % repo
+-    if host:
+-        res = subprocess.run(["ssh", "-o", "BatchMode=yes", host, cmd],
+-                             capture_output=True, text=True, timeout=90)
+-    else:
+-        res = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+-                             timeout=90)
++    res = run_on(host, ["git", "-C", str(repo), "fetch", "--dry-run", "origin"])
+     if res.returncode != 0:
++        # The credential is not lost -- it lives in the keyring, which is what
++        # `gh auth token` reads. Re-embedding it into the URL would only put the
++        # exposure back, so this stops for diagnosis instead of doing that.
+         _fail("post-rotation fetch FAILED on %s:\n%s\nThe token may lack repo "
+-              "scope, or the helper is misconfigured. The old URL is still in "
+-              "place; nothing was lost." % (host or "this host", res.stderr))
++              "scope, or the helper is misconfigured. Remotes are bare and the "
++              "keyring still holds the credential; recover with `gh auth token` "
++              "if you need the old URL back."
++              % (host or "this host", _mask(res.stderr)))
+ 
+ 
+ def main() -> int:
+@@ -218,44 +429,105 @@ def main() -> int:
+     ap.add_argument("--hosts", default="laptop",
+                     help="comma list: laptop, mini (or both)")
+     ap.add_argument("--dry-run", action="store_true")
++    ap.add_argument("--verify-mini", action="store_true",
++                    help="run the ssh ls-remote check on the deployment host before "
++                         "certifying an ssh-shaped origin; without it an ssh remote "
++                         "is reported UNVERIFIED, never done")
+     args = ap.parse_args()
+ 
+     hosts = [h.strip() for h in args.hosts.split(",") if h.strip()]
++    unknown = [h for h in hosts if h not in ("laptop", "mini")]
++    if unknown:
++        _fail("unknown host(s) in --hosts: %s (known: laptop, mini)"
++              % ", ".join(unknown))
+     token = read_token()
+     print("new token: %s" % _redact(token))
+ 
+     who = verify(token)
+     print("verified: authenticates as %s" % who["login"])
++    # What we are about to retire, so revocation can name the right page.
++    retired = [credential_kind(c) for c in (url_credential(u) for u in
++                                           current_urls(LAPTOP_REPO).values())
++               if c]
+ 
+-    targets = []
+     if "laptop" in hosts:
+-        targets.append(("laptop", LAPTOP_REPO, None))
+-    if "mini" in hosts:
+-        targets.append(("mini", MINI_REPO, MINI_HOST))
+-    if not targets:
+-        _fail("no known host in --hosts")
+-
+-    for label, repo, host in targets:
+-        print("\n[%s] %s" % (label, repo))
+-        urls = current_urls(repo, host)
+-        for name, url in urls.items():
++        print("\n[laptop] %s" % LAPTOP_REPO)
++        for name, url in current_urls(LAPTOP_REPO).items():
+             print("  %-8s %s" % (name, "TOKEN EMBEDDED" if has_token(url)
+                                  else "clean"))
+ 
+-    for label, repo, host in targets:
+-        print("\n[%s] rewriting remotes with the new token" % label)
+-        actions = set_urls(repo, host, args.dry_run, token)
+-        for cmd in actions:
+-            print("   %s" % cmd)
++        print("\n[laptop] storing the token in the keyring")
++        install_credential(token, args.dry_run)
++        print("\n[laptop] proving the keyring authenticates before rewriting anything")
++        prove_keyring_auth(LAPTOP_REPO, args.dry_run)
++        stripped = strip_url_credentials(LAPTOP_REPO, None, args.dry_run)
++        if stripped:
++            print("   %d remote URL(s) stripped of their credential" % stripped)
+         if not args.dry_run:
+-            verify_push(repo, host)
+-            print("   fetch OK -- token works and the URL is clean")
++            verify_push(LAPTOP_REPO, None)
++            print("   fetch OK -- keyring credential works, URLs stay bare")
++
++    mini_pending = False
++    if "mini" in hosts:
++        print("\n[mini] %s on %s" % (MINI_REPO, MINI_HOST))
++        urls = current_urls(MINI_REPO, MINI_HOST)
++        for name, url in urls.items():
++            print("  %-8s %s" % (name, "TOKEN EMBEDDED" if has_token(url)
++                                 else "clean"))
++            cred = url_credential(url)
++            if cred:
++                retired.append(credential_kind(cred))
++        if mini_is_on_deploy_key(urls):
++            # Shape is not evidence: certify only on a check addressed to the mini.
++            origin = urls.get("origin", "")
++            if EXPECTED_SLUG not in origin:
++                mini_pending = True
++                print("   origin is ssh-shaped but names a different repository; "
++                      "not certified.")
++            elif not args.verify_mini:
++                mini_pending = True
++                print("   origin is ssh-shaped but UNVERIFIED -- not certified.")
++                print("   A git@github.com remote still fails when ssh presents an")
++                print("   identity GitHub will not authorize for this repository.")
++                print("   Verify it from the mini before treating this as done:")
++                print("     ssh -o BatchMode=yes %s \"git ls-remote '%s' HEAD\""
++                      % (MINI_HOST, MINI_SSH_URL))
++                print("   or re-run with --verify-mini to perform that check here.")
++            elif verify_mini_ssh(args.dry_run):
++                print("   origin is ssh AND authenticates: a user PAT cannot break this host")
++            else:
++                mini_pending = True
++        else:
++            mini_pending = True
++            print("\n[mini] ACTION REQUIRED -- no token is written to this host.")
++            print("   Its origin is still an https remote, so installing the new")
++            print("   token there would re-embed a revocable user credential.")
++            print("   The intended fix is an ssh remote, via")
++            print("     scripts/harden_mini_git.sh")
++            print("     scripts/harden_mini_git.sh --apply")
++            print("   PREREQUISITE, not met as measured here: an SSH identity")
++            print("   authorized for %s -- that account's key, or a" % EXPECTED_SLUG)
++            print("   write-enabled deploy key on the target private repository --")
++            print("   must be configured AND verified from the mini before the ssh")
++            print("   remediation can do anything. The currently authenticated SSH")
++            print("   identity is goodwearrinfo-aryan, and this repository")
++            print('   presently returns "Repository not found" over SSH. Run')
++            print("   --apply anyway and harden_mini_git.sh stops at its own")
++            print("   pre-migration key check and changes nothing.")
+ 
+     if args.dry_run:
+         print("\ndry run: nothing written")
+-    else:
+-        print("\nrotation complete. The OLD token should now be revoked in "
+-              "GitHub (Settings > Developer settings > Tokens).")
++        if mini_pending:
++            print("the mini would remain uncertified even so (exit 3 when applied)")
++            return 3
++        return 0
++
++    print("\nThe retired credential must be revoked:")
++    print(revocation_note(retired))
++    if mini_pending:
++        print("exit 3: laptop rotated; the mini is NOT certified -- still on an "
++              "https remote, or ssh-shaped but never verified.")
++        return 3
+     return 0
+ 
+ 
+diff --git a/scripts/run_quality_gate.py b/scripts/run_quality_gate.py
+index 7825b10..464676c 100644
+--- a/scripts/run_quality_gate.py
++++ b/scripts/run_quality_gate.py
+@@ -53,6 +53,7 @@ TEST_PATHS = (
+     "tests/test_polymarket_manifest.py",
+     "tests/test_openalice_clone_manifest.py",
+     "tests/test_git_status_manifest.py",
++    "tests/test_rotate_github_token_no_embed.py",
+     "tests/test_repo_status_manifest.py",
+     "tests/test_polymarket_health.py",
+     "tests/test_paper_demo.py",
+diff --git a/tests/test_rotate_github_token_no_embed.py b/tests/test_rotate_github_token_no_embed.py
+new file mode 100644
+index 0000000..988d62b
+--- /dev/null
++++ b/tests/test_rotate_github_token_no_embed.py
+@@ -0,0 +1,472 @@
++"""The rotation script must not re-create the exposure it exists to close.
++
++Each test carries a positive control, because an assertion that the token is
++absent from a command list proves nothing if the command list was never built.
++"""
++
++import importlib.util
++import subprocess
++import sys
++from pathlib import Path
++
++import pytest
++
++ROOT = Path(__file__).resolve().parents[1]
++SCRIPT = ROOT / "scripts" / "rotate_github_token.py"
++
++# Shaped like a classic PAT so TOKEN_RE accepts it, and deliberately carrying a
++# PLACEHOLDER_MARKERS word from scripts/scan_secrets.py: the secret scan checks
++# the VALUE, so a fixture that only looks fake-by-comment still trips it.
++SENTINEL = "ghp_faketoken0000000000000000000000000000"
++BARE = "https://github.com/krisharyanagarwal-dev/openalice-fleet.git"
++EMBEDDED = "https://x-access-token:%s@github.com/krisharyanagarwal-dev/" \
++           "openalice-fleet.git" % SENTINEL
++
++
++def _done(returncode=0, stderr="", stdout=""):
++    return subprocess.CompletedProcess(args=[], returncode=returncode,
++                                       stdout=stdout, stderr=stderr)
++
++
++def _strip_env(monkeypatch, rot, fail_on=None, fail_rc=128, unset_rc=0,
++               end_fetch=BARE, end_push=BARE):
++    """Route every git call strip_url_credentials makes through a recorder.
++
++    fail_on names the operation forced to exit non-zero and fail_rc is the status
++    it returns -- 128 by default, but 5 matters on its own: the script tolerates
++    exit 5 ONLY for the pushurl unset, so a 5 from set-url must still be fatal.
++    unset_rc sets the pushurl-unset status; end_fetch/end_push are what the
++    read-back sees.
++    """
++    issued = []
++
++    def fake(host, argv):
++        joined = " ".join(argv)
++        if "unset-all" in joined:
++            op = "unset"
++        elif "get-url" in joined:
++            op = "read"
++        elif "--push" in joined:
++            op = "push"
++        elif "set-url" in joined:
++            op = "fetch"
++        else:
++            op = "other"
++        issued.append(op)
++        if op == "read":
++            return _done(stdout=end_push if "--push" in joined else end_fetch)
++        if op == "unset":
++            return _done(returncode=unset_rc, stderr="unset failed")
++        return _done(returncode=fail_rc if op == fail_on else 0, stderr="git refused")
++
++    monkeypatch.setattr(rot, "run_on", fake)
++    monkeypatch.setattr(rot, "current_urls",
++                        lambda repo, host=None: {"origin": EMBEDDED})
++    return issued
++
++
++@pytest.fixture(scope="module")
++def rot():
++    spec = importlib.util.spec_from_file_location("rotate_github_token", SCRIPT)
++    module = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(module)
++    return module
++
++
++def test_bare_removes_only_the_credential(rot):
++    assert rot.has_token(EMBEDDED) is True
++    assert rot.bare(EMBEDDED) == BARE
++    # A clean URL must survive untouched, or stripping would rewrite every remote.
++    assert rot.bare(BARE) == BARE
++    assert rot.has_token(BARE) is False
++
++
++def test_detects_a_token_used_as_the_username(rot):
++    """The shape that actually leaked: `gho_...@github.com`, userinfo with no colon.
++
++    A `user:pass@` detector silently misses this, and so would any guard that
++    only looks for a colon.
++    """
++    colonless = "https://ghp_faketoken0000000000000000000000000000@github.com/o/r.git"
++    assert rot.has_token(colonless) is True
++    assert rot.bare(colonless) == "https://github.com/o/r.git"
++
++
++def test_strip_writes_no_token_anywhere(rot, monkeypatch):
++    built = []
++    monkeypatch.setattr(rot, "current_urls",
++                        lambda repo, host=None: {"origin": EMBEDDED})
++
++    def record(host, argv):
++        built.append(list(argv))
++        return _done(stdout=BARE)
++
++    monkeypatch.setattr(rot, "run_on", record)
++
++    stripped = rot.strip_url_credentials(Path("/tmp/not-a-real-repo"), None,
++                                        dry_run=False)
++
++    assert stripped == 1
++    # Positive control: three writes plus the two read-backs really ran.
++    assert len(built) == 5, "nothing ran, so the absence below was vacuous"
++    joined = " ".join(" ".join(argv) for argv in built)
++    assert SENTINEL not in joined
++    assert BARE in joined
++    # fetch and push must be set together or push keeps the old credential.
++    assert any("--push" in argv for argv in built)
++
++
++def test_strip_aborts_when_the_fetch_rewrite_fails(rot, monkeypatch, capsys):
++    issued = _strip_env(monkeypatch, rot, fail_on="fetch")
++    with pytest.raises(SystemExit):
++        rot.strip_url_credentials(Path("/tmp/not-a-real-repo"), None, False)
++    assert issued == ["fetch"], "must stop at the first failure, not continue"
++    captured = capsys.readouterr()
++    assert "NOT counted as stripped" in captured.err
++    assert "1 remote URL(s) stripped" not in captured.out
++
++
++def test_strip_aborts_when_only_the_push_rewrite_fails(rot, monkeypatch, capsys):
++    """The half state the reviewer named: fetch reads bare, push still carries it."""
++    issued = _strip_env(monkeypatch, rot, fail_on="push")
++    with pytest.raises(SystemExit):
++        rot.strip_url_credentials(Path("/tmp/not-a-real-repo"), None, False)
++    # Positive control: the fetch really succeeded before the push failed.
++    assert issued == ["fetch", "push"]
++    captured = capsys.readouterr()
++    assert "NOT counted as stripped" in captured.err
++    assert "push url" in captured.err
++    assert "1 remote URL(s) stripped" not in captured.out
++
++
++def test_strip_aborts_when_the_read_back_is_still_dirty(rot, monkeypatch, capsys):
++    """Exit codes alone are not the end state: a pushurl can survive them."""
++    issued = _strip_env(monkeypatch, rot, end_push=EMBEDDED)
++    with pytest.raises(SystemExit):
++        rot.strip_url_credentials(Path("/tmp/not-a-real-repo"), None, False)
++    assert issued == ["fetch", "push", "unset", "read", "read"]
++    captured = capsys.readouterr()
++    assert "push DIRTY" in captured.err
++    assert SENTINEL not in captured.err + captured.out, \
++        "the diagnosis must not quote the credential"
++    assert "1 remote URL(s) stripped" not in captured.out
++
++
++def test_missing_pushurl_exit_five_is_tolerated(rot, monkeypatch):
++    issued = _strip_env(monkeypatch, rot, unset_rc=5)
++    assert rot.strip_url_credentials(Path("/tmp/not-a-real-repo"), None,
++                                    False) == 1
++    assert issued == ["fetch", "push", "unset", "read", "read"]
++
++
++def test_exit_five_on_the_fetch_rewrite_is_fatal(rot, monkeypatch, capsys):
++    """The allowance is scoped to one label: a 5 from set-url is not "no pushurl".
++
++    Pair with test_missing_pushurl_exit_five_is_tolerated; together they pin both
++    directions of `res.returncode == 5 and label == "stale pushurl"`.
++    """
++    issued = _strip_env(monkeypatch, rot, fail_on="fetch", fail_rc=5)
++    with pytest.raises(SystemExit):
++        rot.strip_url_credentials(Path("/tmp/not-a-real-repo"), None, False)
++    # Positive control: the fetch really ran and really returned 5.
++    assert issued == ["fetch"]
++    captured = capsys.readouterr()
++    assert "exit 5" in captured.err
++    assert "NOT counted as stripped" in captured.err
++    assert "1 remote URL(s) stripped" not in captured.out
++
++
++def test_exit_five_on_the_push_rewrite_is_fatal(rot, monkeypatch, capsys):
++    issued = _strip_env(monkeypatch, rot, fail_on="push", fail_rc=5)
++    with pytest.raises(SystemExit):
++        rot.strip_url_credentials(Path("/tmp/not-a-real-repo"), None, False)
++    assert issued == ["fetch", "push"], "must not sail past a push that returned 5"
++    captured = capsys.readouterr()
++    assert "exit 5" in captured.err
++    assert "push url" in captured.err
++    assert "NOT counted as stripped" in captured.err
++    assert "1 remote URL(s) stripped" not in captured.out
++
++
++def test_dry_run_issues_no_writes(rot, monkeypatch):
++    issued = _strip_env(monkeypatch, rot)
++    assert rot.strip_url_credentials(Path("/tmp/not-a-real-repo"), None,
++                                    True) == 1
++    assert issued == [], "dry run must not run a single git command"
++
++
++def test_install_credential_uses_stdin_not_argv(rot, monkeypatch, capsys):
++    calls = []
++
++    def fake_run(cmd, **kwargs):
++        calls.append((cmd, kwargs))
++        return _done()
++
++    monkeypatch.setattr(rot.subprocess, "run", fake_run)
++    rot.install_credential(SENTINEL, dry_run=False)
++
++    # Positive control: exactly one command ran, and it reported success.
++    assert len(calls) == 1
++    cmd, kwargs = calls[0]
++    assert " ".join(cmd).startswith("gh auth login")
++    assert SENTINEL not in " ".join(cmd), "token in argv is readable from ps"
++    assert kwargs.get("input") == SENTINEL, "token must reach gh on stdin"
++    assert SENTINEL not in capsys.readouterr().out, "never print the token"
++
++
++def test_install_failure_is_fatal(rot, monkeypatch):
++    monkeypatch.setattr(rot.subprocess, "run",
++                        lambda *a, **k: _done(returncode=1, stderr="boom"))
++    with pytest.raises(SystemExit):
++        rot.install_credential(SENTINEL, dry_run=False)
++
++
++def test_mini_is_measured_not_assumed(rot):
++    assert rot.mini_is_on_deploy_key({"origin": "git@github.com:o/r.git"}) is True
++    assert rot.mini_is_on_deploy_key({"origin": "ssh://git@github.com/o/r.git"}) is True
++    assert rot.mini_is_on_deploy_key({"origin": EMBEDDED}) is False
++    assert rot.mini_is_on_deploy_key({}) is False
++
++
++def _wire(rot, monkeypatch, mini_origin, laptop_origin=BARE, extra=(),
++          mini_ls_rc=0):
++    """Drive main() with the network and every subprocess replaced.
++
++    Records every command's ARGV, plus the stdin each child received, separately:
++    the token is allowed on stdin and nowhere else, so the two must be audited
++    apart. mini_ls_rc is what the mini returns for an ssh ls-remote -- the only
++    evidence that can certify an ssh-shaped origin.
++    """
++    argvs = []
++    stdins = []
++    monkeypatch.setattr(rot, "read_token", lambda: SENTINEL)
++    monkeypatch.setattr(rot, "verify", lambda t: {"login": "someone"})
++    monkeypatch.setattr(
++        rot, "verify_push",
++        lambda repo, host=None: argvs.append(["git", "fetch", "--dry-run", str(repo)]))
++    monkeypatch.setattr(
++        rot, "current_urls",
++        lambda repo, host=None: ({"origin": mini_origin} if host
++                                 else {"origin": laptop_origin, "public": BARE}))
++
++    def _fake_run_on(host, argv):
++        argvs.append((["ssh", str(host)] + argv) if host else list(argv))
++        rc = mini_ls_rc if (host and "ls-remote" in " ".join(argv)) else 0
++        return _done(returncode=rc)
++
++    def _fake_subprocess_run(*a, **k):
++        argvs.append(list(a[0]))
++        stdins.append(k.get("input"))
++        return _done()
++
++    monkeypatch.setattr(rot, "run_on", _fake_run_on)
++    monkeypatch.setattr(rot.subprocess, "run", _fake_subprocess_run)
++    monkeypatch.setattr(sys, "argv",
++                        ["rotate_github_token", "--hosts", "laptop,mini", *extra])
++    return argvs, stdins
++
++
++SSH_ORIGIN = "git@github.com:krisharyanagarwal-dev/openalice-fleet.git"
++
++
++def test_main_stops_short_when_the_mini_is_not_migrated(rot, monkeypatch, capsys):
++    argvs, stdins = _wire(rot, monkeypatch, EMBEDDED)
++    rc = rot.main()
++    out = capsys.readouterr().out
++
++    assert rc == 3, "a half rotation must not read as success"
++    assert "harden_mini_git.sh" in out
++    # Positive control: real commands were built, so the absence below is not vacuous.
++    assert len(argvs) >= 1
++    assert SENTINEL not in out, "the token must never be printed"
++    for argv in argvs:
++        assert SENTINEL not in " ".join(argv), "token reached a command line"
++    assert SENTINEL in stdins, "the keyring write must still happen"
++
++
++def test_ssh_shape_alone_does_not_certify_the_mini(rot, monkeypatch, capsys):
++    """The state measured today: ssh-shaped origin, GitHub refuses the repository."""
++    argvs, _ = _wire(rot, monkeypatch, SSH_ORIGIN)
++    rc = rot.main()
++    out = capsys.readouterr().out
++
++    assert rc == 3, "shape is not evidence; an unverified remote is unfinished"
++    assert "cannot break this host" not in out, "that claim needs a check behind it"
++    assert "UNVERIFIED" in out
++    assert "git ls-remote '%s' HEAD" % SSH_ORIGIN in out, "name the verifying command"
++    # Positive control: nothing was addressed to the mini, because none was asked for.
++    assert not any(a[0] == "ssh" for a in argvs)
++
++
++def test_verified_ssh_remote_certifies(rot, monkeypatch, capsys):
++    argvs, _ = _wire(rot, monkeypatch, SSH_ORIGIN, extra=("--verify-mini",),
++                     mini_ls_rc=0)
++    rc = rot.main()
++    out = capsys.readouterr().out
++
++    assert rc == 0
++    assert "cannot break this host" in out
++    to_mini = [a for a in argvs if a[0] == "ssh"]
++    # Positive control: exactly one command went to the mini, and it was the check.
++    assert len(to_mini) == 1
++    assert "ls-remote" in " ".join(to_mini[0])
++    assert SSH_ORIGIN in " ".join(to_mini[0])
++
++
++def test_failed_ssh_evidence_does_not_certify(rot, monkeypatch, capsys):
++    argvs, _ = _wire(rot, monkeypatch, SSH_ORIGIN, extra=("--verify-mini",),
++                     mini_ls_rc=128)
++    rc = rot.main()
++    out = capsys.readouterr().out
++
++    assert rc == 3
++    assert "cannot break this host" not in out
++    assert "NOT certified" in out
++    assert [a for a in argvs if a[0] == "ssh"], "the check must really be addressed"
++
++
++def test_ssh_remote_for_another_repository_does_not_certify(rot, monkeypatch, capsys):
++    """git@github.com is the right shape and the wrong repo."""
++    argvs, _ = _wire(rot, monkeypatch, "git@github.com:someone-else/other.git",
++                     extra=("--verify-mini",))
++    rc = rot.main()
++    out = capsys.readouterr().out
++    assert rc == 3
++    assert "cannot break this host" not in out
++
++
++def test_main_reports_the_right_revocation_page_for_an_oauth_grant(
++        rot, monkeypatch, capsys):
++    oauth_url = "https://gho_faketoken0000000000000000000000000000@github.com/" \
++                "krisharyanagarwal-dev/openalice-fleet.git"
++    # The mini here is ssh-shaped and carries no credential, so the only retired
++    # secret is the laptop's gho_ grant. An EMBEDDED mini would legitimately add a
++    # PAT-shaped one, and then both pages must be named.
++    argvs, stdins = _wire(rot, monkeypatch, SSH_ORIGIN, laptop_origin=oauth_url)
++    rc = rot.main()
++    out = capsys.readouterr().out
++    assert rc == 3
++    assert "Authorized OAuth grants" in out
++    assert "gh auth logout" in out
++    assert "Settings > Developer settings > Personal access tokens" not in out, \
++        "the PAT page does not list a CLI grant"
++    assert "only FOLLOWS a verified replacement" in out
++    assert "gho_faketoken" not in out, "name the class, never the value"
++
++
++def test_token_class_maps_by_prefix_only(rot):
++    assert rot.credential_kind("github_pat_abc") == "pat"
++    assert rot.credential_kind("ghp_abc") == "pat"
++    for p in rot.OAUTH_PREFIXES:
++        assert rot.credential_kind(p + "abc") == "oauth"
++    assert rot.credential_kind("x" * 40) == "unknown"
++    assert rot.credential_kind("") == "unknown"
++    assert rot.credential_kind(None) == "unknown"
++
++
++def test_url_credential_reads_the_colonless_form(rot):
++    assert rot.url_credential(EMBEDDED) == SENTINEL
++    assert rot.url_credential("https://%s@github.com/o/r.git" % SENTINEL) == SENTINEL
++    assert rot.url_credential(BARE) is None
++    assert rot.url_credential("") is None
++    assert rot.credential_kind(rot.url_credential(
++        "https://gho_faketoken0000000000000000000000000000@github.com/o/r.git")) == "oauth"
++
++
++def test_revocation_note_routes_by_class(rot):
++    oauth = rot.revocation_note(["oauth"])
++    assert "Authorized OAuth grants" in oauth
++    assert "Settings > Developer settings > Personal access tokens" not in oauth
++    pat = rot.revocation_note(["pat"])
++    assert "Settings > Developer settings > Personal access tokens" in pat
++    assert "Authorized OAuth grants" not in pat
++    both = rot.revocation_note([])
++    assert "Authorized OAuth grants" in both and "Personal access tokens" in both
++    for note in (oauth, pat, both, rot.revocation_note(["unknown"])):
++        assert "only FOLLOWS a verified replacement" in note
++        assert "stays live" in note
++    assert SENTINEL not in oauth + pat + both
++
++
++def test_no_url_is_rewritten_until_the_keyring_proves_itself(rot, monkeypatch):
++    """Ordering guard: prove first, strip second.
++
++    The credential this repo fell back on was the session token pasted into the
++    remote URL. Stripping it before demonstrating that the helper answers on its
++    own is how a rotation turns into a fetch outage.
++    """
++    argvs, _ = _wire(rot, monkeypatch, EMBEDDED, laptop_origin=EMBEDDED)
++
++    def failing(host, argv):
++        argvs.append(list(argv))
++        return _done(returncode=128, stderr="remote: Repository not found")
++
++    monkeypatch.setattr(rot, "run_on", failing)
++    with pytest.raises(SystemExit):
++        rot.main()
++
++    joined = [" ".join(argv) for argv in argvs]
++    # Positive control: the proof really ran and really failed.
++    assert any("ls-remote" in argv for argv in joined)
++    assert not any("set-url" in argv for argv in joined), \
++        "the stored remote was rewritten on top of an unproven credential"
++
++
++def test_prove_keyring_auth_targets_the_bare_url(rot, monkeypatch):
++    seen = []
++    monkeypatch.setattr(rot, "current_urls",
++                        lambda repo, host=None: {"origin": EMBEDDED})
++    monkeypatch.setattr(
++        rot, "run_on",
++        lambda host, argv: (seen.append(list(argv)), _done())[1])
++    rot.prove_keyring_auth(Path("/tmp/not-a-real-repo"), dry_run=False)
++    assert len(seen) == 1
++    assert BARE in seen[0], "must authenticate the bare URL, not the stored one"
++    assert SENTINEL not in " ".join(seen[0])
++
++
++def test_prove_keyring_auth_fails_loudly_without_an_origin(rot, monkeypatch):
++    monkeypatch.setattr(rot, "current_urls", lambda repo, host=None: {})
++    with pytest.raises(SystemExit):
++        rot.prove_keyring_auth(Path("/tmp/not-a-real-repo"), dry_run=False)
++
++
++def test_redact_identifies_without_quoting(rot):
++    shown = rot._redact(SENTINEL)
++    assert SENTINEL not in shown
++    assert SENTINEL[:8] not in shown, "prefix material seeds a new journal carrier"
++    assert SENTINEL[-4:] not in shown
++    assert "len=%d" % len(SENTINEL) in shown
++    other = "ghp_faketoken9999999999999999999999999999"
++    assert rot._redact(other) != shown, "the digest must still tell two tokens apart"
++
++
++def test_mask_handles_the_shape_a_naive_masker_misses(rot):
++    git_text = "To https://%s@github.com/o/r.git\n ! [rejected] HEAD (fetch first)" % SENTINEL
++    masked = rot._mask(git_text)
++    assert SENTINEL not in masked
++    assert "https://github.com/o/r.git" in masked
++    assert "[rejected]" in masked, "the diagnosis must survive the redaction"
++
++
++def test_mask_scrubs_a_standalone_token(rot):
++    assert SENTINEL not in rot._mask("gh rejected it: %s" % SENTINEL)
++    assert rot._mask("") == ""
++
++
++def test_prove_refuses_an_unexpected_repository(rot, monkeypatch):
++    seen = []
++    monkeypatch.setattr(rot, "current_urls",
++                        lambda repo, host=None:
++                        {"origin": "https://github.com/someone-else/other.git"})
++    monkeypatch.setattr(rot, "run_on",
++                        lambda host, argv: (seen.append(list(argv)), _done())[1])
++    with pytest.raises(SystemExit):
++        rot.prove_keyring_auth(Path("/tmp/not-a-real-repo"), dry_run=False)
++    assert not seen, "an unproven repo must not reach the network at all"
++
++
++def test_script_holds_no_credentialed_url_template(rot):
++    source = SCRIPT.read_text()
++    assert "x-access-token:" not in source
++    assert "shell=True" not in source

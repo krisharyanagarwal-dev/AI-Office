@@ -1,0 +1,507 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type { DocumentDataModel, ICommandInfo, IDrawingSearch, JSONXActions, Nullable } from '@univerjs/core';
+import type { IRichTextEditingMutationParams } from '@univerjs/docs';
+import type {
+    IDocDrawing,
+    IUpdateDocDrawingWrappingStyleParams,
+    IUpdateDrawingDocTransformCommandParams,
+} from '@univerjs/docs-drawing';
+import type { IDrawingJsonUndo1, IDrawingMapItemData, IDrawingOrderMapParam } from '@univerjs/drawing';
+import {
+    BooleanNumber,
+    Disposable,
+    ICommandService,
+    Inject,
+    IUniverInstanceService,
+    JSON1,
+    JSONX,
+    PositionedObjectLayoutType,
+    RedoCommand,
+    Tools,
+    UndoCommand,
+    UniverInstanceType,
+} from '@univerjs/core';
+import { DocSkeletonManagerService, RichTextEditingMutation } from '@univerjs/docs';
+import {
+    collectDocDrawings,
+    getDocDrawingRenderOrder,
+    IDocDrawingService,
+    TextWrappingStyle,
+    UpdateDocDrawingWrappingStyleCommand,
+    UpdateDrawingDocTransformCommand,
+    WRAPPING_STYLE_TO_LAYOUT_TYPE,
+} from '@univerjs/docs-drawing';
+import { IDrawingManagerService } from '@univerjs/drawing';
+import { IRenderManagerService } from '@univerjs/engine-render';
+import { DocRefreshDrawingsService } from '../services/doc-refresh-drawings.service';
+import { findDrawingAnchor, getDrawingWrappingPosition } from '../utils/drawing-wrapping-position';
+
+interface IAddOrRemoveDrawing {
+    type: 'add' | 'remove';
+    drawingId: string;
+    drawing?: IDocDrawing;
+}
+
+// Only whole drawing entries add/remove render objects; field edits are synchronized after the mutation.
+function getAddOrRemoveDrawings(actions: JSONXActions): Nullable<IAddOrRemoveDrawing[]> {
+    if (JSONX.isNoop(actions)) {
+        return null;
+    }
+    const drawings: IAddOrRemoveDrawing[] = [];
+    const cursor = JSON1.type.readCursor(actions);
+    cursor.traverse(null, () => {
+        const path = cursor.getPath();
+        if (path.length !== 2 || path[0] !== 'drawings' || typeof path[1] !== 'string') {
+            return;
+        }
+        const component = cursor.getComponent();
+        if (component?.r !== undefined) {
+            drawings.push({ type: 'remove', drawingId: path[1] });
+        }
+        if (component?.i !== undefined) {
+            drawings.push({ type: 'add', drawingId: path[1], drawing: component.i as IDocDrawing });
+        }
+    });
+    return drawings.length ? drawings : null;
+}
+
+// ReOrderedActions data like bellow:
+// [
+//     "drawingsOrder",
+//     [  4,
+//         {
+//             "d": 0
+//         }
+//     ],
+//     [  5,
+//         {
+//             "p": 0
+//         }
+//     ]
+// ]
+function getReOrderedDrawings(actions: JSONXActions): number[] {
+    if (!Array.isArray(actions) || actions.length < 3 || actions[0] !== 'drawingsOrder') {
+        return [];
+    }
+
+    const drawingIndexes: number[] = [];
+
+    for (let i = 1; i < actions.length; i++) {
+        const action = actions[i];
+        if (Array.isArray(action) && typeof action[0] === 'number' && typeof action[1] === 'object') {
+            drawingIndexes.push(action[0]);
+        } else {
+            drawingIndexes.length = 0;
+            break;
+        }
+    }
+
+    return drawingIndexes;
+}
+
+function collectUpdatedDrawingIds(actions: JSONXActions, drawingIds = new Set<string>()): Set<string> {
+    if (JSONX.isNoop(actions) || !Array.isArray(actions)) {
+        return drawingIds;
+    }
+
+    if (actions[0] === 'drawings') {
+        const drawingKeyOrOps = actions[1];
+        if (typeof drawingKeyOrOps === 'string') {
+            drawingIds.add(drawingKeyOrOps);
+            return drawingIds;
+        }
+
+        actions.slice(1).forEach((action) => {
+            if (Array.isArray(action) && typeof action[0] === 'string') {
+                drawingIds.add(action[0]);
+            }
+        });
+        return drawingIds;
+    }
+
+    actions.forEach((action) => {
+        if (Array.isArray(action)) {
+            collectUpdatedDrawingIds(action as JSONXActions, drawingIds);
+        }
+    });
+
+    return drawingIds;
+}
+
+export class DocDrawingAddRemoveController extends Disposable {
+    constructor(
+        @IUniverInstanceService private readonly _univerInstanceService: IUniverInstanceService,
+        @ICommandService private readonly _commandService: ICommandService,
+        @IDrawingManagerService private readonly _drawingManagerService: IDrawingManagerService,
+        @IDocDrawingService private readonly _docDrawingService: IDocDrawingService,
+        @IRenderManagerService private readonly _renderManagerService: IRenderManagerService,
+        @Inject(DocRefreshDrawingsService) private readonly _docRefreshDrawingsService: DocRefreshDrawingsService
+    ) {
+        super();
+
+        this._initialize();
+    }
+
+    private _initialize() {
+        this._commandExecutedListener();
+    }
+
+    // eslint-disable-next-line max-lines-per-function
+    private _commandExecutedListener() {
+        this.disposeWithMe(
+            this._commandService.beforeCommandExecuted((command: ICommandInfo) => {
+                if (command.id !== RichTextEditingMutation.id) {
+                    return;
+                }
+
+                const params = command.params as IRichTextEditingMutationParams;
+                const { unitId, actions, isSync, syncer } = params;
+
+                const addOrRemoveDrawings = getAddOrRemoveDrawings(actions);
+                if (addOrRemoveDrawings != null) {
+                    for (const { type, drawingId, drawing } of addOrRemoveDrawings) {
+                        if (isSync && drawing?.unitId === syncer) {
+                            continue;
+                        }
+
+                        if (type === 'add') {
+                            this._addDrawings(unitId, [drawing!]);
+                        } else {
+                            this._removeDrawings(unitId, [drawingId]);
+                        }
+                    }
+                }
+            })
+        );
+
+        this.disposeWithMe(
+            this._commandService.beforeCommandExecuted((command: ICommandInfo) => {
+                if (command.id !== UpdateDocDrawingWrappingStyleCommand.id) {
+                    return;
+                }
+
+                this._preserveWrappingStylePosition(command.params as IUpdateDocDrawingWrappingStyleParams);
+            })
+        );
+
+        this.disposeWithMe(
+            this._commandService.onCommandExecuted((command: ICommandInfo) => {
+                if (command.id !== RichTextEditingMutation.id) {
+                    return;
+                }
+
+                const params = command.params as IRichTextEditingMutationParams;
+                const { unitId, actions } = params;
+                let changedNotes = false;
+                if (!JSONX.isNoop(actions)) {
+                    const cursor = JSON1.type.readCursor(actions);
+                    cursor.traverse(null, () => {
+                        changedNotes ||= cursor.getPath()[0] === 'notes';
+                    });
+                }
+                if (changedNotes) {
+                    this._syncNoteDrawings(unitId);
+                }
+                const reOrderedDrawings = getReOrderedDrawings(actions);
+
+                if (reOrderedDrawings.length > 0) {
+                    this._updateDrawingsOrder(unitId);
+                }
+
+                const updatedDrawingIds = [...collectUpdatedDrawingIds(actions)];
+                if (updatedDrawingIds.length > 0) {
+                    this._syncDrawingDataFromSnapshot(unitId, updatedDrawingIds);
+                }
+            })
+        );
+
+        this.disposeWithMe(
+            this._commandService.onCommandExecuted((command: ICommandInfo) => {
+                if (
+                    command.id !== UpdateDrawingDocTransformCommand.id &&
+                    command.id !== UpdateDocDrawingWrappingStyleCommand.id
+                ) {
+                    return;
+                }
+
+                const { unitId } = command.params as IUpdateDrawingDocTransformCommandParams | IUpdateDocDrawingWrappingStyleParams;
+                const renderObject = this._renderManagerService.getRenderUnitById(unitId);
+                const scene = renderObject?.scene;
+                if (renderObject == null || scene == null) {
+                    return;
+                }
+
+                // Transform mutations are already refreshed incrementally by
+                // DocDrawingTransformUpdateController from the nested rich-text
+                // mutation. Wrapping changes can move anchors and still need a
+                // conservative full refresh.
+                if (command.id === UpdateDocDrawingWrappingStyleCommand.id) {
+                    this._docRefreshDrawingsService.refreshDrawings(renderObject.with(DocSkeletonManagerService).getSkeleton());
+                }
+                scene.getTransformerByCreate().refreshControls();
+            })
+        );
+
+        this.disposeWithMe(
+            this._commandService.onCommandExecuted((command: ICommandInfo) => {
+                if (command.id !== UndoCommand.id && command.id !== RedoCommand.id) {
+                    return;
+                }
+
+                const unitId = this._univerInstanceService.getCurrentUnitOfType<DocumentDataModel>(UniverInstanceType.UNIVER_DOC)?.getUnitId();
+                const focusedDrawings = this._drawingManagerService.getFocusDrawings();
+
+                if (unitId == null || focusedDrawings.length === 0) {
+                    return;
+                }
+
+                const renderObject = this._renderManagerService.getRenderUnitById(unitId);
+                const scene = renderObject?.scene;
+                if (renderObject == null || scene == null) {
+                    return false;
+                }
+                this._docRefreshDrawingsService.refreshDrawings(renderObject.with(DocSkeletonManagerService).getSkeleton());
+                const transformer = scene.getTransformerByCreate();
+
+                transformer.refreshControls();
+            })
+        );
+    }
+
+    private _preserveWrappingStylePosition(params: IUpdateDocDrawingWrappingStyleParams): void {
+        if (params.wrappingStyle === TextWrappingStyle.INLINE) {
+            return;
+        }
+
+        const { unitId } = params;
+        const documentDataModel = this._univerInstanceService.getUnit<DocumentDataModel>(
+            unitId,
+            UniverInstanceType.UNIVER_DOC
+        );
+        const renderObject = this._renderManagerService.getRenderUnitById(unitId);
+        const skeletonManager = renderObject?.with(DocSkeletonManagerService);
+        const skeletonData = skeletonManager?.getSkeleton().getSkeletonData();
+        const viewModel = skeletonManager?.getViewModel();
+        if (!documentDataModel || !skeletonData || !viewModel) {
+            return;
+        }
+
+        const editArea = viewModel.getEditArea();
+        const oldDrawings = collectDocDrawings(documentDataModel.getSnapshot()).drawings;
+
+        params.drawings = params.drawings.map((drawing) => {
+            const oldDrawing = oldDrawings[drawing.drawingId] as IDocDrawing | undefined;
+            if (!oldDrawing) {
+                return drawing;
+            }
+
+            const drawingAnchor = findDrawingAnchor(unitId, drawing.drawingId, skeletonData, editArea, oldDrawing);
+
+            if (!drawingAnchor) {
+                return drawing;
+            }
+
+            const docTransform = getDrawingWrappingPosition(drawingAnchor, WRAPPING_STYLE_TO_LAYOUT_TYPE[params.wrappingStyle]);
+            // A caller may supply an explicit destination position together with the wrapping style.
+            for (const key of ['positionH', 'positionV'] as const) {
+                const requested = drawing.docTransform?.[key];
+                if (requested && !Tools.diffValue(requested, oldDrawing.docTransform[key])) {
+                    Object.assign(docTransform, { [key]: requested });
+                }
+            }
+
+            return {
+                ...oldDrawing,
+                ...drawing,
+                docTransform: {
+                    ...docTransform,
+                    ...drawing.docTransform,
+                    positionH: docTransform.positionH,
+                    positionV: docTransform.positionV,
+                },
+            };
+        });
+    }
+
+    private _addDrawings(unitId: string, drawings: IDocDrawing[]) {
+        const drawingManagerService = this._drawingManagerService;
+        const docDrawingService = this._docDrawingService;
+
+        const jsonOp = this._docDrawingService.getBatchAddOp(
+            drawings.map((drawing) => ({ ...drawing, unitId, subUnitId: unitId }))
+        ) as IDrawingJsonUndo1;
+
+        const { subUnitId, redo: op, objects } = jsonOp;
+
+        drawingManagerService.applyJson1(unitId, subUnitId, op);
+        docDrawingService.applyJson1(unitId, subUnitId, op);
+
+        drawingManagerService.addNotification(objects as IDrawingSearch[]);
+        docDrawingService.addNotification(objects as IDrawingSearch[]);
+    }
+
+    private _removeDrawings(unitId: string, drawingIds: string[]) {
+        const drawingManagerService = this._drawingManagerService;
+        const docDrawingService = this._docDrawingService;
+        // An earlier group removal in this mutation may already have removed these descendants.
+        const existingDrawingIds = drawingIds.filter((drawingId) => docDrawingService.getDrawingByParam({ unitId, subUnitId: unitId, drawingId }));
+        if (existingDrawingIds.length === 0) {
+            return;
+        }
+
+        const jsonOp = this._docDrawingService.getBatchRemoveOp(existingDrawingIds.map((drawingId) => {
+            return {
+                unitId,
+                subUnitId: unitId,
+                drawingId,
+            };
+        }) as IDrawingSearch[]) as IDrawingJsonUndo1;
+
+        const { subUnitId, redo: op, objects } = jsonOp;
+
+        drawingManagerService.applyJson1(unitId, subUnitId, op);
+        docDrawingService.applyJson1(unitId, subUnitId, op);
+
+        drawingManagerService.removeNotification(objects as IDrawingSearch[]);
+        docDrawingService.removeNotification(objects as IDrawingSearch[]);
+    }
+
+    private _updateDrawingsOrder(unitId: string) {
+        const documentDataModel = this._univerInstanceService.getUnit<DocumentDataModel>(unitId, UniverInstanceType.UNIVER_DOC);
+
+        if (documentDataModel == null) {
+            return;
+        }
+
+        const { drawings, drawingsOrder } = collectDocDrawings(documentDataModel.getSnapshot());
+
+        if (drawingsOrder == null) {
+            return;
+        }
+        const renderOrder = getDocDrawingRenderOrder(drawingsOrder, drawings);
+
+        const drawingManagerService = this._drawingManagerService;
+        const docDrawingService = this._docDrawingService;
+
+        drawingManagerService.setDrawingOrder(unitId, unitId, renderOrder);
+        docDrawingService.setDrawingOrder(unitId, unitId, drawingsOrder);
+
+        // FIXME: @Jocs, Only need to update the affected drawings.
+        const objects: IDrawingOrderMapParam = {
+            unitId,
+            subUnitId: unitId,
+            drawingIds: renderOrder,
+        };
+
+        drawingManagerService.orderNotification(objects);
+        docDrawingService.orderNotification({
+            unitId,
+            subUnitId: unitId,
+            drawingIds: drawingsOrder,
+        });
+    }
+
+    private _syncNoteDrawings(unitId: string): void {
+        const model = this._univerInstanceService.getUnit<DocumentDataModel>(unitId, UniverInstanceType.UNIVER_DOC);
+        if (!model) {
+            return;
+        }
+        const { drawings } = collectDocDrawings(model.getSnapshot());
+        const previous = this._docDrawingService.getDrawingData(unitId, unitId) ?? {};
+        const added = Object.keys(drawings).filter((id) => !previous[id]);
+        const removed = Object.keys(previous).filter((id) => !drawings[id]);
+        const changed = Object.keys(drawings).filter((id) => drawings[id] !== previous[id]);
+        if (added.length > 0) {
+            this._addDrawings(unitId, added.map((id) => ({ ...drawings[id], unitId, subUnitId: unitId })));
+        }
+        if (removed.length > 0) {
+            this._removeDrawings(unitId, removed);
+        }
+        if (changed.length > 0) {
+            this._syncDrawingDataFromSnapshot(unitId, changed);
+        }
+    }
+
+    private _syncDrawingDataFromSnapshot(unitId: string, drawingIds: string[]) {
+        const documentDataModel = this._univerInstanceService.getUnit<DocumentDataModel>(unitId, UniverInstanceType.UNIVER_DOC);
+
+        if (documentDataModel == null) {
+            return;
+        }
+
+        const { drawings, drawingsOrder } = collectDocDrawings(documentDataModel.getSnapshot());
+        const drawingData: IDrawingMapItemData<IDocDrawing> = Object.fromEntries(
+            Object.entries(drawings).map(([id, drawing]) => [id, { ...drawing, unitId, subUnitId: unitId }])
+        );
+        const previousDrawings = this._docDrawingService.getDrawingData(unitId, unitId);
+        const previousRendered = this._drawingManagerService.getDrawingData(unitId, unitId);
+        // Removing an outer group also removes its render descendants. Ungrouping retains them in the document.
+        const missingIds = Object.keys(drawingData).filter((id) => !previousRendered[id]);
+        const synchronizedDrawingIds = [...new Set([...drawingIds, ...missingIds])];
+        const orderChanged = drawingsOrder !== this._docDrawingService.getDrawingOrder(unitId, unitId) ||
+            synchronizedDrawingIds.some((drawingId) => {
+                const previous = previousDrawings[drawingId];
+                const current = drawingData[drawingId];
+                const wasBehind = previous?.layoutType === PositionedObjectLayoutType.WRAP_NONE &&
+                    previous.behindDoc === BooleanNumber.TRUE;
+                const isBehind = current?.layoutType === PositionedObjectLayoutType.WRAP_NONE &&
+                    current.behindDoc === BooleanNumber.TRUE;
+                return wasBehind !== isBehind;
+            });
+
+        const hierarchyChanged = synchronizedDrawingIds.some((id) => previousDrawings[id]?.groupId !== drawingData[id]?.groupId);
+        if (hierarchyChanged) {
+            this._drawingManagerService.removeNotification(Object.values(this._drawingManagerService.getDrawingData(unitId, unitId)));
+        }
+        const renderedDrawings = { ...this._drawingManagerService.getDrawingData(unitId, unitId) };
+        for (const drawingId of synchronizedDrawingIds) {
+            const current = drawingData[drawingId];
+            if (current) {
+                // Layout may publish before this listener runs. Preserve its canvas coordinates;
+                // persisted transforms do not include the document's page and anchor offsets.
+                renderedDrawings[drawingId] = {
+                    ...current,
+                    transform: renderedDrawings[drawingId]?.transform ?? current.transform,
+                };
+            } else {
+                delete renderedDrawings[drawingId];
+            }
+        }
+
+        this._docDrawingService.setDrawingData(unitId, unitId, drawingData);
+        this._drawingManagerService.setDrawingData(unitId, unitId, renderedDrawings);
+        if (orderChanged) {
+            this._docDrawingService.setDrawingOrder(unitId, unitId, drawingsOrder);
+            this._drawingManagerService.setDrawingOrder(unitId, unitId, getDocDrawingRenderOrder(drawingsOrder, drawings));
+        }
+
+        const objects = synchronizedDrawingIds
+            .filter((drawingId) => drawingData[drawingId] != null)
+            .map((drawingId) => ({ unitId, subUnitId: unitId, drawingId }));
+
+        if (objects.length === 0) {
+            return;
+        }
+
+        if (hierarchyChanged) {
+            this._drawingManagerService.addNotification(Object.values(renderedDrawings));
+        }
+        this._docDrawingService.updateNotification(objects);
+        this._drawingManagerService.updateNotification(objects);
+    }
+}

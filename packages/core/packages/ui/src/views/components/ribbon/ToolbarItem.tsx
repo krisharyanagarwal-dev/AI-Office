@@ -1,0 +1,581 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type { IDropdownMenuProps, IDropdownProps } from '@univerjs/design';
+import type { ComponentType } from 'react';
+import { ICommandService, LocaleService } from '@univerjs/core';
+import { borderClassName, clsx, cva } from '@univerjs/design';
+import { MoreDownIcon } from '@univerjs/icons';
+import { forwardRef, useMemo } from 'react';
+import { isObservable, Observable } from 'rxjs';
+import type { IDisplayMenuItem, IMenuItem, IMenuSelectorItem, IValueOption } from '../../../services/menu/menu';
+import type { ITooltipWrapperRef } from './TooltipButtonWrapper';
+import { ComponentManager } from '../../../common/component-manager';
+import { ILayoutService } from '../../../services/layout/layout.service';
+import { MenuItemType } from '../../../services/menu/menu';
+import { useDependency, useObservable } from '../../../utils/di';
+import { CustomLabel } from '../../custom-label/CustomLabel';
+import { useToolbarItemStatus, useToolbarShortcutDisplay } from './hook';
+import { ToolbarButton, toolbarButtonVariants } from './ToolbarButton';
+import { DropdownMenuWrapper, ToolbarDropdownButton, TooltipWrapper } from './TooltipButtonWrapper';
+
+export type IToolbarItemProps = IDisplayMenuItem<IMenuItem> & {
+    grid?: boolean;
+    overflow?: boolean;
+    large?: boolean;
+    showLabel?: boolean;
+    iconSize?: number;
+    iconColor?: string;
+    fullWidth?: boolean;
+    preserveStrokeWidth?: boolean;
+    dropdownComponent?: ComponentType<IDropdownProps>;
+    dropdownMenuComponent?: ComponentType<IDropdownMenuProps>;
+};
+
+const toolbarDisabledClassName = 'univer-pointer-events-none univer-cursor-not-allowed univer-text-gray-300 dark:!univer-text-gray-600';
+
+const toolbarButtonSelectorRootVariants = cva(
+    `
+      univer-toolbar-button-selector-root univer-animate-in univer-fade-in univer-group univer-relative univer-flex
+      univer-h-7 univer-cursor-pointer univer-items-center univer-rounded univer-pr-6 univer-text-sm
+      univer-transition-colors
+      hover:univer-bg-gray-100
+      rtl:univer-pl-6 rtl:univer-pr-0
+      dark:hover:!univer-bg-gray-700
+    `,
+    {
+        variants: {
+            disabled: {
+                true: toolbarDisabledClassName,
+                false: `
+                  univer-text-gray-900
+                  dark:!univer-text-gray-0
+                `,
+            },
+        },
+        defaultVariants: {
+            disabled: false,
+        },
+    }
+);
+
+const toolbarButtonSelectorMainVariants = cva(
+    `
+      univer-toolbar-button-selector-main univer-relative univer-z-[1] univer-flex univer-h-full univer-min-w-7
+      univer-items-center univer-justify-center univer-rounded-l univer-px-1 univer-transition-colors
+      hover:univer-bg-gray-200
+      rtl:univer-rounded-l-none rtl:univer-rounded-r
+      dark:hover:!univer-bg-gray-600
+    `,
+    {
+        variants: {
+            active: {
+                true: `
+                  univer-bg-gray-200
+                  dark:!univer-bg-gray-500
+                `,
+                false: '',
+            },
+            disabled: {
+                true: '',
+                false: '',
+            },
+        },
+        compoundVariants: [
+            {
+                active: true,
+                disabled: true,
+                class: 'univer-bg-gray-100',
+            },
+        ],
+        defaultVariants: {
+            active: false,
+            disabled: false,
+        },
+    }
+);
+
+const toolbarButtonSelectorTriggerVariants = cva(
+    `
+      univer-toolbar-button-selector-trigger univer-absolute univer-right-0 univer-top-0 univer-box-border univer-flex
+      univer-h-7 univer-w-6 univer-items-center univer-justify-center univer-rounded-r univer-transition-colors
+      hover:univer-bg-gray-200
+      rtl:univer-left-0 rtl:univer-right-auto rtl:univer-rounded-l rtl:univer-rounded-r-none
+      dark:hover:!univer-bg-gray-600
+    `,
+    {
+        variants: {
+            disabled: {
+                true: toolbarDisabledClassName,
+                false: '',
+            },
+            active: {
+                true: `
+                  univer-bg-gray-200
+                  dark:!univer-bg-gray-500
+                `,
+                false: '',
+            },
+        },
+        compoundVariants: [
+            {
+                active: true,
+                disabled: true,
+                class: 'univer-bg-gray-100',
+            },
+        ],
+        defaultVariants: {
+            disabled: false,
+            active: false,
+        },
+    }
+);
+
+const toolbarSelectorRootVariants = cva(
+    `
+      univer-toolbar-selector-root univer-animate-in univer-fade-in univer-relative univer-flex univer-h-7
+      univer-cursor-pointer univer-items-center univer-gap-1 univer-whitespace-nowrap univer-rounded univer-px-1
+      univer-transition-colors
+      focus-within:univer-ring-2 focus-within:univer-ring-inset focus-within:univer-ring-primary-600
+      hover:univer-bg-gray-100
+      focus-visible:univer-outline-none focus-visible:univer-ring-2 focus-visible:univer-ring-inset
+      focus-visible:univer-ring-primary-600
+      dark:hover:!univer-bg-gray-700
+    `,
+    {
+        variants: {
+            disabled: {
+                true: toolbarDisabledClassName,
+                false: `
+                  univer-text-gray-900
+                  dark:!univer-text-gray-0
+                `,
+            },
+            active: {
+                true: `
+                  univer-bg-gray-200
+                  dark:!univer-bg-gray-500
+                `,
+                false: '',
+            },
+        },
+        compoundVariants: [
+            {
+                active: true,
+                disabled: true,
+                class: 'univer-bg-gray-100',
+            },
+        ],
+        defaultVariants: {
+            disabled: false,
+            active: false,
+        },
+    }
+);
+
+const toolbarSelectorTriggerVariants = cva(`
+  univer-toolbar-selector-trigger univer-flex univer-h-full univer-items-center
+`, {
+    variants: {
+        disabled: {
+            true: toolbarDisabledClassName,
+            false: '',
+        },
+    },
+    defaultVariants: {
+        disabled: false,
+    },
+});
+
+export const ToolbarItem = forwardRef<ITooltipWrapperRef, IToolbarItemProps>((props, ref) => {
+    const localeService = useDependency(LocaleService);
+    const commandService = useDependency(ICommandService);
+    const layoutService = useDependency(ILayoutService);
+    const componentManager = useDependency(ComponentManager);
+
+    const { value, hidden, disabled, activated } = useToolbarItemStatus(props);
+
+    const executeCommand = (commandId: string, params?: Record<string, unknown>) => {
+        layoutService.focus();
+        return commandService.executeCommand(commandId, params);
+    };
+
+    const {
+        tooltip,
+        shortcut,
+        icon,
+        title,
+        label,
+        id,
+        commandId,
+        type,
+        slot,
+        params,
+        grid,
+        overflow,
+        large,
+        showLabel,
+        iconSize,
+        iconColor,
+        fullWidth,
+        preserveStrokeWidth,
+        dropdownComponent,
+        dropdownMenuComponent,
+    } = props;
+    const gridLabel = title ?? tooltip;
+
+    const shortcutDisplay = useToolbarShortcutDisplay({ id, commandId, shortcut });
+    const tooltipLabel = tooltip ?? (overflow ? title : undefined);
+    let tooltipTitle = typeof tooltipLabel === 'string' ? localeService.t(tooltipLabel) : '';
+    if (shortcutDisplay) {
+        tooltipTitle += ` (${shortcutDisplay})`;
+    }
+
+    const { selections } = props as IDisplayMenuItem<IMenuSelectorItem>;
+    const selections$ = useMemo(() => {
+        if (isObservable(selections)) {
+            return selections;
+        } else {
+            return new Observable<typeof selections>((subscribe) => {
+                subscribe.next(selections);
+            });
+        }
+    }, [selections]);
+
+    const options = useObservable(selections$) as IValueOption[];
+
+    const icon$ = useMemo(() => {
+        if (isObservable(icon)) {
+            return icon;
+        } else {
+            return new Observable<typeof icon>((subscribe) => {
+                const v = options?.find((o) => o.value === value)?.icon ?? icon;
+                subscribe.next(v);
+            });
+        }
+    }, [icon, options, value]);
+
+    const iconToDisplay = useObservable(icon$, undefined, true);
+
+    function renderSelectorType(menuType: MenuItemType) {
+        const selectionsCommandId = (props as IDisplayMenuItem<IMenuSelectorItem>).selectionsCommandId;
+        const bId = commandId ?? id;
+        const sId = selectionsCommandId ?? commandId ?? id;
+        const customLabelName = typeof label === 'string' ? label : label?.name ?? '';
+        const hasCustomLabel = Boolean(componentManager.get(customLabelName));
+        const SelectorTrigger = hasCustomLabel ? ToolbarDropdownButton : 'div';
+        let titleToDisplay = grid ? (showLabel ? gridLabel : large ? undefined : title) : title;
+        if (overflow) {
+            titleToDisplay = hasCustomLabel || (iconToDisplay && !showLabel) ? undefined : gridLabel;
+        }
+        const selectorAriaLabel = tooltip
+            ? localeService.t(tooltip)
+            : typeof title === 'string'
+                ? localeService.t(title)
+                : undefined;
+
+        function handleSelect(option: IValueOption) {
+            if (disabled) return;
+
+            let commandId = sId;
+            if (option.id) {
+                commandId = option.id;
+            }
+
+            const commandParams = typeof option.params === 'function' ? option.params(option.value) : option.params;
+            return executeCommand(commandId, commandParams ?? { value: option.value });
+        }
+
+        function handleSelectionsValueChange(value: string | number) {
+            if (disabled) return;
+            return executeCommand(sId, { value });
+        }
+
+        function handleClick() {
+            if (disabled) return;
+
+            if (menuType === MenuItemType.BUTTON_SELECTOR) {
+                const commandParams = typeof params === 'function' ? params() : params;
+                return executeCommand(bId, commandParams ?? { value });
+            }
+        }
+
+        if (menuType === MenuItemType.BUTTON_SELECTOR) {
+            return (
+                <div
+                    data-u-command={id}
+                    data-disabled={disabled}
+                    aria-disabled={disabled}
+                    className={clsx(toolbarButtonSelectorRootVariants({ disabled }), {
+                        'univer-box-border univer-h-full univer-min-w-14 univer-flex-col !univer-pr-0': grid && large,
+                        'univer-box-border univer-h-full': grid && !large,
+                        '!univer-h-auto univer-min-h-7 univer-w-full univer-text-xs': overflow,
+                    })}
+                >
+                    <button
+                        type="button"
+                        disabled={disabled}
+                        aria-label={selectorAriaLabel}
+                        aria-pressed={props.activated$ ? activated : undefined}
+                        className={clsx(`
+                          univer-border-0 univer-bg-transparent univer-text-inherit
+                          focus-visible:univer-ring-2 focus-visible:univer-ring-primary-600
+                        `, toolbarButtonSelectorMainVariants({ active: activated, disabled }), {
+                            'univer-h-full univer-w-full univer-flex-col univer-justify-center univer-rounded univer-px-1 univer-pb-4 [&>svg]:univer-size-6': grid && large,
+                            '[&>svg]:univer-size-4': grid && !large,
+                            'univer-min-h-7 univer-min-w-0 univer-flex-1 univer-gap-1.5 univer-whitespace-normal univer-px-1.5 univer-text-start': overflow,
+                        })}
+                        onClick={handleClick}
+                    >
+                        <CustomLabel
+                            icon={iconToDisplay}
+                            iconSize={iconSize}
+                            preserveStrokeWidth={preserveStrokeWidth}
+                            title={titleToDisplay}
+                            value={iconColor ?? value}
+                            label={label}
+                            onChange={handleSelectionsValueChange}
+                        />
+                    </button>
+
+                    <DropdownMenuWrapper
+                        menuId={id}
+                        slot={slot}
+                        value={value}
+                        options={options}
+                        disabled={disabled}
+                        preserveStrokeWidth={preserveStrokeWidth}
+                        onOptionSelect={handleSelect}
+                        dropdownComponent={dropdownComponent}
+                        dropdownMenuComponent={dropdownMenuComponent}
+                    >
+                        <button
+                            type="button"
+                            disabled={disabled}
+                            aria-label={`${selectorAriaLabel ?? ''} ${localeService.t('ui.ribbon.more')}`}
+                            className={clsx(`
+                              univer-border-0 univer-bg-transparent univer-text-inherit
+                              focus-visible:univer-ring-2 focus-visible:univer-ring-primary-600
+                            `, toolbarButtonSelectorTriggerVariants({ disabled, active: activated }), {
+                                '!univer-top-auto univer-bottom-0 univer-h-4 univer-w-full univer-rounded-b univer-rounded-t-none': grid && large,
+                                'univer-h-full': grid && !large,
+                            })}
+                            data-disabled={disabled}
+                        >
+                            <MoreDownIcon preserveStrokeWidth={preserveStrokeWidth} />
+                        </button>
+                    </DropdownMenuWrapper>
+                </div>
+            );
+        } else {
+            return (
+                <DropdownMenuWrapper
+                    menuId={id}
+                    slot={slot}
+                    value={value}
+                    options={options}
+                    disabled={disabled}
+                    preserveStrokeWidth={preserveStrokeWidth}
+                    onOptionSelect={handleSelect}
+                    dropdownComponent={dropdownComponent}
+                    dropdownMenuComponent={dropdownMenuComponent}
+                >
+                    <div
+                        data-u-command={id}
+                        role={hasCustomLabel ? undefined : 'button'}
+                        tabIndex={hasCustomLabel ? undefined : disabled ? -1 : 0}
+                        aria-disabled={hasCustomLabel ? undefined : disabled}
+                        aria-label={hasCustomLabel ? undefined : selectorAriaLabel}
+                        className={clsx(toolbarSelectorRootVariants({ disabled, active: activated }), {
+                            'univer-box-border univer-h-full univer-min-w-14 univer-flex-col univer-justify-center univer-gap-1 univer-px-1.5 univer-py-1 univer-text-xs [&>svg]:univer-size-6': grid && large,
+                            'univer-box-border univer-h-full': grid && !large,
+                            'univer-bg-gray-0 dark:!univer-bg-gray-800': grid && !large && !icon,
+                            '[&>svg]:univer-size-4': grid && !large,
+                            '!univer-h-auto univer-min-h-7 univer-w-full univer-min-w-0 univer-gap-1.5 univer-whitespace-normal univer-px-1.5 univer-text-start univer-text-xs focus-visible:univer-ring-2 focus-visible:univer-ring-primary-600 [&>span]:univer-min-w-0 [&>span]:univer-whitespace-normal': overflow,
+                        }, grid && !large && !icon && borderClassName)}
+                    >
+                        {grid && large
+                            ? (
+                                <>
+                                    <CustomLabel
+                                        icon={iconToDisplay}
+                                        iconSize={iconSize}
+                                        preserveStrokeWidth={preserveStrokeWidth}
+                                    />
+                                    <div
+                                        className={clsx(
+                                            toolbarSelectorTriggerVariants({ disabled }),
+                                            'univer-h-4 univer-justify-center univer-gap-0.5'
+                                        )}
+                                    >
+                                        <CustomLabel
+                                            ariaLabel={selectorAriaLabel}
+                                            title={titleToDisplay}
+                                            value={value}
+                                            label={label}
+                                            onChange={handleSelectionsValueChange}
+                                        />
+                                        <MoreDownIcon preserveStrokeWidth={preserveStrokeWidth} />
+                                    </div>
+                                </>
+                            )
+                            : (
+                                <>
+                                    <CustomLabel
+                                        ariaLabel={selectorAriaLabel}
+                                        className={fullWidth && hasCustomLabel
+                                            ? '!univer-w-auto univer-min-w-0 univer-flex-1'
+                                            : undefined}
+                                        icon={iconToDisplay}
+                                        iconSize={iconSize}
+                                        preserveStrokeWidth={preserveStrokeWidth}
+                                        title={titleToDisplay}
+                                        value={value}
+                                        label={label}
+                                        onChange={handleSelectionsValueChange}
+                                    />
+                                    <SelectorTrigger
+                                        disabled={hasCustomLabel ? disabled : undefined}
+                                        aria-label={hasCustomLabel ? selectorAriaLabel : undefined}
+                                        aria-haspopup={hasCustomLabel ? slot ? 'dialog' : 'menu' : undefined}
+                                        className={clsx(toolbarSelectorTriggerVariants({ disabled }), {
+                                            'univer-ml-auto rtl:univer-ml-0 rtl:univer-mr-auto': grid && !large && !icon,
+                                        }, 'univer-w-6 univer-shrink-0 univer-justify-center', hasCustomLabel && `
+                                          univer-h-7 univer-cursor-pointer univer-rounded univer-border-0
+                                          univer-bg-transparent univer-p-0 univer-text-inherit
+                                          focus-visible:univer-outline-none focus-visible:univer-ring-2
+                                          focus-visible:univer-ring-inset focus-visible:univer-ring-primary-600
+                                        `)}
+                                    >
+                                        <MoreDownIcon preserveStrokeWidth={preserveStrokeWidth} />
+                                    </SelectorTrigger>
+                                </>
+                            )}
+                    </div>
+                </DropdownMenuWrapper>
+            );
+        }
+    }
+
+    function renderButtonType() {
+        const isCustomComponent = componentManager.get(typeof label === 'string' ? label : label?.name ?? '');
+        const buttonAriaLabel = tooltip
+            ? localeService.t(tooltip)
+            : typeof title === 'string'
+                ? localeService.t(title)
+                : undefined;
+        const buttonClassName = clsx(grid && !large && `
+          univer-min-w-7
+          [&>svg]:univer-size-4
+        `, grid && large
+            ? `
+              univer-h-full univer-min-w-14 univer-flex-col univer-gap-1 univer-px-1.5 univer-py-1 univer-text-xs
+              [&>svg]:univer-size-6
+            `
+            : showLabel
+                ? 'univer-gap-1 univer-px-1.5 univer-text-sm'
+                : 'univer-text-sm', grid && fullWidth && isCustomComponent && '!univer-px-0', overflow && `
+                  !univer-h-auto univer-min-h-7 univer-w-full univer-justify-start univer-gap-1.5
+                  univer-whitespace-normal univer-px-1.5 univer-py-1 univer-text-start univer-text-xs
+                  focus-visible:univer-ring-2 focus-visible:univer-ring-primary-600
+                `);
+        const buttonStyle = grid && large ? { textAlign: 'center', whiteSpace: 'normal' } as const : undefined;
+
+        if (isCustomComponent) {
+            const hoverable = typeof label === 'string' || label?.hoverable !== false;
+
+            return (
+                <span
+                    data-u-command={id}
+                    className={clsx(toolbarButtonVariants({
+                        noIcon: !icon,
+                        active: activated,
+                        className: clsx(buttonClassName, !hoverable && `
+                          univer-cursor-default !univer-bg-transparent
+                          hover:!univer-bg-transparent
+                          dark:hover:!univer-bg-transparent
+                        `),
+                    }))}
+                    style={buttonStyle}
+                    aria-disabled={disabled}
+                >
+                    <CustomLabel
+                        className={grid && fullWidth ? '!univer-w-full' : undefined}
+                        title={overflow ? undefined : grid && showLabel ? gridLabel! : title!}
+                        value={value}
+                        label={label}
+                    />
+                </span>
+            );
+        }
+
+        return (
+            <ToolbarButton
+                data-u-command={id}
+                aria-label={buttonAriaLabel}
+                className={buttonClassName}
+                style={buttonStyle}
+                noIcon={!icon}
+                active={activated}
+                aria-pressed={props.activated$ ? activated : undefined}
+                disabled={disabled}
+                onClick={(event) => {
+                    // A double-click upgrades the first click's action; do not execute its toggle twice.
+                    if (props.subId && event.detail > 1) {
+                        return;
+                    }
+                    const commandParams = typeof params === 'function' ? params() : params;
+                    return executeCommand(props.commandId ?? props.id, commandParams ?? (typeof value === 'undefined' ? undefined : { value }));
+                }}
+                onDoubleClick={() => props.subId && executeCommand(props.subId)}
+            >
+                {icon
+                    ? (
+                        <CustomLabel
+                            icon={icon}
+                            iconSize={iconSize}
+                            preserveStrokeWidth={preserveStrokeWidth}
+                            title={grid && (large || showLabel) ? gridLabel : undefined}
+                        />
+                    )
+                    : <CustomLabel title={overflow ? gridLabel : title!} />}
+            </ToolbarButton>
+        );
+    }
+
+    function renderItem() {
+        switch (type) {
+            case MenuItemType.BUTTON_SELECTOR:
+            case MenuItemType.SELECTOR:
+            case MenuItemType.SUBITEMS:
+                return renderSelectorType(type);
+            case MenuItemType.BUTTON:
+            default:
+                return renderButtonType();
+        }
+    }
+
+    return !hidden && (
+        <TooltipWrapper
+            ref={ref}
+            title={tooltipTitle}
+            placement="bottom"
+            dropdownKey={id}
+        >
+            {renderItem()}
+        </TooltipWrapper>
+    );
+});

@@ -1,0 +1,912 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type { Dependency, ICommand, IDisposable, IDocumentData, Nullable } from '@univerjs/core';
+import type { ISuccinctDocRangeParam } from '@univerjs/engine-render';
+import type { IThreadComment } from '@univerjs/thread-comment';
+import type { IShortcutItem } from '@univerjs/ui';
+import type { Root } from 'react-dom/client';
+import {
+    CommandService,
+    CommandType,
+    ConfigService,
+    ContextService,
+    createIdentifier,
+    CustomRangeType,
+    dateKit,
+    DesktopLogService,
+    ICommandService,
+    IConfigService,
+    IContextService,
+    ILogService,
+    Injector,
+    IUniverInstanceService,
+    LifecycleService,
+    LifecycleStages,
+    LOCALE_META,
+    LocaleService,
+    LocaleType,
+    LogLevel,
+    RegionService,
+    toDisposable,
+    UniverInstanceType,
+    UserManagerService,
+} from '@univerjs/core';
+import { IEditorService } from '@univerjs/docs-ui';
+import {
+    AddCommentCommand,
+    AddCommentMutation,
+    DeleteCommentCommand,
+    DeleteCommentMutation,
+    DeleteCommentTreeCommand,
+    IThreadCommentDataSourceService,
+    ResolveCommentCommand,
+    ResolveCommentMutation,
+    ThreadCommentDataSourceService,
+    ThreadCommentModel,
+    UpdateCommentCommand,
+    UpdateCommentMutation,
+} from '@univerjs/thread-comment';
+import { IShortcutService, ISidebarService, RediContext } from '@univerjs/ui';
+import { act } from 'react';
+import { createRoot } from 'react-dom/client';
+import { BehaviorSubject, Subject } from 'rxjs';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { SetActiveCommentOperation } from '../../commands/operations/comment.operations';
+import enUS from '../../locale/en-US';
+import { ThreadCommentPanelService } from '../../services/thread-comment-panel.service';
+import { transformTextNodes2Document } from '../thread-comment-editor/util';
+import { ThreadCommentTree, ThreadCommentTreeLocation } from '../ThreadCommentTree';
+
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+const UNIT_ID = 'unit-1';
+const SHEET_ID = 'sheet-1';
+const REPLY_LABEL = 'thread-comment-ui.editor.reply';
+const IRenderManagerService = createIdentifier<TestRenderManagerService>('engine-render.render-manager.service');
+
+interface IEditorRecord {
+    id: string;
+    data: IDocumentData;
+    selections: ISuccinctDocRangeParam[];
+    focused: boolean;
+}
+
+class TestState {
+    static addedComments: IThreadComment[] = [];
+    static resolveStates: boolean[] = [];
+
+    static reset() {
+        this.addedComments = [];
+        this.resolveStates = [];
+    }
+}
+
+class TestLocaleService {
+    private readonly _currentLocale$ = new BehaviorSubject<LocaleType>(LocaleType.ZH_CN);
+    readonly currentLocale$ = this._currentLocale$.asObservable();
+    private readonly _direction$ = new BehaviorSubject<'ltr' | 'rtl'>('ltr');
+    readonly direction$ = this._direction$.asObservable();
+
+    t(key: string) {
+        return key;
+    }
+
+    setLocale(locale: LocaleType) {
+        this._currentLocale$.next(locale);
+    }
+
+    getCurrentLocale() {
+        return this._currentLocale$.getValue();
+    }
+
+    setDirection(direction: 'ltr' | 'rtl') {
+        this._direction$.next(direction);
+    }
+
+    getDirection() {
+        return this._direction$.getValue();
+    }
+}
+
+class TestEditor {
+    readonly input$ = new Subject<unknown>();
+    readonly paste$ = new Subject<unknown>();
+    readonly focus$ = new Subject<unknown>();
+    readonly blur$ = new Subject<unknown>();
+    readonly change$ = new Subject<unknown>();
+    readonly selectionChange$ = new Subject<unknown>();
+
+    readonly render = {
+        isDisposed: () => false,
+        with: () => ({
+            getSkeleton: () => ({
+                getActualSize: () => ({ actualWidth: 0, actualHeight: 0 }),
+            }),
+            getViewModel: () => ({
+                getDataModel: () => ({
+                    updateDocumentDataPageSize: () => undefined,
+                }),
+            }),
+        }),
+        scene: {
+            transformByState: () => undefined,
+            getViewport: () => undefined,
+        },
+        mainComponent: {
+            resize: () => undefined,
+            translate: () => undefined,
+        },
+        components: {
+            get: () => undefined,
+        },
+    };
+
+    constructor(private readonly _record: IEditorRecord) {
+    }
+
+    isFocus() {
+        return this._record.focused;
+    }
+
+    focus(): void {
+        this._record.focused = true;
+        this.focus$.next(undefined);
+    }
+
+    blur(): void {
+        this._record.focused = false;
+        this.blur$.next(undefined);
+    }
+
+    select(): void {
+    }
+
+    setSelectionRanges(ranges: ISuccinctDocRangeParam[]): void {
+        this._record.selections = ranges;
+        this.selectionChange$.next(undefined);
+    }
+
+    getSelectionRanges() {
+        return this._record.selections;
+    }
+
+    getEditorId() {
+        return this._record.id;
+    }
+
+    getDocumentData() {
+        return this._record.data;
+    }
+
+    setDocumentData(data: IDocumentData, ranges: ISuccinctDocRangeParam[] = []): void {
+        this._record.data = data;
+        this._record.selections = ranges;
+        this.selectionChange$.next(undefined);
+    }
+
+    replaceText(value: string): void {
+        this._record.data = {
+            ...this._record.data,
+            body: {
+                dataStream: `${value}\r\n`,
+            },
+        };
+        this.selectionChange$.next(undefined);
+    }
+
+    clearUndoRedoHistory(): void {
+    }
+
+    getValue() {
+        return this._record.data.body?.dataStream ?? '';
+    }
+
+    isSheetEditor() {
+        return false;
+    }
+
+    getBoundingClientRect() {
+        return { width: 320, height: 64 };
+    }
+}
+
+class TestEditorService {
+    private readonly _editors = new Map<string, TestEditor>();
+    private _focusId: Nullable<string>;
+    readonly blur$ = new Subject<unknown>();
+    readonly focus$ = new Subject<ISuccinctDocRangeParam>();
+
+    getEditor(id?: string): Nullable<TestEditor> {
+        return id ? this._editors.get(id) : undefined;
+    }
+
+    register(config: { initialSnapshot: IDocumentData }, _container: HTMLDivElement): IDisposable {
+        const snapshot = config.initialSnapshot;
+        const record: IEditorRecord = {
+            id: snapshot.id,
+            data: snapshot,
+            selections: [],
+            focused: false,
+        };
+        const editor = new TestEditor(record);
+        this._editors.set(record.id, editor);
+
+        return toDisposable(() => {
+            this._editors.delete(record.id);
+        });
+    }
+
+    getAllEditor() {
+        return this._editors;
+    }
+
+    isEditor(editorUnitId: string) {
+        return this._editors.has(editorUnitId);
+    }
+
+    getEditorRenderConfig() {
+        return null;
+    }
+
+    isSheetEditor() {
+        return false;
+    }
+
+    blur(): void {
+        this.getFocusEditor()?.blur();
+        this._focusId = null;
+        this.blur$.next(undefined);
+    }
+
+    focus(editorUnitId: string): void {
+        this._focusId = editorUnitId;
+        this.getEditor(editorUnitId)?.focus();
+        this.focus$.next({ startOffset: 0, endOffset: 0 });
+    }
+
+    getFocusId() {
+        return this._focusId;
+    }
+
+    getFocusEditor() {
+        return this._focusId ? this.getEditor(this._focusId) : undefined;
+    }
+}
+
+class TestRenderManagerService {
+    readonly created$ = new Subject<unknown>();
+    readonly disposed$ = new Subject<string>();
+    readonly defaultEngine = {};
+
+    addRender(): void {}
+    createRender() { return undefined; }
+    removeRender(): void {}
+    getRenderUnitById() { return undefined; }
+    getAllRenderersOfType() { return []; }
+    getRenderAll() { return new Map(); }
+    create(): void {}
+    has() { return false; }
+    registerRenderModule(): IDisposable { return toDisposable(() => undefined); }
+    dispose(): void {}
+}
+
+class TestShortcutService {
+    readonly shortcutChanged$ = new Subject<void>();
+    readonly shortcuts: IShortcutItem[] = [];
+
+    forceEscape(): IDisposable { return toDisposable(() => undefined); }
+    forceDisable(): IDisposable { return toDisposable(() => undefined); }
+    dispatch(): undefined { return undefined; }
+    registerShortcut(shortcut: IShortcutItem): IDisposable {
+        this.shortcuts.push(shortcut);
+        return toDisposable(() => undefined);
+    }
+
+    getShortcutDisplay(): string | null { return null; }
+    getShortcutDisplayOfCommand(): string | null { return null; }
+    getAllShortcuts(): IShortcutItem[] { return this.shortcuts; }
+}
+
+class TestSidebarService {
+    readonly sidebarOptions$ = new BehaviorSubject({ visible: true });
+    readonly scrollEvent$ = new Subject<Event>();
+    private _container: HTMLElement | undefined;
+    private _width: number | undefined;
+
+    open(): IDisposable { return toDisposable(() => undefined); }
+    close(): void {
+        this.sidebarOptions$.next({ visible: false });
+    }
+
+    get visible() { return this.sidebarOptions$.getValue().visible; }
+    get options() { return this.sidebarOptions$.getValue(); }
+    getContainer() { return this._container; }
+    setContainer(element?: HTMLElement): void { this._container = element; }
+    get width() { return this._width; }
+    setWidth(value: number): void { this._width = value; }
+}
+
+class TestUniverInstanceService {
+    getCurrentTypeOfUnit$() {
+        return new BehaviorSubject({ id: 'workbook' });
+    }
+
+    setCurrentUnitForType(): void {
+    }
+}
+
+const TestRichTextEditingMutation: ICommand = {
+    id: 'doc.mutation.rich-text-editing',
+    type: CommandType.MUTATION,
+    handler: () => true,
+};
+
+function createComment(overrides: Partial<IThreadComment>): IThreadComment {
+    const id = overrides.id ?? 'thread-1';
+
+    return {
+        id,
+        threadId: overrides.threadId ?? id,
+        ref: overrides.ref ?? 'A1',
+        dT: overrides.dT ?? '2026-06-17T00:00:00.000Z',
+        personId: overrides.personId ?? 'owner',
+        authorName: overrides.authorName,
+        text: overrides.text ?? transformTextNodes2Document([{ type: 'text', content: id }]),
+        unitId: overrides.unitId ?? UNIT_ID,
+        subUnitId: overrides.subUnitId ?? SHEET_ID,
+        attachments: overrides.attachments,
+        children: overrides.children,
+        mentions: overrides.mentions,
+        parentId: overrides.parentId,
+        resolved: overrides.resolved,
+        updateT: overrides.updateT,
+        updated: overrides.updated,
+    };
+}
+
+function createTreeTestBed(localeDependency: Dependency = [LocaleService, { useClass: TestLocaleService as never }]) {
+    const injector = new Injector();
+    const dependencies: Dependency[] = [
+        [ICommandService, { useClass: CommandService }],
+        [ILogService, { useClass: DesktopLogService }],
+        [IContextService, { useClass: ContextService }],
+        [IConfigService, { useClass: ConfigService }],
+        localeDependency,
+        [RegionService],
+        [IEditorService, { useClass: TestEditorService as never }],
+        [IRenderManagerService, { useClass: TestRenderManagerService as never }],
+        [IShortcutService, { useClass: TestShortcutService as never }],
+        [ISidebarService, { useClass: TestSidebarService as never }],
+        [IUniverInstanceService, { useClass: TestUniverInstanceService as never }],
+        [IThreadCommentDataSourceService, { useClass: ThreadCommentDataSourceService }],
+        [LifecycleService],
+        [UserManagerService],
+        [ThreadCommentModel],
+        [ThreadCommentPanelService],
+    ];
+
+    dependencies.forEach((dependency) => injector.add(dependency));
+    injector.get(ILogService).setLogLevel(LogLevel.SILENT);
+    injector.get(LifecycleService).stage = LifecycleStages.Rendered;
+    injector.get(UserManagerService).setCurrentUser({ userID: 'owner', name: 'Owner', avatar: 'owner.png' });
+
+    const commandService = injector.get(ICommandService);
+    [
+        AddCommentCommand,
+        AddCommentMutation,
+        DeleteCommentCommand,
+        DeleteCommentMutation,
+        DeleteCommentTreeCommand,
+        ResolveCommentCommand,
+        ResolveCommentMutation,
+        SetActiveCommentOperation,
+        UpdateCommentCommand,
+        UpdateCommentMutation,
+        TestRichTextEditingMutation,
+    ].forEach((command) => commandService.registerCommand(command));
+
+    return {
+        commandService,
+        injector,
+        editorService: injector.get(IEditorService),
+        panelService: injector.get(ThreadCommentPanelService),
+        threadCommentModel: injector.get(ThreadCommentModel),
+    };
+}
+
+function renderTree(injector: Injector, element: React.ReactElement) {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+        root.render(
+            <RediContext.Provider value={{ injector }}>
+                {element}
+            </RediContext.Provider>
+        );
+    });
+
+    return { container, root };
+}
+
+function renderDefaultTree(injector: Injector, commentId?: string) {
+    return renderTree(
+        injector,
+        <ThreadCommentTree
+            id={commentId}
+            unitId={UNIT_ID}
+            subUnitId={SHEET_ID}
+            refStr="A1"
+            type={UniverInstanceType.UNIVER_SHEET}
+            getSubUnitName={(subUnitId) => subUnitId}
+            location={ThreadCommentTreeLocation.PANEL}
+            onAddComment={(comment) => {
+                TestState.addedComments.push(comment);
+                return true;
+            }}
+            onResolve={(resolved) => {
+                TestState.resolveStates.push(resolved);
+            }}
+        />
+    );
+}
+
+function getTree(container: HTMLElement, commentId: string) {
+    const item = container.querySelector(`#PANEL-${UNIT_ID}-${SHEET_ID}-${commentId}`);
+    if (!item) {
+        throw new Error(`Tree item "${commentId}" was not found.`);
+    }
+
+    return item as HTMLElement;
+}
+
+function getButton(container: HTMLElement, text: string): HTMLButtonElement {
+    const button = Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.trim() === text);
+    if (!button) {
+        throw new Error(`Button "${text}" was not found.`);
+    }
+
+    return button as HTMLButtonElement;
+}
+
+function getResolveAction(container: HTMLElement, commentId: string) {
+    const tree = getTree(container, commentId);
+    const action = tree.querySelector<HTMLButtonElement>(
+        'button[aria-label="thread-comment-ui.item.markResolved"], button[aria-label="thread-comment-ui.item.markUnresolved"]'
+    );
+    if (!action) {
+        throw new Error('Resolve action was not found.');
+    }
+
+    return action;
+}
+
+function getRootCommentItem(container: HTMLElement, commentId: string) {
+    const scroller = getTree(container, commentId).children[1];
+    const item = scroller?.firstElementChild;
+    if (!item) {
+        throw new Error('Root comment item was not found.');
+    }
+
+    return item as HTMLElement;
+}
+
+function getReplyAction(container: HTMLElement, commentId: string) {
+    const item = getRootCommentItem(container, commentId);
+    const nameRow = item.children[1] as HTMLElement | undefined;
+    const controls = nameRow?.lastElementChild as HTMLElement | undefined;
+    const action = controls?.firstElementChild;
+    if (!action) {
+        throw new Error('Reply action was not found.');
+    }
+
+    return action as HTMLElement;
+}
+
+function getMoreAction(container: HTMLElement, commentId: string) {
+    const item = getRootCommentItem(container, commentId);
+    const nameRow = item.children[1] as HTMLElement | undefined;
+    const controls = nameRow?.lastElementChild as HTMLElement | undefined;
+    const action = controls?.lastElementChild;
+    if (!action) {
+        throw new Error('More action was not found.');
+    }
+
+    return action as HTMLElement;
+}
+
+function getOnlyEditor(testBed: ReturnType<typeof createTreeTestBed>) {
+    const editors = Array.from(testBed.editorService.getAllEditor().values());
+    if (editors.length !== 1) {
+        throw new Error(`Expected one editor, received ${editors.length}.`);
+    }
+
+    return editors[0];
+}
+
+function addRootComment(model: ThreadCommentModel, comment: IThreadComment) {
+    model.addComment(comment.unitId, comment.subUnitId, comment);
+}
+
+function waitForTreeRefresh() {
+    return new Promise((resolve) => setTimeout(resolve, 40));
+}
+
+function waitForFrame() {
+    return new Promise((resolve) => setTimeout(resolve, 16));
+}
+
+describe('ThreadCommentTree', () => {
+    let root: Root | undefined;
+    let container: HTMLElement | undefined;
+
+    beforeEach(() => {
+        document.body.innerHTML = '';
+        TestState.reset();
+    });
+
+    afterEach(() => {
+        if (root) {
+            act(() => root!.unmount());
+        }
+        container?.remove();
+        root = undefined;
+        container = undefined;
+    });
+
+    it('keeps timestamps left-to-right inside RTL comment rows', () => {
+        const testBed = createTreeTestBed();
+        addRootComment(testBed.threadCommentModel, createComment({ id: 'root-thread', ref: 'A1', dT: '2026/07/07 20:35' }));
+
+        const rendered = renderDefaultTree(testBed.injector, 'root-thread');
+        root = rendered.root;
+        container = rendered.container;
+
+        const item = getRootCommentItem(container, 'root-thread');
+        const time = item.querySelector('time');
+
+        expect(time?.querySelector('bdo')?.getAttribute('dir')).toBe('ltr');
+    });
+
+    it('right-aligns the comment action menu in RTL', () => {
+        const testBed = createTreeTestBed();
+        const localeService = testBed.injector.get(LocaleService);
+        addRootComment(testBed.threadCommentModel, createComment({ id: 'root-thread', ref: 'A1' }));
+
+        const rendered = renderDefaultTree(testBed.injector, 'root-thread');
+        root = rendered.root;
+        container = rendered.container;
+
+        act(() => localeService.setDirection('rtl'));
+        act(() => getMoreAction(container!, 'root-thread').click());
+
+        const menu = document.body.querySelector('[data-slot="popover-content"] ul');
+
+        expect(menu).not.toBeNull();
+        expect(menu?.parentElement?.getAttribute('dir')).toBe('rtl');
+    });
+
+    it('formats comment timestamps with dateKit intl using the current region', () => {
+        const testBed = createTreeTestBed();
+        const rawDate = '2026/07/07 20:35';
+        testBed.injector.get(LocaleService).setLocale(LocaleType.ZH_CN);
+        testBed.injector.get(RegionService).setRegion(LocaleType.EN_US);
+        addRootComment(testBed.threadCommentModel, createComment({ id: 'root-thread', ref: 'A1', dT: rawDate }));
+
+        const rendered = renderDefaultTree(testBed.injector, 'root-thread');
+        root = rendered.root;
+        container = rendered.container;
+
+        const time = getRootCommentItem(container, 'root-thread').querySelector('time');
+        const expected = dateKit(rawDate).formatIntl(LOCALE_META[LocaleType.EN_US].tag, {
+            year: 'numeric',
+            month: 'numeric',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false,
+        });
+
+        expect(time?.textContent).toBe(expected);
+        expect(time?.textContent).not.toBe(rawDate);
+    });
+
+    it.each([LocaleType.AR_SA, LocaleType.FA_IR])('uses Latin digits for %s comment timestamps', (region) => {
+        const testBed = createTreeTestBed();
+        const rawDate = '2026/07/07 20:35';
+        testBed.injector.get(RegionService).setRegion(region);
+        addRootComment(testBed.threadCommentModel, createComment({ id: 'root-thread', ref: 'A1', dT: rawDate }));
+
+        const rendered = renderDefaultTree(testBed.injector, 'root-thread');
+        root = rendered.root;
+        container = rendered.container;
+
+        const dateText = getRootCommentItem(container, 'root-thread').querySelector('time')?.textContent ?? '';
+
+        expect(dateText).toMatch(/[0-9]/);
+        expect(dateText).not.toMatch(/[\u0660-\u0669\u06F0-\u06F9]/u);
+    });
+
+    it('does not render a timestamp for a new comment', () => {
+        const testBed = createTreeTestBed();
+
+        const rendered = renderDefaultTree(testBed.injector);
+        root = rendered.root;
+        container = rendered.container;
+
+        expect(container.querySelector('time')).toBeNull();
+    });
+
+    it('treats HTML-looking comment content as text instead of DOM', () => {
+        const testBed = createTreeTestBed();
+        addRootComment(testBed.threadCommentModel, createComment({
+            id: 'untrusted-thread',
+            text: { dataStream: '<img src=x onerror=alert(1)><script>alert(2)</script>\r\n' },
+        }));
+
+        const rendered = renderDefaultTree(testBed.injector, 'untrusted-thread');
+        root = rendered.root;
+        container = rendered.container;
+
+        expect(container.querySelector('img[src="x"]')).toBeNull();
+        expect(container.querySelector('script')).toBeNull();
+    });
+
+    it.each([
+        ['https://univer.ai', true],
+        ['mailto:review@example.com', true],
+        ['javascript:alert(1)', false],
+        ['data:text/html,test', false],
+        ['', false],
+    ])('renders the comment URL %s as a navigable link only when safe', (url, navigable) => {
+        const testBed = createTreeTestBed([LocaleService]);
+        const localeService = testBed.injector.get(LocaleService);
+        localeService.load({ [LocaleType.EN_US]: enUS });
+        localeService.setLocale(LocaleType.EN_US);
+        localeService.setDirection('ltr');
+        const text = 'Open website';
+        addRootComment(testBed.threadCommentModel, createComment({
+            id: 'link-thread',
+            text: {
+                dataStream: `${text}\r\n`,
+                paragraphs: [{ startIndex: text.length, paragraphId: 'para_comment_link' }],
+                customRanges: [{
+                    rangeId: 'comment-link',
+                    rangeType: CustomRangeType.HYPERLINK,
+                    startIndex: 0,
+                    endIndex: text.length - 1,
+                    properties: { url },
+                }],
+            },
+        }));
+        const onActivate = vi.fn();
+        const rendered = renderTree(
+            testBed.injector,
+            <ThreadCommentTree
+                id="link-thread"
+                unitId={UNIT_ID}
+                subUnitId={SHEET_ID}
+                type={UniverInstanceType.UNIVER_SHEET}
+                getSubUnitName={() => ''}
+                location={ThreadCommentTreeLocation.PANEL}
+                showEdit={false}
+                onClick={onActivate}
+            />
+        );
+        root = rendered.root;
+        container = rendered.container;
+
+        const link = container.querySelector('a');
+        if (!navigable) {
+            expect(link).toBeNull();
+            expect(container.textContent).toContain(text);
+            return;
+        }
+        expect(link?.getAttribute('href')).toBe(url);
+        expect(link?.target).toBe('_blank');
+        expect(link?.rel).toContain('noopener');
+        link!.addEventListener('click', (event) => event.preventDefault());
+        act(() => link!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })));
+        expect(onActivate).not.toHaveBeenCalled();
+    });
+
+    it('keeps selected comment text focused without activating its document anchor', () => {
+        const testBed = createTreeTestBed([LocaleService]);
+        const localeService = testBed.injector.get(LocaleService);
+        localeService.load({ [LocaleType.EN_US]: enUS });
+        localeService.setLocale(LocaleType.EN_US);
+        localeService.setDirection('ltr');
+        addRootComment(testBed.threadCommentModel, createComment({ id: 'selection-thread' }));
+        const onActivate = vi.fn();
+        const rendered = renderTree(
+            testBed.injector,
+            <ThreadCommentTree
+                id="selection-thread"
+                unitId={UNIT_ID}
+                subUnitId={SHEET_ID}
+                type={UniverInstanceType.UNIVER_SHEET}
+                getSubUnitName={() => ''}
+                location={ThreadCommentTreeLocation.PANEL}
+                showEdit={false}
+                onClick={onActivate}
+            />
+        );
+        root = rendered.root;
+        container = rendered.container;
+        const paragraph = container.querySelector('.univer-break-words')!;
+        const content = paragraph.parentElement!;
+        const selection = document.getSelection()!;
+        content.focus();
+        expect(document.activeElement).toBe(content);
+        const range = document.createRange();
+        range.selectNodeContents(paragraph);
+        selection.removeAllRanges();
+        selection.addRange(range);
+
+        act(() => paragraph.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+        expect(onActivate).not.toHaveBeenCalled();
+        expect(selection.toString()).toBe('selection-thread');
+
+        selection.removeAllRanges();
+        act(() => paragraph.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+        expect(onActivate).toHaveBeenCalledOnce();
+    });
+
+    it('keeps comment content visible when its author is no longer in the user directory', () => {
+        const testBed = createTreeTestBed();
+        addRootComment(testBed.threadCommentModel, createComment({
+            id: 'removed-author-thread',
+            personId: 'removed-user',
+            authorName: 'Imported author',
+            text: transformTextNodes2Document([{ type: 'text', content: 'kept after user removal' }]),
+        }));
+
+        const rendered = renderDefaultTree(testBed.injector, 'removed-author-thread');
+        root = rendered.root;
+        container = rendered.container;
+
+        expect(container.textContent).toContain('kept after user removal');
+        expect(container.textContent).toContain('Imported author');
+        const users = testBed.injector.get(UserManagerService);
+        act(() => users.addUser({ userID: 'removed-user', name: 'Resolved author' }));
+        expect(container.textContent).toContain('Resolved author');
+        expect(container.textContent).not.toContain('Imported author');
+        act(() => users.delete('removed-user'));
+        expect(container.textContent).toContain('Imported author');
+    });
+
+    it('adds a reply through the tree editor and stores it under the root thread', async () => {
+        const testBed = createTreeTestBed();
+        addRootComment(testBed.threadCommentModel, createComment({ id: 'root-thread', ref: 'A1' }));
+
+        const rendered = renderDefaultTree(testBed.injector, 'root-thread');
+        root = rendered.root;
+        container = rendered.container;
+
+        await act(async () => {
+            getRootCommentItem(container!, 'root-thread').dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+            await waitForFrame();
+        });
+
+        await act(async () => {
+            getReplyAction(container!, 'root-thread').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+            await waitForFrame();
+        });
+
+        act(() => {
+            getOnlyEditor(testBed).replaceText('Reply from tree');
+        });
+
+        await act(async () => {
+            getButton(container!, REPLY_LABEL).dispatchEvent(new MouseEvent('click', { bubbles: true }));
+            await waitForTreeRefresh();
+        });
+
+        const thread = testBed.threadCommentModel.getCommentWithChildren(UNIT_ID, SHEET_ID, 'root-thread');
+        expect(thread?.children).toHaveLength(1);
+        expect(thread?.children[0].parentId).toBe('root-thread');
+        expect(thread?.children[0].threadId).toBe('root-thread');
+        expect(thread?.children[0].personId).toBe('owner');
+        expect(thread?.children[0].text.dataStream).toBe('Reply from tree\r\n');
+        expect(TestState.addedComments).toHaveLength(1);
+        expect(TestState.addedComments[0].parentId).toBe('root-thread');
+    });
+
+    it('awaits a product-handled root add and closes the temporary thread without adding it twice', async () => {
+        const testBed = createTreeTestBed();
+        let closeCount = 0;
+        const handledComments: IThreadComment[] = [];
+        const rendered = renderTree(
+            testBed.injector,
+            <ThreadCommentTree
+                unitId={UNIT_ID}
+                subUnitId={SHEET_ID}
+                refStr="A1"
+                type={UniverInstanceType.UNIVER_SHEET}
+                getSubUnitName={() => ''}
+                location={ThreadCommentTreeLocation.PANEL}
+                onAddComment={async (comment) => {
+                    await Promise.resolve();
+                    handledComments.push(comment);
+                    return false;
+                }}
+                onClose={() => {
+                    closeCount += 1;
+                }}
+            />
+        );
+        root = rendered.root;
+        container = rendered.container;
+
+        await act(async () => {
+            const editorMouseTarget = container!.lastElementChild?.lastElementChild?.firstElementChild?.firstElementChild;
+            if (!editorMouseTarget) {
+                throw new Error('Editor mouse target was not found.');
+            }
+            editorMouseTarget.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+            const editor = getOnlyEditor(testBed);
+            editor.replaceText('Handled by host');
+            await testBed.commandService.executeCommand(TestRichTextEditingMutation.id, { unitId: editor.getEditorId() });
+            await waitForFrame();
+        });
+        await act(async () => {
+            getButton(container!, REPLY_LABEL).dispatchEvent(new MouseEvent('click', { bubbles: true }));
+            await waitForTreeRefresh();
+        });
+
+        expect(handledComments).toHaveLength(1);
+        expect(testBed.threadCommentModel.getUnit(UNIT_ID)).toEqual([]);
+        expect(closeCount).toBe(1);
+    });
+
+    it('toggles the resolved state and updates the active comment target', async () => {
+        const testBed = createTreeTestBed();
+        addRootComment(testBed.threadCommentModel, createComment({ id: 'root-thread', ref: 'A1' }));
+        testBed.panelService.setActiveComment({
+            unitId: UNIT_ID,
+            subUnitId: SHEET_ID,
+            commentId: 'root-thread',
+        });
+
+        const rendered = renderDefaultTree(testBed.injector, 'root-thread');
+        root = rendered.root;
+        container = rendered.container;
+
+        await act(async () => {
+            getResolveAction(container!, 'root-thread').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+            await waitForTreeRefresh();
+        });
+
+        expect(testBed.threadCommentModel.getComment(UNIT_ID, SHEET_ID, 'root-thread')?.resolved).toBe(true);
+        expect(testBed.panelService.activeCommentId).toBeUndefined();
+        expect(TestState.resolveStates).toEqual([true]);
+
+        await act(async () => {
+            getResolveAction(container!, 'root-thread').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+            await waitForTreeRefresh();
+        });
+
+        expect(testBed.threadCommentModel.getComment(UNIT_ID, SHEET_ID, 'root-thread')?.resolved).toBe(false);
+        expect(testBed.panelService.activeCommentId).toEqual({
+            unitId: UNIT_ID,
+            subUnitId: SHEET_ID,
+            commentId: 'root-thread',
+        });
+        expect(TestState.resolveStates).toEqual([true, false]);
+    });
+});

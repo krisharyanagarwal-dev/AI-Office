@@ -1,0 +1,64 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type { MenuSchemaType } from '@univerjs/ui';
+import { FLOAT_TOOLBAR_MENU_POSITION } from '@univerjs/docs-ui';
+import { ContextMenuGroup, ContextMenuPosition, FloatingObjectToolbarPosition, RibbonInsertGroup } from '@univerjs/ui';
+import {
+    AddDocDrawingCommentOperation,
+    StartAddCommentOperation,
+    ToggleCommentPanelOperation,
+} from '../commands/operations/show-comment-panel.operation';
+import {
+    AddDocCommentMenuItemFactory,
+    AddDocDrawingCommentMenuItemFactory,
+    ToolbarDocCommentMenuItemFactory,
+} from './menu';
+
+export const menuSchema: MenuSchemaType = {
+    [RibbonInsertGroup.OTHERS]: {
+        [ToggleCommentPanelOperation.id]: {
+            order: 0,
+            gridLayout: { row: 1, column: 1, showLabel: true },
+            menuItemFactory: ToolbarDocCommentMenuItemFactory,
+        },
+        [StartAddCommentOperation.id]: {
+            order: 0.1,
+            gridLayout: { row: 2, column: 1, showLabel: true },
+            menuItemFactory: AddDocCommentMenuItemFactory,
+        },
+    },
+    [FLOAT_TOOLBAR_MENU_POSITION]: {
+        [StartAddCommentOperation.id]: {
+            order: 21,
+            menuItemFactory: AddDocCommentMenuItemFactory,
+        },
+    },
+    [FloatingObjectToolbarPosition.DOC]: {
+        [AddDocDrawingCommentOperation.id]: {
+            order: 10,
+            menuItemFactory: AddDocDrawingCommentMenuItemFactory,
+        },
+    },
+    [ContextMenuPosition.DRAWING]: {
+        [ContextMenuGroup.DATA]: {
+            [AddDocDrawingCommentOperation.id]: {
+                order: 1,
+                menuItemFactory: AddDocDrawingCommentMenuItemFactory,
+            },
+        },
+    },
+};

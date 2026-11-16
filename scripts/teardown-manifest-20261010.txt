@@ -1,0 +1,5 @@
+/Users/aryanagarwal/Documents/polymarket             repo=polymarket-private       ref=main                         head=5efe1a0ed11f314790cdc7102aaa7ff1ff4228b9
+/Users/aryanagarwal/Documents/agent-workspaces       repo=agent-workspaces         ref=main                         head=fc3eb428557b5b757874786f0ae20849c2d97403
+/Users/aryanagarwal/openalice-fleet/office-hud       repo=office-hud               ref=main                         head=21c7f9a0047bbf07f80350e9e3d1ac0253c9f15c
+/Users/aryanagarwal/openalice-fleet                  repo=openalice-fleet          ref=laptop/control-center        head=4d4dd7227895a66ebce8c5963d5d321c5006041f
+/Users/aryanagarwal/openalice-fleet-clone            repo=openalice-fleet          ref=backup/clone-main-20261010   head=72d29a917b40ae12b5216a04f0f6eba15e664c56

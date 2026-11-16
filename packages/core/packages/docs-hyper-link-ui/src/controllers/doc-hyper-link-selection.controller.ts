@@ -1,0 +1,124 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type { DocumentDataModel } from '@univerjs/core';
+import type { IRichTextEditingMutationParams, ISetTextSelectionsOperationParams } from '@univerjs/docs';
+import {
+    CustomRangeType,
+    Disposable,
+    ICommandService,
+    Inject,
+    IUniverInstanceService,
+    UniverInstanceType,
+} from '@univerjs/core';
+import { RichTextEditingMutation, SetTextSelectionsOperation } from '@univerjs/docs';
+import { DocHyperLinkPopupService } from '../services/hyper-link-popup.service';
+
+export class DocHyperLinkSelectionController extends Disposable {
+    private _selection: { unitId: string; key: string } | null = null;
+
+    constructor(
+        @ICommandService private readonly _commandService: ICommandService,
+        @IUniverInstanceService private readonly _univerInstanceService: IUniverInstanceService,
+        @Inject(DocHyperLinkPopupService) private readonly _docHyperLinkService: DocHyperLinkPopupService
+    ) {
+        super();
+
+        this._initSelectionChange();
+        this.disposeWithMe(this._univerInstanceService.unitDisposed$.subscribe((unit) => {
+            if (this._selection?.unitId === unit.getUnitId()) {
+                this._selection = null;
+            }
+        }));
+    }
+
+    private _initSelectionChange() {
+        this.disposeWithMe(
+            this._commandService.onCommandExecuted((commandInfo) => {
+                if (commandInfo.id === RichTextEditingMutation.id) {
+                    const params = commandInfo.params as IRichTextEditingMutationParams;
+                    if (params.unitId === this._docHyperLinkService.showing?.unitId) {
+                        this._docHyperLinkService.hideInfoPopup();
+                    }
+                    return;
+                }
+                if (commandInfo.id === SetTextSelectionsOperation.id) {
+                    const params = commandInfo.params as ISetTextSelectionsOperationParams;
+                    const { unitId, ranges, segmentId } = params;
+
+                    const doc = this._univerInstanceService.getUnit<DocumentDataModel>(unitId, UniverInstanceType.UNIVER_DOC);
+                    const primary = ranges[0];
+                    const selectionKey = JSON.stringify([
+                        unitId,
+                        segmentId ?? '',
+                        primary?.startOffset,
+                        primary?.endOffset,
+                        primary?.segmentPage,
+                    ]);
+                    const sameSelection = selectionKey === this._selection?.key;
+                    this._selection = { unitId, key: selectionKey };
+                    const editing = this._docHyperLinkService.editing;
+                    // Opening the editor selects its own link; that is not a user dismissal.
+                    if (editing?.unitId === unitId &&
+                        (editing.segmentId ?? '') === (segmentId ?? '') &&
+                        primary?.startOffset === editing.startIndex && primary.endOffset === editing.endIndex + 1) {
+                        return;
+                    }
+                    if (params.isEditing) {
+                        this._docHyperLinkService.hideInfoPopup();
+                        return;
+                    }
+                    // Layout republishes the current caret. Reopening a popup here
+                    // acquires an interaction lock and can suspend Worker publication.
+                    if (sameSelection) {
+                        return;
+                    }
+                    if (primary?.collapsed && doc) {
+                        const { startOffset, endOffset, segmentPage } = primary;
+                        const customRanges = doc.getSelfOrHeaderFooterModel(segmentId)?.getBody()?.customRanges;
+                        const showing = this._docHyperLinkService.showing;
+                        // Pointer-up opens the clicked link before selection completes.
+                        // Preserve that link at its trailing edge without claiming the
+                        // leading edge of an adjacent link for a fresh caret selection.
+                        const trailingLink = showing?.unitId === unitId &&
+                            (showing.segmentId ?? '') === segmentId &&
+                            showing.segmentPage === segmentPage &&
+                            showing.endIndex === endOffset - 1
+                            ? customRanges?.find((value) => (
+                                value.rangeId === showing.linkId &&
+                                value.rangeType === CustomRangeType.HYPERLINK &&
+                                value.startIndex <= startOffset &&
+                                value.endIndex === endOffset - 1
+                            ))
+                            : undefined;
+                        const customRange = trailingLink ?? customRanges?.find((value) => (
+                            value.rangeType === CustomRangeType.HYPERLINK &&
+                            value.startIndex <= startOffset &&
+                            value.endIndex > endOffset - 1
+                        ));
+                        if (customRange) {
+                            this._docHyperLinkService.showInfoPopup({ unitId, linkId: customRange.rangeId, segmentId, segmentPage, startIndex: customRange.startIndex, endIndex: customRange.endIndex });
+                            return;
+                        }
+                    }
+
+                    this._docHyperLinkService.hideInfoPopup();
+                    this._docHyperLinkService.hideEditPopup();
+                }
+            })
+        );
+    }
+}

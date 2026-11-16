@@ -1,0 +1,1155 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type { ICellData, Injector, IRange, IStyleData, Nullable, Univer, Workbook } from '@univerjs/core';
+import type { IClipboardItem } from './mock-clipboard';
+import {
+    BooleanNumber,
+    CustomCommandExecutionError,
+    FormulaType,
+    ICommandService,
+    IPermissionService,
+    IUndoRedoService,
+    IUniverInstanceService,
+    ObjectMatrix,
+    RANGE_TYPE,
+    Rectangle,
+    RedoCommand,
+    Tools,
+    UndoCommand,
+    UniverInstanceType,
+} from '@univerjs/core';
+import {
+    AddWorksheetMergeMutation,
+    discreteRangeToRange,
+    MergeCellController,
+    MoveRangeCommand,
+    MoveRangeMutation,
+    RefRangeService,
+    RemoveWorksheetMergeMutation,
+    SetRangeValuesMutation,
+    SetSelectionsOperation,
+    SetWorksheetActiveOperation,
+    SetWorksheetColWidthMutation,
+    SetWorksheetRowAutoHeightMutation,
+    SetWorksheetRowHeightMutation,
+    SheetInterceptorService,
+    SheetsSelectionsService,
+    WorkbookEditablePermission,
+} from '@univerjs/sheets';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+    SheetPermissionInterceptorClipboardController,
+} from '../../../controllers/permission/sheet-permission-interceptor-clipboard.controller';
+import { SheetSkeletonManagerService } from '../../sheet-skeleton-manager.service';
+import { ISheetClipboardService, PREDEFINED_HOOK_NAME_PASTE } from '../clipboard.service';
+import { COPY_TYPE } from '../type';
+import { clipboardTestBed } from './clipboard-test-bed';
+import { MockClipboard } from './mock-clipboard';
+
+const EXPECTED_EXTERNAL_PASTE_STYLE = {
+    bg: {
+        rgb: 'rgb(255,0,0)',
+    },
+    ff: 'Arial',
+    fs: 10,
+    ht: 2,
+    vt: 2,
+};
+
+describe('Test clipboard', () => {
+    let univer: Univer;
+    let get: Injector['get'];
+    let commandService: ICommandService;
+    let sheetClipboardService: ISheetClipboardService;
+    let clipboardItem: IClipboardItem;
+    let getValues: (
+        startRow: number,
+        startColumn: number,
+        endRow: number,
+        endColumn: number,
+        subUnitId?: string
+    ) => Array<Array<Nullable<ICellData>>> | undefined;
+    let getMergedCells: (
+        startRow: number,
+        startColumn: number,
+        endRow: number,
+        endColumn: number,
+        subUnitId?: string
+    ) => IRange[] | undefined;
+
+    let getStyles: (
+        startRow: number,
+        startColumn: number,
+        endRow: number,
+        endColumn: number
+    ) => Array<Array<Nullable<IStyleData>>> | undefined;
+
+    beforeEach(async () => {
+        const testBed = clipboardTestBed(undefined, [
+            [SheetPermissionInterceptorClipboardController],
+            [MergeCellController],
+            [RefRangeService],
+        ]);
+        univer = testBed.univer;
+        get = testBed.get;
+        testBed.sheet.addWorksheet('sheet2', 1, {
+            id: 'sheet2',
+            name: 'sheet2',
+            cellData: {},
+            mergeData: [],
+        });
+        get(MergeCellController);
+
+        commandService = get(ICommandService);
+        commandService.registerCommand(SetRangeValuesMutation);
+        commandService.registerCommand(SetWorksheetRowHeightMutation);
+        commandService.registerCommand(SetWorksheetColWidthMutation);
+        commandService.registerCommand(AddWorksheetMergeMutation);
+        commandService.registerCommand(RemoveWorksheetMergeMutation);
+        commandService.registerCommand(SetSelectionsOperation);
+        commandService.registerCommand(MoveRangeMutation);
+        commandService.registerCommand(SetWorksheetRowAutoHeightMutation);
+        commandService.registerCommand(SetWorksheetActiveOperation);
+
+        sheetClipboardService = get(ISheetClipboardService);
+
+        getValues = (
+            startRow: number,
+            startColumn: number,
+            endRow: number,
+            endColumn: number,
+            subUnitId = 'sheet1'
+        ): Array<Array<Nullable<ICellData>>> | undefined =>
+            get(IUniverInstanceService)
+                .getUnit<Workbook>('test', UniverInstanceType.UNIVER_SHEET)
+                ?.getSheetBySheetId(subUnitId)
+                ?.getRange(startRow, startColumn, endRow, endColumn)
+                .getValues();
+
+        getMergedCells = (
+            startRow: number,
+            startColumn: number,
+            endRow: number,
+            endColumn: number,
+            subUnitId = 'sheet1'
+        ): IRange[] | undefined => {
+            return get(IUniverInstanceService)
+                .getUnit<Workbook>('test', UniverInstanceType.UNIVER_SHEET)
+                ?.getSheetBySheetId(subUnitId)
+                ?.getMergeData()
+                .filter((rect) => Rectangle.intersects({ startRow, startColumn, endRow, endColumn }, rect));
+        };
+
+        getStyles = (
+            startRow: number,
+            startColumn: number,
+            endRow: number,
+            endColumn: number
+        ): Array<Array<Nullable<IStyleData>>> | undefined => {
+            const values = getValues(startRow, startColumn, endRow, endColumn);
+            const styles = get(IUniverInstanceService).getUnit<Workbook>('test', UniverInstanceType.UNIVER_SHEET)?.getStyles();
+            if (values && styles) {
+                return values.map((row) => row.map((cell) => styles.getStyleByCell(cell)));
+            }
+        };
+        // read use mock
+        const clipboardData = {
+            'text/html': '<google-sheets-html-origin><table xmlns="http://www.w3.org/1999/xhtml" cellspacing="0" cellpadding="0" dir="ltr" border="1" style="table-layout:fixed;font-size:10pt;font-family:Arial;width:0px;border-collapse:collapse;border:none"><colgroup><col width="73"><col width="73"></colgroup><tbody><tr style="height: 81px;"><td rowspan="1" colspan="2" style="background: rgb(255,0,0); text-align: center; vertical-align: middle; text-decoration:none;">row1col2</td></tr></tbody></table></google-sheets-html-origin>',
+        };
+        const mockClipboard = new MockClipboard(clipboardData);
+        const clipboardItems = await mockClipboard.read();
+
+        if (clipboardItems.length !== 0) {
+            clipboardItem = clipboardItems[0];
+        }
+    });
+
+    afterEach(() => {
+        univer?.dispose();
+    });
+
+    it('clears formula metadata on plain-text paste and restores it on undo', async () => {
+        const previous = { f: '=A1', ft: FormulaType.ARRAY, fd: BooleanNumber.FALSE };
+        commandService.syncExecuteCommand(SetRangeValuesMutation.id, {
+            unitId: 'test',
+            subUnitId: 'sheet1',
+            cellValue: { 0: { 0: previous } },
+        });
+        get(SheetsSelectionsService).setSelections('test', 'sheet1', [{
+            range: { startRow: 0, endRow: 0, startColumn: 0, endColumn: 0 },
+            primary: null,
+            style: null,
+        }]);
+        expect(await sheetClipboardService.paste({
+            presentationStyle: 'unspecified',
+            types: ['text/plain'],
+            getType: async () => new Blob(['=SUM(B1:B2)'], { type: 'text/plain' }),
+        })).toBe(true);
+        const assertReplaced = () => {
+            const cell = getValues(0, 0, 0, 0)?.[0][0];
+            expect(cell?.f).toBe('=SUM(B1:B2)');
+            expect(cell?.ft).toBeUndefined();
+            expect(cell?.fd).toBeUndefined();
+        };
+        assertReplaced();
+        expect(await commandService.executeCommand(UndoCommand.id)).toBe(true);
+        expect(getValues(0, 0, 0, 0)?.[0][0]).toMatchObject(previous);
+        expect(await commandService.executeCommand(RedoCommand.id)).toBe(true);
+        assertReplaced();
+    });
+
+    it('keeps the original selection while clipboard data is read asynchronously', async () => {
+        const clipboardService = get(ISheetClipboardService);
+        const selections = get(SheetsSelectionsService);
+        const selectColumn = (column: number) => selections.setSelections('test', 'sheet1', [{
+            range: { startRow: 0, endRow: 0, startColumn: column, endColumn: column },
+            primary: null,
+            style: null,
+        }]);
+        selectColumn(0);
+        const originalSource = getValues(0, 0, 0, 0);
+        const originalPeer = getValues(0, 1, 0, 1);
+        let releaseRead = () => {};
+        const readGate = new Promise<void>((resolve) => {
+            releaseRead = resolve;
+        });
+        const item: IClipboardItem = {
+            presentationStyle: 'unspecified',
+            types: ['text/plain'],
+            getType: async () => {
+                await readGate;
+                return new Blob(['DEFERRED_PASTE'], { type: 'text/plain' });
+            },
+        };
+        const pendingPaste = clipboardService.paste(item);
+        selectColumn(1);
+        releaseRead();
+        expect(await pendingPaste).toBe(true);
+        expect(getValues(0, 0, 0, 0)?.[0][0]?.v).toBe('DEFERRED_PASTE');
+        expect(getValues(0, 1, 0, 1)).toEqual(originalPeer);
+        expect(await commandService.executeCommand(UndoCommand.id)).toBe(true);
+        expect(getValues(0, 0, 0, 0)).toEqual(originalSource);
+        expect(getValues(0, 1, 0, 1)).toEqual(originalPeer);
+    });
+
+    it('recalculates auto height when pasting into a row that already has a measured auto height', async () => {
+        const row = 30;
+        const worksheet = get(IUniverInstanceService)
+            .getUnit<Workbook>('test', UniverInstanceType.UNIVER_SHEET)!
+            .getSheetBySheetId('sheet1')!;
+        worksheet.getRowManager().getRowOrCreate(row).ah = 24;
+        const skeleton = get(SheetSkeletonManagerService).ensureSkeleton('sheet1')!;
+        vi.spyOn(skeleton, 'calculateAutoHeightInRange').mockReturnValue([{ row, autoHeight: 34 }]);
+        const copyId = 'existing-auto-height';
+        sheetClipboardService.copyContentCache().set(copyId, {
+            unitId: 'test',
+            subUnitId: 'sheet1',
+            range: { rows: [0], cols: [0] },
+            matrix: new ObjectMatrix({ 0: { 0: { v: 'line 1\nline 2' } } }),
+            copyType: COPY_TYPE.COPY,
+        });
+
+        expect(await sheetClipboardService.pasteByCopyId(copyId, PREDEFINED_HOOK_NAME_PASTE.DEFAULT_PASTE, {
+            unitId: 'test',
+            subUnitId: 'sheet1',
+            range: { startRow: row, endRow: row, startColumn: 0, endColumn: 0 },
+        })).toBe(true);
+        expect(worksheet.getRowManager().getRow(row)?.ah).toBe(34);
+        expect(await commandService.executeCommand(UndoCommand.id)).toBe(true);
+        expect(worksheet.getRowManager().getRow(row)?.ah).toBe(24);
+        expect(await commandService.executeCommand(RedoCommand.id)).toBe(true);
+        expect(worksheet.getRowManager().getRow(row)?.ah).toBe(34);
+    });
+
+    it.each([
+        { name: 'explicit', row: 31, isLegacy: false },
+        { name: 'legacy', row: 32, isLegacy: true },
+    ])('preserves a $name manually sized row when pasting', async ({ row, isLegacy }) => {
+        const worksheet = get(IUniverInstanceService)
+            .getUnit<Workbook>('test', UniverInstanceType.UNIVER_SHEET)!
+            .getSheetBySheetId('sheet1')!;
+        const rowData = worksheet.getRowManager().getRowOrCreate(row);
+        rowData.h = 40;
+        if (!isLegacy) {
+            rowData.ia = BooleanNumber.FALSE;
+        }
+        const skeleton = get(SheetSkeletonManagerService).ensureSkeleton('sheet1')!;
+        const calculateAutoHeight = vi.spyOn(skeleton, 'calculateAutoHeightInRange');
+        const copyId = 'manual-row-height';
+        sheetClipboardService.copyContentCache().set(copyId, {
+            unitId: 'test',
+            subUnitId: 'sheet1',
+            range: { rows: [0], cols: [0] },
+            matrix: new ObjectMatrix({ 0: { 0: { v: 'line 1\nline 2' } } }),
+            copyType: COPY_TYPE.COPY,
+        });
+
+        expect(await sheetClipboardService.pasteByCopyId(copyId, PREDEFINED_HOOK_NAME_PASTE.DEFAULT_PASTE, {
+            unitId: 'test',
+            subUnitId: 'sheet1',
+            range: { startRow: row, endRow: row, startColumn: 0, endColumn: 0 },
+        })).toBe(true);
+        expect(calculateAutoHeight).not.toHaveBeenCalled();
+        expect(worksheet.getRowHeight(row)).toBe(40);
+    });
+
+    it.each(['disposed', 'read-only'] as const)('does not redirect a delayed paste when its source becomes %s', async (state) => {
+        const clipboardService = get(ISheetClipboardService);
+        get(SheetPermissionInterceptorClipboardController);
+        const instances = get(IUniverInstanceService);
+        const source = instances.getUnit<Workbook>('test', UniverInstanceType.UNIVER_SHEET)!;
+        const snapshot = Tools.deepClone(source.getSnapshot());
+        const peer = instances.createUnit(UniverInstanceType.UNIVER_SHEET, { ...snapshot, id: 'paste-peer' }, { makeCurrent: false });
+        const peerBefore = Tools.deepClone(peer.getSnapshot());
+        const selections = get(SheetsSelectionsService);
+        const selection = [{
+            range: { startRow: 0, endRow: 0, startColumn: 0, endColumn: 0 },
+            primary: null,
+            style: null,
+        }];
+        selections.setSelections('test', 'sheet1', selection);
+        let releaseRead = () => {};
+        const readGate = new Promise<void>((resolve) => {
+            releaseRead = resolve;
+        });
+        const pendingPaste = clipboardService.paste({
+            presentationStyle: 'unspecified',
+            types: ['text/plain'],
+            getType: async () => {
+                await readGate;
+                return new Blob(['MUST_NOT_WRITE'], { type: 'text/plain' });
+            },
+        });
+        if (state === 'disposed') {
+            instances.disposeUnit('test');
+        } else {
+            const permissions = get(IPermissionService);
+            const point = new WorkbookEditablePermission('test');
+            if (!permissions.getPermissionPoint(point.id)) {
+                permissions.addPermissionPoint(point);
+            }
+            permissions.updatePermissionPoint(point.id, false);
+        }
+        instances.setCurrentUnitForType('paste-peer');
+        selections.setSelections('paste-peer', 'sheet1', selection);
+        releaseRead();
+        if (state === 'read-only') {
+            await expect(pendingPaste).rejects.toThrow(CustomCommandExecutionError);
+        } else {
+            expect(await pendingPaste).toBe(false);
+        }
+        expect(peer.getSnapshot()).toEqual(peerBefore);
+        if (state === 'read-only') {
+            expect(source.getSnapshot()).toEqual(snapshot);
+        }
+    });
+
+    describe('Test paste, the original data is a merged cell of 1 row and 2 columns, the current selection consists only of ordinary cells', () => {
+        it('The current selection is a single cell in 1 row and 1 column', async () => {
+            const selectionManager = get(SheetsSelectionsService);
+
+            // set selection to A1
+            const startRow = 0;
+            const startColumn = 0;
+            const endRow = 0;
+            const endColumn = 0;
+
+            selectionManager.addSelections([
+                {
+                    range: { startRow, startColumn, endRow, endColumn, rangeType: RANGE_TYPE.NORMAL },
+                    primary: null,
+                    style: null,
+                },
+            ]);
+
+            await sheetClipboardService.paste(clipboardItem);
+            const values = getValues(startRow, startColumn, endRow, endColumn);
+            const styles = getStyles(startRow, startColumn, endRow, endColumn);
+            const mergedCells = getMergedCells(startRow, startColumn, endRow, endColumn);
+            const columnManager = get(IUniverInstanceService).getUnit<Workbook>('test', UniverInstanceType.UNIVER_SHEET)?.getSheetBySheetId('sheet1')?.getColumnManager();
+            const columnWidth = columnManager?.getColumnWidth(0);
+            expect(columnWidth).toBe(88);
+            expect(values && values[0][0]?.v).toBe('row1col2');
+            expect(styles && styles[0][0]).toStrictEqual(EXPECTED_EXTERNAL_PASTE_STYLE);
+            expect(mergedCells && mergedCells[0]).toStrictEqual({
+                startRow: 0,
+                startColumn: 0,
+                endRow: 0,
+                endColumn: 1,
+            });
+        });
+        it('The current selection is a single cell in 1 row and 2 columns', async () => {
+            const selectionManager = get(SheetsSelectionsService);
+
+            // set selection to A2:B2
+            const startRow = 1;
+            const startColumn = 0;
+            const endRow = 1;
+            const endColumn = 1;
+
+            selectionManager.addSelections([
+                {
+                    range: { startRow, startColumn, endRow, endColumn, rangeType: RANGE_TYPE.NORMAL },
+                    primary: null,
+                    style: null,
+                },
+            ]);
+
+            await sheetClipboardService.paste(clipboardItem);
+            const values = getValues(startRow, startColumn, endRow, endColumn);
+            const styles = getStyles(startRow, startColumn, endRow, endColumn);
+            const mergedCells = getMergedCells(startRow, startColumn, endRow, endColumn);
+            expect(values && values[0][0]?.v).toBe('row1col2');
+            expect(styles && styles[0][0]).toStrictEqual(EXPECTED_EXTERNAL_PASTE_STYLE);
+            expect(mergedCells && mergedCells[0]).toStrictEqual({
+                startRow,
+                startColumn,
+                endRow,
+                endColumn,
+            });
+        });
+        it('The current selection is a single cell in 1 row and 3 columns', async () => {
+            const selectionManager = get(SheetsSelectionsService);
+
+            // set selection to A3:C3
+            const startRow = 2;
+            const startColumn = 0;
+            const endRow = 2;
+            const endColumn = 2;
+
+            selectionManager.addSelections([
+                {
+                    range: { startRow, startColumn, endRow, endColumn, rangeType: RANGE_TYPE.NORMAL },
+                    primary: null,
+                    style: null,
+                },
+            ]);
+
+            await sheetClipboardService.paste(clipboardItem);
+            const values = getValues(startRow, startColumn, endRow, endColumn);
+            const styles = getStyles(startRow, startColumn, endRow, endColumn);
+            const mergedCells = getMergedCells(startRow, startColumn, endRow, endColumn);
+            expect(values && values[0][0]?.v).toBe('row1col2');
+            expect(styles && styles[0][0]).toStrictEqual(EXPECTED_EXTERNAL_PASTE_STYLE);
+            expect(values && values[0][2]?.v).toBe(undefined);
+            expect(styles && styles[0][2]).toStrictEqual(undefined);
+            expect(mergedCells && mergedCells[0]).toStrictEqual({
+                startRow: 2,
+                startColumn: 0,
+                endRow: 2,
+                endColumn: 1,
+            });
+        });
+        it('The current selection is a single cell in 2 rows and 2 columns', async () => {
+            const selectionManager = get(SheetsSelectionsService);
+
+            // set selection to A4:B5
+            const startRow = 3;
+            const startColumn = 0;
+            const endRow = 4;
+            const endColumn = 1;
+
+            selectionManager.addSelections([
+                {
+                    range: { startRow, startColumn, endRow, endColumn, rangeType: RANGE_TYPE.NORMAL },
+                    primary: null,
+                    style: null,
+                },
+            ]);
+
+            await sheetClipboardService.paste(clipboardItem);
+            const values = getValues(startRow, startColumn, endRow, endColumn);
+            const styles = getStyles(startRow, startColumn, endRow, endColumn);
+            const mergedCells = getMergedCells(startRow, startColumn, endRow, endColumn);
+            expect(values && values[0][0]?.v).toBe('row1col2');
+            expect(values && values[1][0]?.v).toBe('row1col2');
+
+            expect(styles && styles[0][0]).toStrictEqual(EXPECTED_EXTERNAL_PASTE_STYLE);
+            expect(styles && styles[1][0]).toStrictEqual(EXPECTED_EXTERNAL_PASTE_STYLE);
+            expect(mergedCells).toStrictEqual([
+                {
+                    startRow: 3,
+                    startColumn: 0,
+                    endRow: 3,
+                    endColumn: 1,
+                },
+                {
+                    startRow: 4,
+                    startColumn: 0,
+                    endRow: 4,
+                    endColumn: 1,
+                },
+            ]);
+        });
+        it('The current selection is a single cell in 4 rows and 4 columns', async () => {
+            const selectionManager = get(SheetsSelectionsService);
+
+            // set selection to A6:D9
+            const startRow = 5;
+            const startColumn = 0;
+            const endRow = 8;
+            const endColumn = 3;
+
+            selectionManager.addSelections([
+                {
+                    range: { startRow, startColumn, endRow, endColumn, rangeType: RANGE_TYPE.NORMAL },
+                    primary: null,
+                    style: null,
+                },
+            ]);
+
+            await sheetClipboardService.paste(clipboardItem);
+            const values = getValues(startRow, startColumn, endRow, endColumn);
+            const styles = getStyles(startRow, startColumn, endRow, endColumn);
+            const mergedCells = getMergedCells(startRow, startColumn, endRow, endColumn);
+
+            for (let i = 0; i < 4; i++) {
+                expect(values && values[i][0]?.v).toBe('row1col2');
+                expect(values && values[i][2]?.v).toBe('row1col2');
+                expect(styles && styles[i][0]).toStrictEqual(EXPECTED_EXTERNAL_PASTE_STYLE);
+                expect(styles && styles[i][2]).toStrictEqual(EXPECTED_EXTERNAL_PASTE_STYLE);
+            }
+            expect(mergedCells).toStrictEqual([
+                {
+                    startRow: 5,
+                    startColumn: 0,
+                    endRow: 5,
+                    endColumn: 1,
+                },
+                {
+                    startRow: 5,
+                    startColumn: 2,
+                    endRow: 5,
+                    endColumn: 3,
+                },
+                {
+                    startRow: 6,
+                    startColumn: 0,
+                    endRow: 6,
+                    endColumn: 1,
+                },
+                {
+                    startRow: 6,
+                    startColumn: 2,
+                    endRow: 6,
+                    endColumn: 3,
+                },
+                {
+                    startRow: 7,
+                    startColumn: 0,
+                    endRow: 7,
+                    endColumn: 1,
+                },
+                {
+                    startRow: 7,
+                    startColumn: 2,
+                    endRow: 7,
+                    endColumn: 3,
+                },
+                {
+                    startRow: 8,
+                    startColumn: 0,
+                    endRow: 8,
+                    endColumn: 1,
+                },
+                {
+                    startRow: 8,
+                    startColumn: 2,
+                    endRow: 8,
+                    endColumn: 3,
+                },
+            ]);
+        });
+    });
+
+    describe('Test paste, the original data is a merged cell of 1 row and 2 columns, the current selection contains merged cells and no content', () => {
+        it('The current selection is a merged cell of 1 row and 2 columns.', async () => {
+            const selectionManager = get(SheetsSelectionsService);
+
+            // set selection to F1:G2
+            const startRow = 0;
+            const startColumn = 5;
+            const endRow = 0;
+            const endColumn = 6;
+
+            selectionManager.addSelections([
+                {
+                    range: { startRow, startColumn, endRow, endColumn, rangeType: RANGE_TYPE.NORMAL },
+                    primary: null,
+                    style: null,
+                },
+            ]);
+
+            await sheetClipboardService.paste(clipboardItem);
+            const values = getValues(startRow, startColumn, endRow, endColumn);
+            const styles = getStyles(startRow, startColumn, endRow, endColumn);
+            const mergedCells = getMergedCells(startRow, startColumn, endRow, endColumn);
+
+            expect(values && values[0][0]?.v).toBe('row1col2');
+            expect(styles && styles[0][0]).toStrictEqual(EXPECTED_EXTERNAL_PASTE_STYLE);
+            expect(mergedCells && mergedCells[0]).toStrictEqual({
+                startRow,
+                startColumn,
+                endRow,
+                endColumn,
+            });
+        });
+
+        it('The current selection is a merged cell of 1 row and 3 columns.', async () => {
+            const selectionManager = get(SheetsSelectionsService);
+
+            // set selection to F3:H3
+            const startRow = 2;
+            const startColumn = 5;
+            const endRow = 2;
+            const endColumn = 7;
+
+            selectionManager.addSelections([
+                {
+                    range: { startRow, startColumn, endRow, endColumn, rangeType: RANGE_TYPE.NORMAL },
+                    primary: null,
+                    style: null,
+                },
+            ]);
+
+            const res = await sheetClipboardService.paste(clipboardItem);
+            expect(res).toBeFalsy();
+        });
+
+        it('The current selection is a merged cell of 1 row and 4 columns.', async () => {
+            const selectionManager = get(SheetsSelectionsService);
+
+            // set selection to F5:I5
+            const startRow = 4;
+            const startColumn = 5;
+            const endRow = 4;
+            const endColumn = 8;
+
+            selectionManager.addSelections([
+                {
+                    range: { startRow, startColumn, endRow, endColumn, rangeType: RANGE_TYPE.NORMAL },
+                    primary: null,
+                    style: null,
+                },
+            ]);
+
+            const res = await sheetClipboardService.paste(clipboardItem);
+            expect(res).toBeFalsy();
+        });
+
+        it('The current selection is a merged cell of 2 rows and 2 columns.', async () => {
+            const selectionManager = get(SheetsSelectionsService);
+
+            // set selection to F7:G8
+            const startRow = 6;
+            const startColumn = 5;
+            const endRow = 7;
+            const endColumn = 6;
+
+            selectionManager.addSelections([
+                {
+                    range: { startRow, startColumn, endRow, endColumn, rangeType: RANGE_TYPE.NORMAL },
+                    primary: null,
+                    style: null,
+                },
+            ]);
+
+            const res = await sheetClipboardService.paste(clipboardItem);
+            expect(res).toBeFalsy();
+        });
+
+        it('The current selection is a merged cell of 1 row and 2 columns, with 1 ordinary cell', async () => {
+            const selectionManager = get(SheetsSelectionsService);
+
+            // set selection to F10:H10
+            const startRow = 9;
+            const startColumn = 5;
+            const endRow = 9;
+            const endColumn = 7;
+
+            selectionManager.addSelections([
+                {
+                    range: { startRow, startColumn, endRow, endColumn, rangeType: RANGE_TYPE.NORMAL },
+                    primary: null,
+                    style: null,
+                },
+            ]);
+
+            await sheetClipboardService.paste(clipboardItem);
+            const values = getValues(startRow, startColumn, endRow, endColumn);
+            const styles = getStyles(startRow, startColumn, endRow, endColumn);
+            const mergedCells = getMergedCells(startRow, startColumn, endRow, endColumn);
+
+            expect(values && values[0][0]?.v).toBe('row1col2');
+            expect(styles && styles[0][0]).toStrictEqual(EXPECTED_EXTERNAL_PASTE_STYLE);
+            expect(mergedCells && mergedCells[0]).toStrictEqual({
+                startRow: 9,
+                startColumn: 5,
+                endRow: 9,
+                endColumn: 6,
+            });
+        });
+
+        it('The current selection is a merged cell of 2 rows and 2 columns, with a merged cell of 2 rows and 1 column', async () => {
+            const selectionManager = get(SheetsSelectionsService);
+
+            // set selection to F12:H13
+            const startRow = 11;
+            const startColumn = 5;
+            const endRow = 12;
+            const endColumn = 7;
+
+            selectionManager.addSelections([
+                {
+                    range: { startRow, startColumn, endRow, endColumn, rangeType: RANGE_TYPE.NORMAL },
+                    primary: null,
+                    style: null,
+                },
+            ]);
+
+            const res = await sheetClipboardService.paste(clipboardItem);
+            expect(res).toBeFalsy();
+        });
+    });
+
+    describe('Test paste, the original data is a merged cell of 1 row and 2 columns, the current selection contains merged cells with content and style', () => {
+        it('The current selection is a merged cell of 1 row and 3 columns', async () => {
+            const selectionManager = get(SheetsSelectionsService);
+
+            // set selection to K4:M4
+            const startRow = 3;
+            const startColumn = 10;
+            const endRow = 3;
+            const endColumn = 12;
+
+            selectionManager.addSelections([
+                {
+                    range: { startRow, startColumn, endRow, endColumn, rangeType: RANGE_TYPE.NORMAL },
+                    primary: null,
+                    style: null,
+                },
+            ]);
+
+            const res = await sheetClipboardService.paste(clipboardItem);
+            expect(res).toBeFalsy();
+        });
+        it('The current selection is a merged cell of 1 row and 2 columns, with a merged cell of 2 rows and 2 columns', async () => {
+            const selectionManager = get(SheetsSelectionsService);
+
+            // set selection to K7:M10
+            const startRow = 6;
+            const startColumn = 10;
+            const endRow = 9;
+            const endColumn = 12;
+
+            selectionManager.addSelections([
+                {
+                    range: { startRow, startColumn, endRow, endColumn, rangeType: RANGE_TYPE.NORMAL },
+                    primary: null,
+                    style: null,
+                },
+            ]);
+
+            await sheetClipboardService.paste(clipboardItem);
+
+            const values = getValues(startRow, startColumn, endRow, endColumn);
+            const styles = getStyles(startRow, startColumn, endRow, endColumn);
+            const mergedCells = getMergedCells(startRow, startColumn, endRow, endColumn);
+
+            // first merged cells changed
+            expect(values && values[0][0]?.v).toBe('row1col2');
+            expect(styles && styles[0][0]).toStrictEqual(EXPECTED_EXTERNAL_PASTE_STYLE);
+
+            // second merged cells not changed
+            expect(values && values[2][1]?.v).toBe('456');
+            expect(styles && styles[2][1]).toStrictEqual({ bg: { rgb: '#ccc' }, ht: 2, vt: 2 });
+
+            expect(mergedCells).toStrictEqual([
+                {
+                    startRow: 8,
+                    startColumn: 11,
+                    endRow: 9,
+                    endColumn: 12,
+                },
+                {
+                    startRow: 6,
+                    startColumn: 10,
+                    endRow: 6,
+                    endColumn: 11,
+                },
+            ]);
+        });
+        it('The current selection is a merged cell of 1 row and 3 columns, with a merged cell of 2 rows and 2 columns', async () => {
+            const selectionManager = get(SheetsSelectionsService);
+
+            // set selection to K12:M15
+            const startRow = 11;
+            const startColumn = 10;
+            const endRow = 14;
+            const endColumn = 12;
+
+            selectionManager.addSelections([
+                {
+                    range: { startRow, startColumn, endRow, endColumn, rangeType: RANGE_TYPE.NORMAL },
+                    primary: null,
+                    style: null,
+                },
+            ]);
+
+            await sheetClipboardService.paste(clipboardItem);
+
+            const values = getValues(startRow, startColumn, endRow, endColumn);
+            const styles = getStyles(startRow, startColumn, endRow, endColumn);
+            const mergedCells = getMergedCells(startRow, startColumn, endRow, endColumn);
+
+            // first merged cells not changed
+            expect(values && values[0][0]?.v).toBe('456');
+            expect(styles && styles[0][0]).toStrictEqual({ bg: { rgb: '#ccc' }, ht: 3 });
+
+            // second merged cells not changed
+            expect(values && values[2][1]?.v).toBe('456');
+            expect(styles && styles[2][1]).toStrictEqual({ bg: { rgb: '#ccc' } });
+
+            expect(mergedCells).toStrictEqual([
+                {
+                    startRow: 11,
+                    startColumn: 10,
+                    endRow: 11,
+                    endColumn: 12,
+                },
+                {
+                    startRow: 13,
+                    startColumn: 11,
+                    endRow: 14,
+                    endColumn: 12,
+                },
+            ]);
+        });
+        it('The current selection is a merged cell of 2 rows and 2 columns, with a merged cell of 1 row and 2 columns', async () => {
+            const selectionManager = get(SheetsSelectionsService);
+
+            // set selection to K22:M24
+            const startRow = 21;
+            const startColumn = 10;
+            const endRow = 23;
+            const endColumn = 12;
+
+            selectionManager.addSelections([
+                {
+                    range: { startRow, startColumn, endRow, endColumn, rangeType: RANGE_TYPE.NORMAL },
+                    primary: null,
+                    style: null,
+                },
+            ]);
+
+            await sheetClipboardService.paste(clipboardItem);
+
+            const values = getValues(startRow, startColumn, endRow, endColumn);
+            const styles = getStyles(startRow, startColumn, endRow, endColumn);
+            const mergedCells = getMergedCells(startRow, startColumn, endRow, endColumn);
+
+            // first merged cells not changed
+            expect(values && values[0][0]?.v).toBe('456');
+            expect(styles && styles[0][0]).toStrictEqual({ bg: { rgb: '#ccc' } });
+
+            // second merged cells not changed
+            expect(values && values[2][1]?.v).toBe('456');
+            expect(styles && styles[2][1]).toStrictEqual({ bg: { rgb: '#ccc' } });
+
+            expect(mergedCells).toStrictEqual([
+                {
+                    startRow: 21,
+                    startColumn: 10,
+                    endRow: 22,
+                    endColumn: 11,
+                },
+                {
+                    startRow: 23,
+                    startColumn: 11,
+                    endRow: 23,
+                    endColumn: 12,
+                },
+            ]);
+        });
+    });
+
+    describe('Test internal copy and cut of merged cells', () => {
+        it.each([
+            { name: 'copies within the current sheet', copyType: COPY_TYPE.COPY, targetSubUnitId: 'sheet1' },
+            { name: 'cuts within the current sheet', copyType: COPY_TYPE.CUT, targetSubUnitId: 'sheet1' },
+            { name: 'copies across sheets', copyType: COPY_TYPE.COPY, targetSubUnitId: 'sheet2' },
+            { name: 'cuts across sheets', copyType: COPY_TYPE.CUT, targetSubUnitId: 'sheet2' },
+        ])('$name', async ({ copyType, targetSubUnitId }) => {
+            const sourceRange = {
+                startRow: 21,
+                startColumn: 10,
+                endRow: 22,
+                endColumn: 11,
+            };
+            const targetRange = {
+                startRow: 25,
+                startColumn: 5,
+                endRow: 26,
+                endColumn: 6,
+            };
+            const selectionManager = get(SheetsSelectionsService);
+            selectionManager.addSelections([{
+                range: { ...sourceRange, rangeType: RANGE_TYPE.NORMAL },
+                primary: null,
+                style: null,
+            }]);
+
+            expect(await (copyType === COPY_TYPE.COPY ? sheetClipboardService.copy() : sheetClipboardService.cut())).toBe(true);
+            const copyId = sheetClipboardService.copyContentCache().getLastCopyId();
+            expect(copyId).not.toBeNull();
+
+            if (targetSubUnitId !== 'sheet1') {
+                expect(await commandService.executeCommand(SetWorksheetActiveOperation.id, {
+                    unitId: 'test',
+                    subUnitId: targetSubUnitId,
+                })).toBe(true);
+            }
+            selectionManager.addSelections([{
+                range: { ...targetRange, rangeType: RANGE_TYPE.NORMAL },
+                primary: null,
+                style: null,
+            }]);
+
+            expect(await sheetClipboardService.pasteByCopyId(copyId!)).toBe(true);
+            expect(getValues(targetRange.startRow, targetRange.startColumn, targetRange.endRow, targetRange.endColumn, targetSubUnitId)?.[0][0]?.v).toBe(
+                copyType === COPY_TYPE.COPY ? 456 : '456'
+            );
+            expect(getMergedCells(sourceRange.startRow, sourceRange.startColumn, sourceRange.endRow, sourceRange.endColumn)).toEqual(
+                copyType === COPY_TYPE.COPY ? [sourceRange] : []
+            );
+            expect(getMergedCells(targetRange.startRow, targetRange.startColumn, targetRange.endRow, targetRange.endColumn, targetSubUnitId)).toEqual([targetRange]);
+
+            expect(await commandService.executeCommand(UndoCommand.id)).toBe(true);
+            expect(getMergedCells(sourceRange.startRow, sourceRange.startColumn, sourceRange.endRow, sourceRange.endColumn)).toEqual([sourceRange]);
+            expect(getMergedCells(targetRange.startRow, targetRange.startColumn, targetRange.endRow, targetRange.endColumn, targetSubUnitId)).toEqual([]);
+
+            expect(await commandService.executeCommand(RedoCommand.id)).toBe(true);
+            expect(getMergedCells(sourceRange.startRow, sourceRange.startColumn, sourceRange.endRow, sourceRange.endColumn)).toEqual(
+                copyType === COPY_TYPE.COPY ? [sourceRange] : []
+            );
+            expect(getMergedCells(targetRange.startRow, targetRange.startColumn, targetRange.endRow, targetRange.endColumn, targetSubUnitId)).toEqual([targetRange]);
+        });
+    });
+
+    describe('Test cut command in single selection', () => {
+        it('checks range movement before resource hooks and keeps a rejected cut available for retry', async () => {
+            const workbook = get(IUniverInstanceService).getUnit<Workbook>('test')!;
+            const snapshot = Tools.deepClone(workbook.getSnapshot());
+            const history = get(IUndoRedoService).getUndoRedoStatus('test');
+            const matrix = new ObjectMatrix<ICellData>();
+            matrix.setValue(0, 0, { v: 'A25' });
+            const copyId = 'rejected-cut';
+            sheetClipboardService.copyContentCache().set(copyId, {
+                unitId: 'test',
+                subUnitId: 'sheet1',
+                range: { rows: [24], cols: [0] },
+                matrix,
+                copyType: COPY_TYPE.CUT,
+            });
+            let allowed = false;
+            const checks: unknown[] = [];
+            const validation = get(SheetInterceptorService).interceptBeforeCommand({
+                performCheck: async (command) => {
+                    checks.push(command);
+                    return allowed;
+                },
+            });
+            let hooksCalled = 0;
+            const hook = sheetClipboardService.addClipboardHook({
+                id: 'movement-preflight-resource',
+                onBeforePaste: () => {
+                    hooksCalled++;
+                    return true;
+                },
+            });
+            const target = {
+                unitId: 'test',
+                subUnitId: 'sheet1',
+                range: { startRow: 24, endRow: 24, startColumn: 1, endColumn: 1 },
+            };
+            expect(await sheetClipboardService.pasteByCopyId(copyId, undefined, target)).toBe(false);
+            expect(checks).toEqual([{
+                id: MoveRangeCommand.id,
+                params: {
+                    fromUnitId: 'test',
+                    fromSubUnitId: 'sheet1',
+                    fromRange: { startRow: 24, endRow: 24, startColumn: 0, endColumn: 0 },
+                    toUnitId: 'test',
+                    toSubUnitId: 'sheet1',
+                    toRange: target.range,
+                },
+            }]);
+            expect(hooksCalled).toBe(0);
+            expect(workbook.getSnapshot()).toEqual(snapshot);
+            expect(get(IUndoRedoService).getUndoRedoStatus('test')).toEqual(history);
+            expect(sheetClipboardService.copyContentCache().get(copyId)?.matrix).toBe(matrix);
+            allowed = true;
+            expect(await sheetClipboardService.pasteByCopyId(copyId, undefined, target)).toBe(true);
+            expect(getValues(24, 0, 24, 1)?.[0].map((cell) => cell?.v ?? null)).toEqual([null, 'A25']);
+            expect(hooksCalled).toBe(1);
+            validation.dispose();
+            hook.dispose();
+        });
+
+        it('rejects cross-workbook cuts before running resource hooks and retains the cut for a valid retry', async () => {
+            const instances = get(IUniverInstanceService);
+            const source = instances.getUnit<Workbook>('test', UniverInstanceType.UNIVER_SHEET)!;
+            const sourceBefore = Tools.deepClone(source.getSnapshot());
+            const peer = instances.createUnit(UniverInstanceType.UNIVER_SHEET, {
+                ...Tools.deepClone(sourceBefore),
+                id: 'cut-peer',
+            }, { makeCurrent: false });
+            const peerBefore = Tools.deepClone(peer.getSnapshot());
+            const history = get(IUndoRedoService);
+            const peerHistory = history.getUndoRedoStatus('cut-peer');
+            const sourceHistory = history.getUndoRedoStatus('test');
+            const copyId = 'cross-workbook-cut';
+            const matrix = new ObjectMatrix<ICellData>();
+            matrix.setValue(0, 0, { v: 'A25' });
+            sheetClipboardService.copyContentCache().set(copyId, {
+                unitId: 'test',
+                subUnitId: 'sheet1',
+                range: { rows: [24], cols: [0] },
+                matrix,
+                copyType: COPY_TYPE.CUT,
+            });
+            let beforePasteCalls = 0;
+            const hook = sheetClipboardService.addClipboardHook({
+                id: 'cross-workbook-cut-resource-boundary',
+                onBeforePaste: () => {
+                    beforePasteCalls += 1;
+                    return true;
+                },
+            });
+            const range = { startRow: 24, endRow: 24, startColumn: 1, endColumn: 1 };
+            expect(await sheetClipboardService.pasteByCopyId(copyId, undefined, {
+                unitId: 'cut-peer',
+                subUnitId: 'sheet1',
+                range,
+            })).toBe(false);
+            expect(beforePasteCalls).toBe(0);
+            expect(source.getSnapshot()).toEqual(sourceBefore);
+            expect(peer.getSnapshot()).toEqual(peerBefore);
+            expect(history.getUndoRedoStatus('test')).toEqual(sourceHistory);
+            expect(history.getUndoRedoStatus('cut-peer')).toEqual(peerHistory);
+            expect(sheetClipboardService.copyContentCache().get(copyId)?.matrix).toBe(matrix);
+            hook.dispose();
+            instances.setCurrentUnitForType('test');
+            expect(await sheetClipboardService.pasteByCopyId(copyId, undefined, {
+                unitId: 'test',
+                subUnitId: 'sheet1',
+                range,
+            })).toBe(true);
+            expect(getValues(24, 0, 24, 1)?.[0].map((cell) => cell?.v ?? null)).toEqual([null, 'A25']);
+            expect(await commandService.executeCommand(UndoCommand.id)).toBe(true);
+            expect(getValues(24, 0, 24, 1)?.[0].map((cell) => cell?.v ?? null)).toEqual(['A25', 'B25']);
+            expect(await commandService.executeCommand(RedoCommand.id)).toBe(true);
+            expect(getValues(24, 0, 24, 1)?.[0].map((cell) => cell?.v ?? null)).toEqual([null, 'A25']);
+            expect(peer.getSnapshot()).toEqual(peerBefore);
+        });
+
+        it.each([COPY_TYPE.COPY, COPY_TYPE.CUT])('delegates cross-workbook focused-object %s to its hook without moving cells', async (copyType) => {
+            const instances = get(IUniverInstanceService);
+            const source = instances.getUnit<Workbook>('test', UniverInstanceType.UNIVER_SHEET)!;
+            const sourceBefore = Tools.deepClone(source.getSnapshot());
+            const peer = instances.createUnit(UniverInstanceType.UNIVER_SHEET, {
+                ...Tools.deepClone(sourceBefore),
+                id: 'object-peer',
+            }, { makeCurrent: false });
+            const peerBefore = Tools.deepClone(peer.getSnapshot());
+            const copyId = 'focused-object';
+            sheetClipboardService.copyContentCache().set(copyId, {
+                unitId: 'test',
+                subUnitId: 'sheet1',
+                range: { rows: [24], cols: [0] },
+                matrix: new ObjectMatrix({ 0: { 0: { v: '' } } }),
+                copyType,
+                skipCellCopy: true,
+            });
+            const handled: Array<{ source: string | undefined; target: string; copyType: COPY_TYPE | undefined }> = [];
+            const hook = sheetClipboardService.addClipboardHook({
+                id: 'focused-object-owner',
+                onBeforeCopyFocusedObject: () => true,
+                onPasteCells: (from, to, _data, payload) => {
+                    handled.push({ source: from?.unitId, target: to.unitId, copyType: payload.copyType });
+                    return { redos: [], undos: [] };
+                },
+            });
+            expect(await sheetClipboardService.pasteByCopyId(copyId, undefined, {
+                unitId: 'object-peer',
+                subUnitId: 'sheet1',
+                range: { startRow: 24, endRow: 24, startColumn: 1, endColumn: 1 },
+            })).toBe(true);
+            expect(handled).toEqual([{ source: 'test', target: 'object-peer', copyType }]);
+            expect(source.getSnapshot()).toEqual(sourceBefore);
+            expect(peer.getSnapshot()).toEqual(peerBefore);
+            hook.dispose();
+        });
+
+        it('cut value from A25 to B25', async () => {
+            const unitId = 'test';
+            const subUnitId = 'sheet1';
+            const fromRange = { rows: [24], cols: [0] };
+            const toRange = { startRow: 24, startColumn: 1, endRow: 24, endColumn: 1 };
+            const copyContentCache = sheetClipboardService.copyContentCache();
+            const { matrixFragment, copyId } = sheetClipboardService.generateCopyContent(
+                unitId,
+                subUnitId,
+                discreteRangeToRange(fromRange)
+            )!;
+
+            // cache the copy content for internal paste
+            copyContentCache.set(copyId, {
+                unitId,
+                subUnitId,
+                range: fromRange,
+                matrix: matrixFragment,
+                copyType: COPY_TYPE.CUT,
+            });
+
+            const selectionManager = get(SheetsSelectionsService);
+
+            selectionManager.addSelections([
+                {
+                    range: { ...toRange, rangeType: RANGE_TYPE.NORMAL },
+                    primary: null,
+                    style: null,
+                },
+            ]);
+
+            expect(await sheetClipboardService.pasteByCopyId(copyId, PREDEFINED_HOOK_NAME_PASTE.DEFAULT_PASTE)).toBe(true);
+
+            expect(getValues(24, 0, 24, 0)![0][0]).toBe(null);
+            expect(getValues(24, 1, 24, 1)![0][0]!.v).toBe('A25');
+
+            // undo
+            expect(await commandService.executeCommand(UndoCommand.id)).toBeTruthy();
+            expect(getValues(24, 0, 24, 0)![0][0]!.v).toStrictEqual('A25');
+            expect(getValues(24, 1, 24, 1)![0][0]!.v).toStrictEqual('B25');
+
+            // redo
+            expect(await commandService.executeCommand(RedoCommand.id)).toBeTruthy();
+            expect(getValues(24, 0, 24, 0)![0][0]).toBe(null);
+            expect(getValues(24, 1, 24, 1)![0][0]!.v).toBe('A25');
+        });
+    });
+});

@@ -1,0 +1,22 @@
+packages:
+    - common/*
+    - examples
+    - presets
+    - presets/packages/*
+    - packages/*
+    - tests/*
+publicHoistPattern:
+    - '@storybook/react'
+allowBuilds:
+    '@parcel/watcher': false
+    '@swc/core': false
+    esbuild: false
+    protobufjs: false
+overrides:
+    '@types/react': 19.3.0
+    '@types/react-dom': 19.3.0
+    react: 19.3.0
+    react-dom: 19.3.0
+minimumReleaseAgeExclude:
+    - '@amamo/*'
+    - '@univerjs/*'

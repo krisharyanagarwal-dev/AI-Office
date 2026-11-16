@@ -1,0 +1,47 @@
+{
+  "users": {
+    "aryan": {
+      "id": "aryan",
+      "name": "Aryan Agarwal",
+      "role": "owner",
+      "default_agent": "principal-architect",
+      "default_priority": "normal",
+      "created_at": "2026-11-05T05:00:00Z"
+    },
+    "demo": {
+      "id": "demo",
+      "name": "Demo User",
+      "role": "user",
+      "default_agent": "language-translator",
+      "default_priority": "normal",
+      "created_at": "2026-11-05T05:00:00Z"
+    }
+  },
+  "sessions": {
+    "f7b89130-a2a4-4f": {
+      "user_id": "aryan",
+      "created_at": 1793837505.541638
+    },
+    "44eb41ee-0167-4b": {
+      "user_id": "aryan",
+      "created_at": 1793839846.2990348
+    },
+    "8ec6fc32-5fb8-44": {
+      "user_id": "aryan",
+      "created_at": 1793880775.320999
+    },
+    "ced6d3bf-9518-4c": {
+      "user_id": "aryan",
+      "created_at": 1793881058.884068
+    },
+    "1f955e3a-b712-4e": {
+      "user_id": "aryan",
+      "created_at": 1794779432.843664
+    },
+    "5b94415d-99c0-47": {
+      "user_id": "aryan",
+      "created_at": 1794779509.584866
+    }
+  },
+  "session_timeout_sec": 86400
+}

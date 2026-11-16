@@ -1,0 +1,1075 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type { DocumentDataModel, IDisposable, IDocDrawingBase, IDocDrawingPosition, Nullable } from '@univerjs/core';
+import type { IDrawingDocTransform, IUpdateDrawingDocTransformCommandParams } from '@univerjs/docs-drawing';
+import type {
+    BaseObject,
+    Documents,
+    IDocumentSkeletonGlyph,
+    IDocumentSkeletonPage,
+    IDocumentSkeletonRow,
+    IDocumentSkeletonTable,
+    Image,
+    IPoint,
+    Viewport,
+} from '@univerjs/engine-render';
+import {
+    BooleanNumber,
+    COLORS,
+    Disposable,
+    DisposableCollection,
+    generateRandomId,
+    ICommandService,
+    IUniverInstanceService,
+    ObjectRelativeFromH,
+    ObjectRelativeFromV,
+    PositionedObjectLayoutType,
+    toDisposable,
+    Tools,
+    UniverInstanceType,
+} from '@univerjs/core';
+import { DocSkeletonManagerService } from '@univerjs/docs';
+import { findDocDrawing, UpdateDrawingDocTransformCommand } from '@univerjs/docs-drawing';
+import {
+    DocSelectionRenderService,
+    getAnchorBounding,
+    getOneTextSelectionRange,
+    neoGetDocObject,
+    NodePositionConvertToCursor,
+    TEXT_RANGE_LAYER_INDEX,
+} from '@univerjs/docs-ui';
+import { IDrawingManagerService } from '@univerjs/drawing';
+import {
+    DocumentSkeletonPageType,
+    getColor,
+    IRenderManagerService,
+    Liquid,
+    PageLayoutType,
+    Rect,
+    Vector2,
+} from '@univerjs/engine-render';
+import { filter, switchMap, takeUntil, throttleTime } from 'rxjs';
+import {
+    IMoveInlineDrawingCommand,
+    ITransformNonInlineDrawingCommand,
+} from '../commands/commands/update-doc-drawing.command';
+import { findDrawingAnchor, getDrawingWrappingPosition } from '../utils/drawing-wrapping-position';
+import {
+    getDocsDrawingBehindText,
+    getDocsDrawingClipPage,
+    getDocsPageRelativeDrawingAnchorPage,
+    getDocsTableCellDrawingOffset,
+} from './render-controllers/doc-drawing-transform-update.controller';
+
+const INLINE_DRAWING_ANCHOR_KEY_PREFIX = '__InlineDrawingAnchor__';
+
+interface IDrawingCache {
+    drawing: IDocDrawingBase;
+    top: number;
+    left: number;
+    width: number;
+    height: number;
+    angle: number;
+}
+
+interface IDrawingAnchor {
+    offset: number;
+    segmentId: string;
+    segmentPage: number;
+    docTransform?: IDocDrawingPosition;
+    contentBoxPointGroup?: IPoint[][];
+}
+
+export interface IDocsTableCellAnchorContext {
+    cell: IDocumentSkeletonPage;
+    hostPage: IDocumentSkeletonPage;
+    offset: {
+        left: number;
+        top: number;
+    };
+    row: IDocumentSkeletonRow;
+    table: IDocumentSkeletonTable;
+}
+
+export function getDocsTableCellAnchorContext(unitId: string, cell: IDocumentSkeletonPage): Nullable<IDocsTableCellAnchorContext> {
+    const row = cell.parent as IDocumentSkeletonRow | undefined;
+    const table = row?.parent as IDocumentSkeletonTable | undefined;
+    const hostPage = table?.parent as IDocumentSkeletonPage | undefined;
+
+    if (!row || !table || !hostPage || !row.cells?.includes(cell)) {
+        return null;
+    }
+
+    return {
+        cell,
+        hostPage,
+        offset: getDocsTableCellDrawingOffset(unitId, table, row, cell),
+        row,
+        table,
+    };
+}
+
+export function shouldUseDocsDrawingOuterPageOrigin(config: {
+    drawing: Pick<IDocDrawingBase, 'behindDoc' | 'layoutType'>;
+    height: number;
+    hostPage?: IDocumentSkeletonPage;
+    page: IDocumentSkeletonPage;
+    width: number;
+}): boolean {
+    const { drawing, height, hostPage, page, width } = config;
+    if (drawing.layoutType !== PositionedObjectLayoutType.WRAP_NONE) {
+        return false;
+    }
+
+    const behindText = getDocsDrawingBehindText({ drawingOrigin: drawing, hostPage });
+    const clipPage = getDocsDrawingClipPage({
+        drawing: {
+            behindText,
+            transform: { width, height },
+        },
+        hostPage,
+        page,
+    });
+
+    return getDocsPageRelativeDrawingAnchorPage({ page, clipPage, hostPage }) != null;
+}
+
+// Listen doc drawing transformer change, and update drawing data.
+export class DocDrawingTransformerController extends Disposable {
+    private _liquid = new Liquid();
+    private _listenerOnImageMap = new Map<string, IDisposable>();
+    // Use to cache the drawings is under transforming or scaling.
+    private _transformerCache: Map<string, IDrawingCache> = new Map();
+    private _anchorShape: Nullable<Rect>;
+
+    constructor(
+        @ICommandService private readonly _commandService: ICommandService,
+        @IUniverInstanceService private readonly _univerInstanceService: IUniverInstanceService,
+        @IDrawingManagerService private readonly _drawingManagerService: IDrawingManagerService,
+        @IRenderManagerService private readonly _renderManagerService: IRenderManagerService
+    ) {
+        super();
+
+        this._init();
+    }
+
+    override dispose(): void {
+        for (const listener of this._listenerOnImageMap.values()) {
+            listener.dispose();
+        }
+        this._listenerOnImageMap.clear();
+        this._transformerCache.clear();
+        this._anchorShape?.dispose();
+        this._anchorShape = null;
+        super.dispose();
+    }
+
+    private _init(): void {
+        this.disposeWithMe(this._renderManagerService.disposed$.subscribe((unitId) => {
+            this._listenerOnImageMap.get(unitId)?.dispose();
+            this._listenerOnImageMap.delete(unitId);
+        }));
+        this._listenDrawingFocus();
+    }
+
+    private _listenDrawingFocus(): void {
+        this.disposeWithMe(
+            this._drawingManagerService.add$.subscribe((drawingParams) => {
+                if (drawingParams.length === 0) {
+                    return;
+                }
+
+                for (const drawingParam of drawingParams) {
+                    const { unitId } = drawingParam;
+
+                    if (!this._listenerOnImageMap.has(unitId)) {
+                        const listener = this._listenTransformerChange(unitId);
+                        if (listener) {
+                            this._listenerOnImageMap.set(unitId, listener);
+                        }
+                    }
+                }
+            })
+        );
+    }
+
+    // Only handle one drawing transformer change.
+
+    private _listenTransformerChange(unitId: string): IDisposable | undefined {
+        const context = this._getSceneAndTransformerByDrawingSearch(unitId);
+        const transformer = context?.transformer;
+
+        if (transformer == null) {
+            return;
+        }
+
+        const listeners = new DisposableCollection();
+        listeners.add(toDisposable(() => {
+            for (const [id, cached] of this._transformerCache) {
+                if (cached.drawing.unitId === unitId) {
+                    this._transformerCache.delete(id);
+                }
+            }
+            if (this._anchorShape && this._anchorShape.getScene() === context?.scene) {
+                this._anchorShape.dispose();
+                this._anchorShape = null;
+            }
+        }));
+        listeners.add(
+            toDisposable(
+                transformer.changeStart$.subscribe((state) => {
+                    this._transformerCache.clear();
+                    const { objects } = state;
+
+                    for (const object of objects.values()) {
+                        const { oKey, width, height, left, top, angle } = object;
+                        const drawing = this._drawingManagerService.getDrawingOKey(oKey);
+                        if (drawing == null) {
+                            continue;
+                        }
+
+                        const documentDataModel = this._univerInstanceService.getUnit<DocumentDataModel>(drawing.unitId, UniverInstanceType.UNIVER_DOC);
+                        const drawingData = documentDataModel ? findDocDrawing(documentDataModel.getSnapshot(), drawing.drawingId)?.drawing : undefined;
+
+                        if (drawingData?.layoutType === PositionedObjectLayoutType.INLINE) {
+                            try {
+                                (object as Image).setOpacity(0.2);
+                            } catch {
+                            }
+                        }
+
+                        if (drawingData != null) {
+                            this._transformerCache.set(drawing.drawingId, {
+                                drawing: drawingData,
+                                top,
+                                left,
+                                width,
+                                height,
+                                angle,
+                            });
+                        }
+                    }
+                })
+            )
+        );
+
+        // Queued updates belong to the gesture and render that created them.
+        listeners.add(toDisposable(transformer.changeStart$.pipe(
+            switchMap(() => transformer.changing$.pipe(
+                filter(({ objects }) => objects.size > 1),
+                throttleTime(50, undefined, { leading: true, trailing: true }),
+                takeUntil(transformer.changeEnd$)
+            ))
+        ).subscribe(({ objects }) => this._updateMultipleDrawingDocTransform(objects))));
+
+        listeners.add(
+            toDisposable(
+                transformer.changing$.subscribe((state) => {
+                    const { objects, offsetX, offsetY } = state;
+
+                    if (objects.size === 1) {
+                        const drawingCache: Nullable<IDrawingCache> = this._transformerCache.values().next().value;
+                        const object: BaseObject = objects.values().next().value!;
+                        const { width, height, top, left, angle } = object;
+
+                        if (
+                            drawingCache &&
+                            width === drawingCache.width &&
+                            height === drawingCache.height &&
+                            top === drawingCache.top &&
+                            left === drawingCache.left &&
+                            angle === drawingCache.angle
+                        ) {
+                            return;
+                        }
+
+                        if (drawingCache && drawingCache.drawing.layoutType === PositionedObjectLayoutType.INLINE && offsetX != null && offsetY != null) {
+                            this._updateInlineDrawingAnchor(drawingCache.drawing, offsetX, offsetY);
+                        }
+                    }
+                })
+            )
+        );
+
+        // Handle transformer mouseup.
+        listeners.add(
+            toDisposable(
+                // eslint-disable-next-line complexity
+                transformer.changeEnd$.subscribe((state) => {
+                    const { objects, offsetX, offsetY } = state;
+
+                    // Recovery the opacity of inline drawings.
+                    for (const object of objects.values()) {
+                        const drawing = this._drawingManagerService.getDrawingOKey(object.oKey);
+                        if (drawing == null) {
+                            continue;
+                        }
+                        const drawingCache = this._transformerCache.get(drawing?.drawingId);
+
+                        if (drawingCache?.drawing.layoutType === PositionedObjectLayoutType.INLINE) {
+                            try {
+                                (object as Image).setOpacity(1);
+                            } catch {
+                            }
+                        }
+                    }
+
+                    if (this._anchorShape) {
+                        this._anchorShape.hide();
+                    }
+
+                    if (objects.size > 1) {
+                        this._updateMultipleDrawingDocTransform(objects);
+                    } else if (objects.size === 1) {
+                        const drawingCache: Nullable<IDrawingCache> = this._transformerCache.values().next().value;
+                        const object: BaseObject = objects.values().next().value!;
+                        const { width, height, top, left, angle } = object;
+
+                        if (
+                            drawingCache &&
+                            width === drawingCache.width &&
+                            height === drawingCache.height &&
+                            top === drawingCache.top &&
+                            left === drawingCache.left &&
+                            angle === drawingCache.angle
+                        ) {
+                            return;
+                        }
+
+                        if (drawingCache && drawingCache.drawing.layoutType === PositionedObjectLayoutType.INLINE) {
+                            // Handle inline drawing.
+
+                            if (width !== drawingCache.width || height !== drawingCache.height || angle !== drawingCache.angle) {
+                                this._updateDrawingSize(drawingCache, object);
+                            } else if (offsetX != null && offsetY != null) {
+                                this._moveInlineDrawing(drawingCache.drawing, offsetX, offsetY);
+                            }
+                        } else if (drawingCache) {
+                            // Handle non-inline drawing.
+                            this._nonInlineDrawingTransform(drawingCache.drawing, object);
+                        }
+                    }
+
+                    this._transformerCache.clear();
+                })
+            )
+        );
+        return listeners;
+    }
+
+    // eslint-disable-next-line max-lines-per-function
+    private _updateMultipleDrawingDocTransform(objects: Map<string, BaseObject>): void {
+        if (objects.size < 1) {
+            return;
+        }
+
+        const drawings: IDrawingDocTransform[] = [];
+        let unitId;
+        let subUnitId;
+        // The new position is calculated based on the offset.
+        for (const object of objects.values()) {
+            const { oKey, left, top, angle } = object;
+            let { width, height } = object;
+            const drawing = this._drawingManagerService.getDrawingOKey(oKey);
+            if (drawing == null) {
+                continue;
+            }
+
+            if (unitId == null) {
+                unitId = drawing.unitId;
+            }
+
+            if (subUnitId == null) {
+                subUnitId = drawing.subUnitId;
+            }
+
+            const drawingCache = this._transformerCache.get(drawing.drawingId);
+
+            if (drawingCache == null) {
+                continue;
+            }
+
+            const { drawing: drawingData, top: oldTop, left: oldLeft, width: oldWidth, height: oldHeight, angle: oldAngle } = drawingCache;
+
+            const { width: maxWidth, height: maxHeight } = this._getPageContentSize(drawingData);
+
+            // Drawing's width and height should not exceed the page's width and height.
+            width = Math.min(width, maxWidth);
+            height = Math.min(height, maxHeight);
+
+            if (oldWidth !== width || oldHeight !== height) {
+                drawings.push({
+                    drawingId: drawing.drawingId,
+                    key: 'size',
+                    value: {
+                        width,
+                        height,
+                    },
+                });
+            }
+
+            if (oldAngle !== angle) {
+                drawings.push({
+                    drawingId: drawing.drawingId,
+                    key: 'angle',
+                    value: angle,
+                });
+            }
+
+            if (oldTop !== top || oldLeft !== left) {
+                const verticalDelta = top - oldTop;
+                const horizontalDelta = left - oldLeft;
+                const { positionH, positionV } = drawingData.docTransform;
+                let resolvedPosition: IDocDrawingPosition | undefined;
+                const hasHorizontalOffset = positionH.posOffset != null && positionH.align == null;
+                const hasVerticalOffset = positionV.posOffset != null && positionV.align == null;
+                if (!hasHorizontalOffset || !hasVerticalOffset) {
+                    const manager = this._renderManagerService.getRenderUnitById(unitId)?.with(DocSkeletonManagerService);
+                    const skeleton = manager?.getSkeleton().getSkeletonData();
+                    const viewModel = manager?.getViewModel();
+                    const anchor = skeleton && viewModel ? findDrawingAnchor(unitId, drawing.drawingId, skeleton, viewModel.getEditArea(), drawingData) : null;
+                    if (anchor) {
+                        resolvedPosition = getDrawingWrappingPosition(anchor, drawingData.layoutType, undefined, undefined, { left: horizontalDelta, top: verticalDelta });
+                    }
+                }
+                const posOffsetV = hasVerticalOffset ? positionV.posOffset! + verticalDelta : resolvedPosition?.positionV.posOffset;
+                const posOffsetH = hasHorizontalOffset ? positionH.posOffset! + horizontalDelta : resolvedPosition?.positionH.posOffset;
+
+                if (verticalDelta !== 0 && posOffsetV != null) {
+                    drawings.push({
+                        drawingId: drawing.drawingId,
+                        key: 'positionV',
+                        value: {
+                            relativeFrom: positionV.relativeFrom,
+                            posOffset: posOffsetV,
+                        },
+                    });
+                }
+
+                if (horizontalDelta !== 0 && posOffsetH != null) {
+                    drawings.push({
+                        drawingId: drawing.drawingId,
+                        key: 'positionH',
+                        value: {
+                            relativeFrom: positionH.relativeFrom,
+                            posOffset: posOffsetH,
+                        },
+                    });
+                }
+            }
+        }
+
+        if (drawings.length > 0 && unitId && subUnitId) {
+            this._commandService.executeCommand<IUpdateDrawingDocTransformCommandParams>(UpdateDrawingDocTransformCommand.id, {
+                unitId,
+                subUnitId,
+                drawings,
+            });
+        }
+    }
+
+    private _updateInlineDrawingAnchor(drawing: IDocDrawingBase, offsetX: number, offsetY: number) {
+        if (this._transformerCache.size !== 1) {
+            return;
+        }
+
+        const { contentBoxPointGroup } = this._getInlineDrawingAnchor(drawing, offsetX, offsetY) ?? {};
+
+        if (contentBoxPointGroup == null) {
+            return;
+        }
+
+        this._createOrUpdateInlineAnchor(drawing.unitId, contentBoxPointGroup);
+    }
+
+    private _getInlineDrawingAnchor(drawing: IDocDrawingBase, offsetX: number, offsetY: number): Nullable<IDrawingAnchor> {
+        const currentRender = this._renderManagerService.getRenderUnitById(drawing.unitId);
+
+        const skeleton = currentRender?.with(DocSkeletonManagerService).getSkeleton();
+
+        if (currentRender == null) {
+            return;
+        }
+
+        const { mainComponent, scene } = currentRender;
+        const documentComponent = mainComponent as Documents;
+        const activeViewport = scene.getViewports()[0];
+        const {
+            pageLayoutType = PageLayoutType.VERTICAL,
+            pageMarginLeft,
+            pageMarginTop,
+        } = documentComponent.getOffsetConfig();
+        let glyphAnchor: Nullable<IDocumentSkeletonGlyph> = null;
+        let isBack = false;
+        let segmentPageIndex = -1;
+        let segmentId = '';
+        const HALF = 0.5;
+        const coord = this._getTransformCoordForDocumentOffset(documentComponent, activeViewport, offsetX, offsetY);
+        if (coord == null) {
+            return;
+        }
+
+        const docSelectionRenderService = this._renderManagerService.getRenderUnitById(drawing.unitId)?.with(DocSelectionRenderService);
+
+        if (docSelectionRenderService == null) {
+            return;
+        }
+
+        const nodeInfo = skeleton?.findNodeByCoord(coord, pageLayoutType, pageMarginLeft, pageMarginTop, {
+            strict: false,
+            segmentId: docSelectionRenderService.getSegment(),
+            segmentPage: docSelectionRenderService.getSegmentPage(),
+        });
+        if (nodeInfo) {
+            const { node, ratioX, segmentPage, segmentId: nodeSegmentId } = nodeInfo;
+            isBack = ratioX < HALF;
+            glyphAnchor = node;
+            segmentPageIndex = segmentPage;
+            segmentId = nodeSegmentId;
+        }
+
+        if (glyphAnchor == null) {
+            return;
+        }
+
+        const nodePosition = skeleton?.findPositionByGlyph(glyphAnchor, segmentPageIndex);
+        const docObject = neoGetDocObject(currentRender);
+
+        if (nodePosition == null || skeleton == null) {
+            return;
+        }
+
+        const positionWithIsBack = {
+            ...nodePosition,
+            isBack,
+        };
+
+        const documentOffsetConfig = docObject.document.getOffsetConfig();
+        const convertor = new NodePositionConvertToCursor(documentOffsetConfig, skeleton);
+        const { cursorList, contentBoxPointGroup } = convertor.getRangePointData(positionWithIsBack, positionWithIsBack);
+        const { startOffset } = getOneTextSelectionRange(cursorList) ?? {};
+        if (startOffset == null) {
+            return;
+        }
+
+        // Put drawing before the anchor.
+        return { offset: startOffset, contentBoxPointGroup, segmentId, segmentPage: segmentPageIndex };
+    }
+
+    // eslint-disable-next-line max-lines-per-function, complexity
+    private _getDrawingAnchor(drawing: IDocDrawingBase, object: BaseObject): Nullable<IDrawingAnchor> {
+        const currentRender = this._renderManagerService.getRenderUnitById(drawing.unitId);
+        const skeleton = currentRender?.with(DocSkeletonManagerService).getSkeleton();
+
+        const skeletonData = skeleton?.getSkeletonData();
+        if (skeletonData == null || currentRender == null) {
+            return;
+        }
+
+        const { pages, skeHeaders, skeFooters } = skeletonData;
+
+        const { mainComponent, scene } = currentRender;
+        const documentComponent = mainComponent as Documents;
+        const activeViewport = scene.getViewports()[0];
+        const { pageLayoutType = PageLayoutType.VERTICAL, pageMarginLeft, pageMarginTop, docsLeft, docsTop } = documentComponent.getOffsetConfig();
+        const { left, top, angle } = object;
+        let { width, height } = object;
+        const { positionV, positionH } = drawing.docTransform;
+
+        const { width: maxWidth, height: maxHeight } = this._getPageContentSize(drawing);
+
+        width = Math.min(width, maxWidth);
+        height = Math.min(height, maxHeight);
+
+        let glyphAnchor: Nullable<IDocumentSkeletonGlyph> = null;
+        let segmentId = '';
+        let segmentPage = -1;
+        const isBack = true;
+        const docTransform = {
+            ...drawing.docTransform,
+            size: {
+                width,
+                height,
+            },
+            angle,
+        };
+
+        const { x, y } = scene.getViewportScrollXY(activeViewport);
+
+        const coord = this._getTransformCoordForDocumentOffset(documentComponent, activeViewport, left - x, top - y);
+        if (coord == null) {
+            return;
+        }
+
+        const docSelectionRenderService = this._renderManagerService.getRenderUnitById(drawing.unitId)?.with(DocSelectionRenderService);
+
+        if (docSelectionRenderService == null) {
+            return;
+        }
+
+        const nodeInfo = skeleton?.findNodeByCoord(coord, pageLayoutType, pageMarginLeft, pageMarginTop, {
+            strict: false,
+            segmentId: docSelectionRenderService.getSegment(),
+            segmentPage: docSelectionRenderService.getSegmentPage(),
+        });
+        if (nodeInfo) {
+            const { node, segmentPage: segmentPageIndex, segmentId: nodeSegmentId } = nodeInfo;
+            glyphAnchor = node;
+            segmentPage = segmentPageIndex;
+            segmentId = nodeSegmentId;
+        }
+
+        if (glyphAnchor == null) {
+            return;
+        }
+
+        const line = glyphAnchor.parent?.parent;
+        const column = line?.parent;
+        const sectionTop = column?.parent?.top ?? 0;
+        const paragraphStartLine = column?.lines.find((l) => l.paragraphIndex === line?.paragraphIndex && l.paragraphStart) ?? column?.lines[0];
+        const page = column?.parent?.parent;
+
+        if (line == null || column == null || paragraphStartLine == null || page == null) {
+            return;
+        }
+
+        this._liquid.reset();
+
+        const tableCellContext = page.type === DocumentSkeletonPageType.CELL ? getDocsTableCellAnchorContext(drawing.unitId, page) : null;
+        const anchorPage = tableCellContext?.hostPage ?? page;
+        const pageType = anchorPage.type;
+        const drawingHostPage = (page.type === DocumentSkeletonPageType.HEADER || page.type === DocumentSkeletonPageType.FOOTER) && segmentPage > -1
+            ? pages[segmentPage]
+            : undefined;
+        const useOuterPageOrigin = shouldUseDocsDrawingOuterPageOrigin({
+            drawing,
+            height: object.height,
+            hostPage: drawingHostPage,
+            page,
+            width: object.width,
+        });
+        let pageOffsetLeft = this._liquid.x;
+        let pageOffsetTop = this._liquid.y;
+
+        for (const p of pages) {
+            const { headerId, footerId, pageHeight, pageWidth, marginLeft, marginBottom } = p;
+            const pIndex = pages.indexOf(p);
+
+            if (segmentPage > -1 && pIndex === segmentPage) {
+                pageOffsetLeft = this._liquid.x;
+                pageOffsetTop = this._liquid.y;
+
+                switch (pageType) {
+                    case DocumentSkeletonPageType.HEADER: {
+                        const headerSke = skeHeaders.get(headerId)?.get(p.headerLayoutKey ?? pageWidth);
+
+                        if (headerSke) {
+                            this._liquid.translatePagePadding({
+                                marginTop: headerSke.marginTop,
+                                marginLeft,
+                            } as IDocumentSkeletonPage);
+                        } else {
+                            throw new Error('header skeleton not found');
+                        }
+
+                        break;
+                    }
+
+                    case DocumentSkeletonPageType.FOOTER: {
+                        const footerSke = skeFooters.get(footerId)?.get(p.footerLayoutKey ?? pageWidth);
+
+                        if (footerSke) {
+                            this._liquid.translatePagePadding({
+                                marginTop: pageHeight - marginBottom + footerSke.marginTop,
+                                marginLeft,
+                            } as IDocumentSkeletonPage);
+                        } else {
+                            throw new Error('footer skeleton not found');
+                        }
+
+                        break;
+                    }
+
+                    default: {
+                        this._liquid.translatePagePadding(p);
+                        break;
+                    }
+                }
+
+                break;
+            }
+
+            if (p === anchorPage) {
+                pageOffsetLeft = this._liquid.x;
+                pageOffsetTop = this._liquid.y;
+            }
+
+            this._liquid.translatePagePadding(p);
+            if (p === anchorPage) {
+                break;
+            }
+
+            this._liquid.restorePagePadding(p);
+            this._liquid.translatePage(p, pageLayoutType, pageMarginLeft, pageMarginTop);
+        }
+
+        if (tableCellContext) {
+            this._liquid.translate(tableCellContext.offset.left, tableCellContext.offset.top);
+        }
+
+        if (positionV.relativeFrom === ObjectRelativeFromV.LINE) {
+            glyphAnchor = line.divides[0].glyphGroup[0];
+        } else {
+            glyphAnchor = paragraphStartLine.divides?.[0]?.glyphGroup?.[0] ?? glyphAnchor;
+        }
+
+        docTransform.positionH = {
+            relativeFrom: positionH.relativeFrom,
+            posOffset: left - this._liquid.x - docsLeft,
+        };
+
+        switch (positionH.relativeFrom) {
+            case ObjectRelativeFromH.PAGE: {
+                if (useOuterPageOrigin) {
+                    docTransform.positionH.posOffset = left - pageOffsetLeft - docsLeft;
+                }
+                break;
+            }
+            case ObjectRelativeFromH.MARGIN: {
+                docTransform.positionH.posOffset = left - this._liquid.x - docsLeft - page.marginLeft;
+                break;
+            }
+            case ObjectRelativeFromH.COLUMN: {
+                docTransform.positionH.posOffset = left - this._liquid.x - docsLeft - column.left;
+                break;
+            }
+        }
+
+        docTransform.positionV = {
+            relativeFrom: positionV.relativeFrom,
+            posOffset: top - this._liquid.y - docsTop,
+        };
+
+        switch (positionV.relativeFrom) {
+            case ObjectRelativeFromV.PAGE: {
+                docTransform.positionV.posOffset = useOuterPageOrigin
+                    ? top - pageOffsetTop - docsTop
+                    : top - this._liquid.y - docsTop + page.marginTop;
+                break;
+            }
+            case ObjectRelativeFromV.LINE: {
+                docTransform.positionV.posOffset = top - this._liquid.y - docsTop - sectionTop - line.top;
+                break;
+            }
+            case ObjectRelativeFromV.PARAGRAPH: {
+                docTransform.positionV.posOffset = top - this._liquid.y - docsTop - sectionTop - paragraphStartLine.top;
+                break;
+            }
+        }
+
+        if (glyphAnchor == null) {
+            return;
+        }
+
+        const nodePosition = skeleton?.findPositionByGlyph(glyphAnchor, segmentPage);
+        const docObject = neoGetDocObject(currentRender);
+        if (nodePosition == null || skeleton == null) {
+            return;
+        }
+
+        const positionWithIsBack = {
+            ...nodePosition,
+            isBack,
+        };
+
+        const documentOffsetConfig = docObject.document.getOffsetConfig();
+        const convertor = new NodePositionConvertToCursor(documentOffsetConfig, skeleton);
+        const { cursorList } = convertor.getRangePointData(positionWithIsBack, positionWithIsBack);
+        const { startOffset } = getOneTextSelectionRange(cursorList) ?? {};
+
+        if (startOffset == null) {
+            return;
+        }
+
+        // Put drawing before the anchor.
+        return { offset: startOffset, docTransform, segmentId, segmentPage };
+    }
+
+    // Update drawing when use transformer to resize it.
+    private _updateDrawingSize(drawingCache: IDrawingCache, object: BaseObject) {
+        const drawings: IDrawingDocTransform[] = [];
+        const { drawing, width: oldWidth, height: oldHeight, angle: oldAngle } = drawingCache;
+        const { unitId, subUnitId } = drawing;
+        let { width, height, angle } = object;
+
+        const { width: maxWidth, height: maxHeight } = this._getPageContentSize(drawing);
+
+        width = Math.min(maxWidth, width);
+        height = Math.min(maxHeight, height);
+
+        if (width !== oldWidth || height !== oldHeight) {
+            drawings.push({
+                drawingId: drawing.drawingId,
+                key: 'size',
+                value: {
+                    width,
+                    height,
+                },
+            });
+        }
+
+        if (angle !== oldAngle) {
+            drawings.push({
+                drawingId: drawing.drawingId,
+                key: 'angle',
+                value: angle,
+            });
+        }
+
+        if (drawings.length > 0 && unitId && subUnitId) {
+            this._commandService.executeCommand<IUpdateDrawingDocTransformCommandParams>(UpdateDrawingDocTransformCommand.id, {
+                unitId,
+                subUnitId,
+                drawings,
+            });
+        }
+    }
+
+    // Update inline drawing when use transformer to move it.
+    private _moveInlineDrawing(drawing: IDocDrawingBase, offsetX: number, offsetY: number) {
+        const anchor = this._getInlineDrawingAnchor(drawing, offsetX, offsetY);
+        const { offset, segmentId, segmentPage } = anchor ?? {};
+
+        return this._commandService.executeCommand(IMoveInlineDrawingCommand.id, {
+            unitId: drawing.unitId,
+            subUnitId: drawing.unitId,
+            drawing,
+            offset,
+            segmentId,
+            segmentPage,
+            needRefreshDrawings: offset == null,
+        });
+    }
+
+    // Limit the drawing to the page area, mainly in the vertical direction,
+    // and the upper and lower limits cannot exceed the page margin area.
+    private _limitDrawingInPage(drawing: IDocDrawingBase, object: BaseObject) {
+        const currentRender = this._renderManagerService.getRenderUnitById(drawing.unitId);
+        const { left, top, width, height, angle } = object;
+        const skeleton = currentRender?.with(DocSkeletonManagerService).getSkeleton();
+
+        const skeletonData = skeleton?.getSkeletonData();
+        const { pages } = skeletonData ?? {};
+
+        if (skeletonData == null || currentRender == null || pages == null) {
+            return {
+                left,
+                top,
+                width,
+                height,
+                angle,
+            };
+        }
+
+        const { mainComponent } = currentRender;
+        const documentComponent = mainComponent as Documents;
+        const { top: docsTop, pageLayoutType, pageMarginLeft, pageMarginTop } = documentComponent;
+        let newTop = top;
+        this._liquid.reset();
+
+        for (const page of pages) {
+            // this._liquid.translatePagePadding(page);
+            const { marginBottom, pageHeight } = page;
+            const index = pages.indexOf(page);
+            const nextPage = pages[index + 1];
+
+            if (nextPage == null) {
+                continue;
+            }
+
+            // Determines whether the image is between two pages, spanning two pages,
+            // but does not belong entirely to a page
+            const isBetweenPages = Tools.hasIntersectionBetweenTwoRanges(
+                top,
+                top + height,
+                this._liquid.y + docsTop + pageHeight - marginBottom,
+                this._liquid.y + docsTop + pageHeight + pageMarginTop + nextPage.marginTop
+            );
+
+            if (isBetweenPages) {
+                const drawingVMiddle = top + height / 2;
+                const pagesMiddle = this._liquid.y + docsTop + pageHeight + pageMarginTop / 2;
+
+                if (drawingVMiddle < pagesMiddle) {
+                    newTop = Math.min(top, this._liquid.y + docsTop + pageHeight - marginBottom - height);
+                } else {
+                    newTop = Math.max(top, this._liquid.y + docsTop + pageHeight + pageMarginTop + nextPage.marginTop);
+                }
+            }
+
+            // this._liquid.restorePagePadding(page);
+            this._liquid.translatePage(page, pageLayoutType, pageMarginLeft, pageMarginTop);
+        }
+
+        return {
+            left,
+            top: newTop,
+            width,
+            height,
+            angle,
+        };
+    }
+
+    private _nonInlineDrawingTransform(drawing: IDocDrawingBase, object: BaseObject, isMoving = false) {
+        const objectPosition = drawing.isMultiTransform === BooleanNumber.TRUE ? object : this._limitDrawingInPage(drawing, object);
+
+        if (isMoving && objectPosition.top !== object.top) {
+            return;
+        }
+
+        const anchor = this._getDrawingAnchor(drawing, objectPosition as BaseObject);
+        const { offset, docTransform, segmentId, segmentPage } = anchor ?? {};
+        if (offset == null || docTransform == null) {
+            // No need to change the anchor ,when the new anchor is not found. reuse the `_updateMultipleDrawingDocTransform` to modify the transform.
+            return this._updateMultipleDrawingDocTransform(new Map([[drawing.drawingId, object]]));
+        }
+
+        return this._commandService.executeCommand(ITransformNonInlineDrawingCommand.id, {
+            unitId: drawing.unitId,
+            subUnitId: drawing.unitId,
+            drawing,
+            offset,
+            docTransform,
+            segmentId,
+            segmentPage,
+        });
+    }
+
+    private _getSceneAndTransformerByDrawingSearch(unitId: Nullable<string>) {
+        if (unitId == null) {
+            return;
+        }
+
+        const renderObject = this._renderManagerService.getRenderUnitById(unitId);
+
+        const scene = renderObject?.scene;
+
+        if (scene == null) {
+            return;
+        }
+
+        const transformer = scene.getTransformerByCreate();
+
+        return { scene, transformer };
+    }
+
+    private _getTransformCoordForDocumentOffset(document: Documents, viewport: Viewport, evtOffsetX: number, evtOffsetY: number) {
+        const { documentTransform } = document.getOffsetConfig();
+        const originCoord = viewport.transformVector2SceneCoord(Vector2.FromArray([evtOffsetX, evtOffsetY]));
+
+        if (!originCoord) {
+            return;
+        }
+
+        return documentTransform.clone().invert().applyPoint(originCoord);
+    }
+
+    private _createOrUpdateInlineAnchor(unitId: string, pointsGroup: IPoint[][]) {
+        const currentRender = this._renderManagerService.getRenderUnitById(unitId);
+        if (currentRender == null) {
+            return;
+        }
+        const { mainComponent, scene } = currentRender;
+        const documentComponent = mainComponent as Documents;
+        const {
+            docsLeft,
+            docsTop,
+        } = documentComponent.getOffsetConfig();
+        const bounding = getAnchorBounding(pointsGroup);
+        const { left: boundingLeft, top: boundingTop, height } = bounding;
+        const left = boundingLeft + docsLeft;
+        const top = boundingTop + docsTop;
+
+        if (this._anchorShape) {
+            this._anchorShape.transformByState({ left, top, height });
+            this._anchorShape.show();
+
+            return;
+        }
+
+        const ID_LENGTH = 6;
+
+        const anchor = new Rect(INLINE_DRAWING_ANCHOR_KEY_PREFIX + generateRandomId(ID_LENGTH), {
+            left,
+            top,
+            height,
+            strokeWidth: 2,
+            stroke: getColor(COLORS.darkgray, 1),
+            evented: false,
+        });
+
+        this._anchorShape = anchor;
+
+        scene.addObject(anchor, TEXT_RANGE_LAYER_INDEX);
+    }
+
+    private _getPageContentSize(drawing: IDocDrawingBase) {
+        const currentRender = this._renderManagerService.getRenderUnitById(drawing.unitId);
+        const skeleton = currentRender?.with(DocSkeletonManagerService).getSkeleton();
+        const MAX_WIDTH = 500;
+        const MAX_HEIGHT = 500;
+
+        const skeletonData = skeleton?.getSkeletonData();
+        if (skeletonData == null || currentRender == null) {
+            return {
+                width: MAX_WIDTH,
+                height: MAX_HEIGHT,
+            };
+        }
+
+        // TODO: handle header footer image.
+        const { pages } = skeletonData;
+
+        let page: Nullable<IDocumentSkeletonPage> = null;
+
+        for (const p of pages) {
+            if (p.isLayoutPlaceholder || p.isMaterializationPlaceholder) {
+                continue;
+            }
+
+            const { skeDrawings } = p;
+            if (skeDrawings.has(drawing.drawingId)) {
+                page = p;
+                break;
+            }
+        }
+
+        if (page) {
+            const { pageWidth, pageHeight, marginLeft, marginBottom, marginRight, marginTop } = page;
+
+            return {
+                width: Math.max(MAX_WIDTH, pageWidth - marginLeft - marginRight),
+                height: Math.max(MAX_HEIGHT, pageHeight - marginTop - marginBottom),
+            };
+        } else {
+            return {
+                width: MAX_WIDTH,
+                height: MAX_HEIGHT,
+            };
+        }
+    }
+}

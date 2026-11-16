@@ -1,0 +1,830 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import {
+    CommandService,
+    ConfigService,
+    ContextService,
+    CustomRangeType,
+    DataStreamTreeTokenType,
+    DesktopLogService,
+    DOCS_NORMAL_EDITOR_UNIT_ID_KEY,
+    DocumentBlockRangeType,
+    DocumentDataModel,
+    FOCUSING_COMMON_DRAWINGS,
+    ICommandService,
+    IConfigService,
+    IContextService,
+    ILogService,
+    Injector,
+    IPermissionService,
+    IUniverInstanceService,
+    PermissionService,
+    RANGE_DIRECTION,
+    UniverInstanceService,
+} from '@univerjs/core';
+import {
+    DocSelectionManagerService,
+    getDocumentEntityPermissionObjectId,
+    getDocumentParagraphPermissionObjectId,
+    setDocumentPermissionValue,
+    SetTextSelectionsOperation,
+} from '@univerjs/docs';
+import { NORMAL_TEXT_SELECTION_PLUGIN_STYLE } from '@univerjs/engine-render';
+import { UnitAction } from '@univerjs/protocol';
+import {
+    ComponentManager,
+    ContextMenuPosition,
+    IContextMenuService,
+} from '@univerjs/ui';
+import { Subject } from 'rxjs';
+import { describe, expect, it, onTestFinished } from 'vitest';
+import { EmbedRuntimeFocusCoordinator, IDocEmbedRuntimeFocusCoordinator } from '../doc-embed-integration.service';
+import { DocLayoutInteractionService } from '../doc-layout-interaction.service';
+import { DocCanvasPopManagerService } from '../doc-popup-manager.service';
+import { DocFloatMenuService } from '../float-menu.service';
+import { MobileDocFloatMenuService } from '../mobile/float-menu.service';
+import { DocSelectionRenderService } from '../selection/doc-selection-render.service';
+
+class InertDocCanvasPopManagerService {
+    attachPopupToRange() {
+        throw new Error('Internal editors should not attach float menu popups.');
+    }
+}
+
+class InertDocSelectionRenderService {
+    onSelectionStart$ = new Subject().asObservable();
+}
+
+class RecordingDocCanvasPopManagerService {
+    readonly ranges: string[] = [];
+    readonly directions: string[] = [];
+    readonly offsets: Array<[number, number] | undefined> = [];
+    onDismiss?: () => void;
+    onMount?: () => () => void;
+    disposedCount = 0;
+
+    getRangeBounds() {
+        return [{ left: 100, right: 200, top: 240, bottom: 260 }];
+    }
+
+    attachPopupToRange(range: { startOffset: number; endOffset: number }, options: { direction: string; offset?: [number, number]; extraProps?: { onDismiss?: () => void; onMount?: () => () => void } }) {
+        this.ranges.push(`${range.startOffset}:${range.endOffset}`);
+        this.directions.push(options.direction);
+        this.offsets.push(options.offset);
+        this.onDismiss = options.extraProps?.onDismiss;
+        this.onMount = options.extraProps?.onMount;
+
+        return {
+            dispose: () => {
+                this.disposedCount++;
+            },
+        };
+    }
+}
+
+class RecordingContextMenuService implements IContextMenuService {
+    disabled = false;
+    visible = false;
+    readonly triggers: Array<{ clientX: number; clientY: number; menuType: string }> = [];
+
+    enable(): void {
+        this.disabled = false;
+    }
+
+    disable(): void {
+        this.disabled = true;
+    }
+
+    triggerContextMenu(event: { clientX: number; clientY: number }, menuType: string): void {
+        if (this.disabled) {
+            return;
+        }
+        this.visible = true;
+        this.triggers.push({ clientX: event.clientX, clientY: event.clientY, menuType });
+    }
+
+    hideContextMenu(): void {
+        this.visible = false;
+    }
+
+    registerContextMenuHandler() {
+        return { dispose() {} };
+    }
+}
+
+class ActiveDocSelectionRenderService {
+    private readonly _selectionStart$ = new Subject<void>();
+    readonly onSelectionStart$ = this._selectionStart$.asObservable();
+
+    emitSelectionStart() {
+        this._selectionStart$.next();
+    }
+}
+
+const InertDocCanvasPopManagerServiceCtor = InertDocCanvasPopManagerService as unknown as typeof DocCanvasPopManagerService;
+const InertDocSelectionRenderServiceCtor = InertDocSelectionRenderService as unknown as typeof DocSelectionRenderService;
+const RecordingDocCanvasPopManagerServiceCtor = RecordingDocCanvasPopManagerService as unknown as typeof DocCanvasPopManagerService;
+const ActiveDocSelectionRenderServiceCtor = ActiveDocSelectionRenderService as unknown as typeof DocSelectionRenderService;
+
+function createActiveFloatMenuHarness(
+    unitId: string,
+    body: ConstructorParameters<typeof DocumentDataModel>[0]['body'],
+    runtimeFocusCoordinator?: EmbedRuntimeFocusCoordinator,
+    headers?: ConstructorParameters<typeof DocumentDataModel>[0]['headers'],
+    mobile = false
+) {
+    const injector = new Injector();
+    const contextMenuService = new RecordingContextMenuService();
+    injector.add([IPermissionService, { useClass: PermissionService }]);
+    injector.add([ILogService, { useClass: DesktopLogService }]);
+    injector.add([IConfigService, { useClass: ConfigService }]);
+    injector.add([IContextService, { useClass: ContextService }]);
+    injector.add([IContextMenuService, { useValue: contextMenuService }]);
+    injector.add([ICommandService, { useClass: CommandService }]);
+    injector.add([IUniverInstanceService, { useClass: UniverInstanceService }]);
+    injector.add([DocSelectionManagerService]);
+    injector.add([DocLayoutInteractionService]);
+    injector.add([DocCanvasPopManagerService, { useClass: RecordingDocCanvasPopManagerServiceCtor }]);
+    injector.add([ComponentManager]);
+    injector.add([DocSelectionRenderService, { useClass: ActiveDocSelectionRenderServiceCtor }]);
+    if (runtimeFocusCoordinator) {
+        injector.add([IDocEmbedRuntimeFocusCoordinator, { useValue: runtimeFocusCoordinator }]);
+    }
+    injector.get(ICommandService).registerCommand(SetTextSelectionsOperation);
+    const univerInstanceService = injector.get(IUniverInstanceService) as UniverInstanceService;
+    univerInstanceService.__addUnit(new DocumentDataModel({ id: unitId, body, headers }));
+    const service = injector.createInstance(mobile ? MobileDocFloatMenuService : DocFloatMenuService, { unitId } as never);
+    const selectionManager = injector.get(DocSelectionManagerService);
+    selectionManager.__TEST_ONLY_setCurrentSelection({ unitId, subUnitId: unitId });
+
+    return {
+        injector,
+        contextMenuService,
+        popupService: injector.get(DocCanvasPopManagerService) as unknown as RecordingDocCanvasPopManagerService,
+        selectionManager,
+        service,
+        selectionRenderService: injector.get(DocSelectionRenderService) as unknown as ActiveDocSelectionRenderService,
+        univerInstanceService,
+    };
+}
+
+describe('DocFloatMenuService', () => {
+    it('keeps edit and history selections from locking layout and restores the toolbar for a user selection', () => {
+        const unitId = 'doc-moved-selection';
+        const { injector, popupService, selectionManager, service } = createActiveFloatMenuHarness(unitId, {
+            dataStream: 'Before\rMoved\r\n',
+            paragraphs: [{ paragraphId: 'before', startIndex: 6 }, { paragraphId: 'moved', startIndex: 12 }],
+        });
+        onTestFinished(() => {
+            service.dispose();
+            injector.dispose();
+        });
+        const selection = {
+            textRanges: [{ startOffset: 7, endOffset: 13, collapsed: false }],
+            rectRanges: [],
+            segmentId: '',
+            segmentPage: -1,
+            style: NORMAL_TEXT_SELECTION_PLUGIN_STYLE,
+            isEditing: true,
+        };
+        const target = { unitId, subUnitId: unitId };
+        const layoutInteractionService = injector.get(DocLayoutInteractionService);
+
+        selectionManager.__replaceTextRangesWithNoRefresh(selection, target);
+        expect(service.floatMenu).toBeNull();
+        expect(popupService.ranges).toEqual([]);
+
+        selectionManager.__replaceTextRangesWithNoRefresh({ ...selection, isEditing: false }, target);
+        expect(service.floatMenu).toMatchObject({ start: 7, end: 13 });
+        const unmount = popupService.onMount!();
+        expect(layoutInteractionService.isActive).toBe(true);
+
+        selectionManager.__replaceTextRangesWithNoRefresh(selection, target);
+        expect(service.floatMenu).toBeNull();
+        expect(layoutInteractionService.isActive).toBe(false);
+        unmount();
+
+        selectionManager.__replaceTextRangesWithNoRefresh({ ...selection, isEditing: false }, target);
+        expect(service.floatMenu).toMatchObject({ start: 7, end: 13 });
+    });
+
+    it('does not register or show a floating toolbar inside internal document editors', () => {
+        const injector = new Injector();
+        injector.add([IPermissionService, { useClass: PermissionService }]);
+        injector.add([ILogService, { useClass: DesktopLogService }]);
+        injector.add([IConfigService, { useClass: ConfigService }]);
+        injector.add([IContextService, { useClass: ContextService }]);
+        injector.add([IContextMenuService, { useClass: RecordingContextMenuService }]);
+        injector.add([ICommandService, { useClass: CommandService }]);
+        injector.add([IUniverInstanceService, { useClass: UniverInstanceService }]);
+        injector.add([DocSelectionManagerService]);
+        injector.add([DocLayoutInteractionService]);
+        injector.add([DocCanvasPopManagerService, { useClass: InertDocCanvasPopManagerServiceCtor }]);
+        injector.add([ComponentManager]);
+        injector.add([DocSelectionRenderService, { useClass: InertDocSelectionRenderServiceCtor }]);
+
+        const service = injector.createInstance(DocFloatMenuService, { unitId: DOCS_NORMAL_EDITOR_UNIT_ID_KEY } as never);
+
+        expect(service.floatMenu).toBeNull();
+        expect(injector.get(ComponentManager).get('univer.doc.float-menu')).toBeUndefined();
+    });
+
+    it('shows one floating toolbar for a text selection and hides it when selection restarts', () => {
+        const injector = new Injector();
+        injector.add([IPermissionService, { useClass: PermissionService }]);
+        injector.add([ILogService, { useClass: DesktopLogService }]);
+        injector.add([IConfigService, { useClass: ConfigService }]);
+        injector.add([IContextService, { useClass: ContextService }]);
+        injector.add([IContextMenuService, { useClass: RecordingContextMenuService }]);
+        injector.add([ICommandService, { useClass: CommandService }]);
+        injector.add([IUniverInstanceService, { useClass: UniverInstanceService }]);
+        injector.add([DocSelectionManagerService]);
+        injector.add([DocLayoutInteractionService]);
+        injector.add([DocCanvasPopManagerService, { useClass: RecordingDocCanvasPopManagerServiceCtor }]);
+        injector.add([ComponentManager]);
+        injector.add([DocSelectionRenderService, { useClass: ActiveDocSelectionRenderServiceCtor }]);
+        const commandService = injector.get(ICommandService);
+        commandService.registerCommand(SetTextSelectionsOperation);
+        const unitId = 'doc-float-menu';
+        const univerInstanceService = injector.get(IUniverInstanceService) as UniverInstanceService;
+        univerInstanceService.__addUnit(new DocumentDataModel({
+            id: unitId,
+            body: {
+                dataStream: 'Hello world\r\n',
+                paragraphs: [{ paragraphId: 'para_docs_ui_float_menu_fixture_1', startIndex: 11 }],
+                sectionBreaks: [],
+                customRanges: [],
+                tables: [],
+                textRuns: [],
+            },
+        }));
+
+        const service = injector.createInstance(DocFloatMenuService, { unitId } as never);
+        const selectionManager = injector.get(DocSelectionManagerService);
+        selectionManager.__TEST_ONLY_setCurrentSelection({ unitId, subUnitId: unitId });
+        selectionManager.__replaceTextRangesWithNoRefresh({
+            textRanges: [{
+                startOffset: 0,
+                endOffset: 5,
+                collapsed: false,
+            }],
+            rectRanges: [],
+            segmentId: '',
+            segmentPage: -1,
+            style: NORMAL_TEXT_SELECTION_PLUGIN_STYLE,
+            isEditing: false,
+        }, { unitId, subUnitId: unitId });
+        selectionManager.__replaceTextRangesWithNoRefresh({
+            textRanges: [{
+                startOffset: 0,
+                endOffset: 5,
+                collapsed: false,
+            }],
+            rectRanges: [],
+            segmentId: '',
+            segmentPage: -1,
+            style: NORMAL_TEXT_SELECTION_PLUGIN_STYLE,
+            isEditing: false,
+        }, { unitId, subUnitId: unitId });
+
+        const popupService = injector.get(DocCanvasPopManagerService) as unknown as RecordingDocCanvasPopManagerService;
+        const layoutInteractionService = injector.get(DocLayoutInteractionService);
+        expect(popupService.ranges).toEqual(['0:5']);
+        expect(popupService.offsets).toEqual([[0, 8]]);
+        expect(service.floatMenu).toMatchObject({ start: 0, end: 5 });
+        expect(layoutInteractionService.isActive).toBe(false);
+        const unmount = popupService.onMount!();
+        expect(layoutInteractionService.isActive).toBe(true);
+
+        const selectionRenderService = injector.get(DocSelectionRenderService) as unknown as ActiveDocSelectionRenderService;
+        selectionRenderService.emitSelectionStart();
+        expect(service.floatMenu).toBeNull();
+        expect(popupService.disposedCount).toBe(1);
+        expect(layoutInteractionService.isActive).toBe(false);
+        unmount();
+        expect(layoutInteractionService.isActive).toBe(false);
+    });
+
+    it('opens the mobile context menu above an expanded text selection instead of the desktop float toolbar', () => {
+        const unitId = 'doc-mobile-selection-menu';
+        const harness = createActiveFloatMenuHarness(unitId, {
+            dataStream: 'Mobile selection\r\n',
+            paragraphs: [{ paragraphId: 'para_docs_ui_mobile_selection_menu', startIndex: 16 }],
+            sectionBreaks: [],
+            customRanges: [],
+            tables: [],
+            textRuns: [],
+        }, undefined, undefined, true);
+
+        harness.selectionManager.__replaceTextRangesWithNoRefresh({
+            textRanges: [{ startOffset: 0, endOffset: 6, collapsed: false }],
+            rectRanges: [],
+            segmentId: '',
+            segmentPage: -1,
+            style: NORMAL_TEXT_SELECTION_PLUGIN_STYLE,
+            isEditing: false,
+        }, { unitId, subUnitId: unitId });
+
+        expect(harness.contextMenuService.triggers).toEqual([{
+            clientX: 150,
+            clientY: 240,
+            menuType: ContextMenuPosition.MAIN_AREA,
+        }]);
+        expect(harness.popupService.ranges).toEqual([]);
+
+        harness.selectionRenderService.emitSelectionStart();
+        expect(harness.contextMenuService.visible).toBe(false);
+    });
+
+    it('hides the floating toolbar when document edit permission is revoked', () => {
+        const unitId = 'doc-read-only-float-menu';
+        const harness = createActiveFloatMenuHarness(unitId, {
+            dataStream: 'Hello world\r\n',
+            paragraphs: [{ paragraphId: 'para_docs_ui_read_only_float_menu', startIndex: 11 }],
+            sectionBreaks: [],
+            customRanges: [],
+            tables: [],
+            textRuns: [],
+        });
+        const selection = {
+            textRanges: [{ startOffset: 0, endOffset: 5, collapsed: false }],
+            rectRanges: [],
+            segmentId: '',
+            segmentPage: -1,
+            style: NORMAL_TEXT_SELECTION_PLUGIN_STYLE,
+            isEditing: false,
+        };
+        harness.selectionManager.__replaceTextRangesWithNoRefresh(selection, { unitId, subUnitId: unitId });
+        expect(harness.service.floatMenu).toMatchObject({ start: 0, end: 5 });
+
+        setDocumentPermissionValue(
+            harness.injector.get(IPermissionService),
+            unitId,
+            unitId,
+            UnitAction.Edit,
+            false
+        );
+
+        expect(harness.service.floatMenu).toBeNull();
+        expect(harness.popupService.disposedCount).toBe(1);
+        harness.selectionManager.__replaceTextRangesWithNoRefresh({
+            ...selection,
+            textRanges: [{ startOffset: 6, endOffset: 11, collapsed: false }],
+        }, { unitId, subUnitId: unitId });
+        expect(harness.popupService.ranges).toEqual(['0:5']);
+    });
+
+    it('hides the floating toolbar when the selected paragraph edit permission is revoked', () => {
+        const unitId = 'doc-read-only-paragraph-float-menu';
+        const paragraphId = 'paragraph-read-only-float-menu';
+        const harness = createActiveFloatMenuHarness(unitId, {
+            dataStream: 'Hello world\r\n',
+            paragraphs: [{ paragraphId, startIndex: 11 }],
+            sectionBreaks: [],
+            customRanges: [],
+            tables: [],
+            textRuns: [],
+        });
+        const selection = {
+            textRanges: [{ startOffset: 0, endOffset: 5, collapsed: false }],
+            rectRanges: [],
+            segmentId: '',
+            segmentPage: -1,
+            style: NORMAL_TEXT_SELECTION_PLUGIN_STYLE,
+            isEditing: false,
+        };
+        harness.selectionManager.__replaceTextRangesWithNoRefresh(selection, { unitId, subUnitId: unitId });
+        expect(harness.service.floatMenu).toMatchObject({ start: 0, end: 5 });
+
+        setDocumentPermissionValue(
+            harness.injector.get(IPermissionService),
+            unitId,
+            getDocumentParagraphPermissionObjectId('', paragraphId),
+            UnitAction.Edit,
+            false
+        );
+
+        expect(harness.service.floatMenu).toBeNull();
+        expect(harness.popupService.disposedCount).toBe(1);
+        harness.selectionManager.__replaceTextRangesWithNoRefresh({
+            ...selection,
+            textRanges: [{ startOffset: 6, endOffset: 11, collapsed: false }],
+        }, { unitId, subUnitId: unitId });
+        expect(harness.popupService.ranges).toEqual(['0:5']);
+    });
+
+    it('does not show the floating toolbar for a selection inside a read-only table', () => {
+        const unitId = 'doc-read-only-table-float-menu';
+        const harness = createActiveFloatMenuHarness(unitId, {
+            dataStream: 'TT\raa\r\n',
+            paragraphs: [
+                { startIndex: 2, paragraphId: 'paragraph-in-read-only-table' },
+                { startIndex: 5, paragraphId: 'paragraph-after-read-only-table' },
+            ],
+            sectionBreaks: [],
+            customRanges: [],
+            tables: [{ tableId: 'table-1', startIndex: 0, endIndex: 2 }],
+            textRuns: [],
+        });
+        setDocumentPermissionValue(
+            harness.injector.get(IPermissionService),
+            unitId,
+            getDocumentEntityPermissionObjectId('', 'table', 'table-1'),
+            UnitAction.Edit,
+            false
+        );
+
+        harness.selectionManager.__replaceTextRangesWithNoRefresh({
+            textRanges: [{ startOffset: 0, endOffset: 2, collapsed: false }],
+            rectRanges: [],
+            segmentId: '',
+            segmentPage: -1,
+            style: NORMAL_TEXT_SELECTION_PLUGIN_STYLE,
+            isEditing: false,
+        }, { unitId, subUnitId: unitId });
+
+        expect(harness.service.floatMenu).toBeNull();
+        expect(harness.popupService.ranges).toEqual([]);
+    });
+
+    it('rechecks permissions when the same offsets move to another document segment', () => {
+        const unitId = 'doc-read-only-header-float-menu';
+        const headerId = 'header-read-only-float-menu';
+        const headerParagraphId = 'header-paragraph-read-only-float-menu';
+        const harness = createActiveFloatMenuHarness(unitId, {
+            dataStream: 'Body text\r\n',
+            paragraphs: [{ paragraphId: 'body-paragraph-float-menu', startIndex: 9 }],
+            sectionBreaks: [],
+            customRanges: [],
+            tables: [],
+            textRuns: [],
+        }, undefined, {
+            [headerId]: {
+                headerId,
+                body: {
+                    dataStream: 'Header text\r\n',
+                    paragraphs: [{ paragraphId: headerParagraphId, startIndex: 11 }],
+                    sectionBreaks: [],
+                    customRanges: [],
+                    tables: [],
+                    textRuns: [],
+                },
+            },
+        });
+        const selection = {
+            textRanges: [{ startOffset: 0, endOffset: 5, collapsed: false, segmentId: '' }],
+            rectRanges: [],
+            segmentId: '',
+            segmentPage: -1,
+            style: NORMAL_TEXT_SELECTION_PLUGIN_STYLE,
+            isEditing: false,
+        };
+        harness.selectionManager.__replaceTextRangesWithNoRefresh(selection, { unitId, subUnitId: unitId });
+        expect(harness.service.floatMenu).toMatchObject({ start: 0, end: 5, segmentId: '' });
+
+        setDocumentPermissionValue(
+            harness.injector.get(IPermissionService),
+            unitId,
+            getDocumentParagraphPermissionObjectId(headerId, headerParagraphId),
+            UnitAction.Edit,
+            false
+        );
+        harness.selectionManager.__replaceTextRangesWithNoRefresh({
+            ...selection,
+            textRanges: [{ startOffset: 0, endOffset: 5, collapsed: false, segmentId: headerId }],
+            segmentId: headerId,
+        }, { unitId, subUnitId: unitId });
+
+        expect(harness.service.floatMenu).toBeNull();
+        expect(harness.popupService.ranges).toEqual(['0:5']);
+        expect(harness.popupService.disposedCount).toBe(1);
+    });
+
+    it('does not show the floating toolbar for selections inside code blocks', () => {
+        const injector = new Injector();
+        injector.add([IPermissionService, { useClass: PermissionService }]);
+        injector.add([ILogService, { useClass: DesktopLogService }]);
+        injector.add([IConfigService, { useClass: ConfigService }]);
+        injector.add([IContextService, { useClass: ContextService }]);
+        injector.add([IContextMenuService, { useClass: RecordingContextMenuService }]);
+        injector.add([ICommandService, { useClass: CommandService }]);
+        injector.add([IUniverInstanceService, { useClass: UniverInstanceService }]);
+        injector.add([DocSelectionManagerService]);
+        injector.add([DocLayoutInteractionService]);
+        injector.add([DocCanvasPopManagerService, { useClass: RecordingDocCanvasPopManagerServiceCtor }]);
+        injector.add([ComponentManager]);
+        injector.add([DocSelectionRenderService, { useClass: ActiveDocSelectionRenderServiceCtor }]);
+        injector.get(ICommandService).registerCommand(SetTextSelectionsOperation);
+        const unitId = 'doc-code-menu';
+        const univerInstanceService = injector.get(IUniverInstanceService) as UniverInstanceService;
+        univerInstanceService.__addUnit(new DocumentDataModel({
+            id: unitId,
+            body: {
+                dataStream: 'const x = 1;\r\n',
+                paragraphs: [{ paragraphId: 'para_docs_ui_float_menu_fixture_2', startIndex: 12 }],
+                sectionBreaks: [],
+                customRanges: [],
+                tables: [],
+                textRuns: [],
+                blockRanges: [{
+                    blockType: DocumentBlockRangeType.CODE,
+                    startIndex: 0,
+                    endIndex: 12,
+                    blockId: 'code-1',
+                }],
+            },
+        }));
+
+        const service = injector.createInstance(DocFloatMenuService, { unitId } as never);
+        const selectionManager = injector.get(DocSelectionManagerService);
+        selectionManager.__TEST_ONLY_setCurrentSelection({ unitId, subUnitId: unitId });
+        selectionManager.__replaceTextRangesWithNoRefresh({
+            textRanges: [{
+                startOffset: 0,
+                endOffset: 5,
+                collapsed: false,
+            }],
+            rectRanges: [],
+            segmentId: '',
+            segmentPage: -1,
+            style: NORMAL_TEXT_SELECTION_PLUGIN_STYLE,
+            isEditing: false,
+        }, { unitId, subUnitId: unitId });
+
+        const popupService = injector.get(DocCanvasPopManagerService) as unknown as RecordingDocCanvasPopManagerService;
+        expect(service.floatMenu).toBeNull();
+        expect(popupService.ranges).toEqual([]);
+    });
+
+    it('skips document control tokens and whole custom ranges when deciding whether text needs a toolbar', () => {
+        const unitId = 'doc-token-menu';
+        const { popupService, selectionManager, service } = createActiveFloatMenuHarness(unitId, {
+            dataStream: `A${DataStreamTreeTokenType.PARAGRAPH}Link\r\n`,
+            paragraphs: [{ paragraphId: 'para_docs_ui_float_menu_fixture_3', startIndex: 6 }],
+            sectionBreaks: [],
+            customRanges: [{
+                startIndex: 2,
+                endIndex: 5,
+                rangeId: 'hyperlink-1',
+                rangeType: CustomRangeType.HYPERLINK,
+                wholeEntity: true,
+            }],
+            tables: [],
+            textRuns: [],
+        });
+
+        selectionManager.__replaceTextRangesWithNoRefresh({
+            textRanges: [{
+                startOffset: 1,
+                endOffset: 2,
+                collapsed: false,
+            }],
+            rectRanges: [],
+            segmentId: '',
+            segmentPage: -1,
+            style: NORMAL_TEXT_SELECTION_PLUGIN_STYLE,
+            isEditing: false,
+        }, { unitId, subUnitId: unitId });
+        selectionManager.__replaceTextRangesWithNoRefresh({
+            textRanges: [{
+                startOffset: 2,
+                endOffset: 6,
+                collapsed: false,
+            }],
+            rectRanges: [],
+            segmentId: '',
+            segmentPage: -1,
+            style: NORMAL_TEXT_SELECTION_PLUGIN_STYLE,
+            isEditing: false,
+        }, { unitId, subUnitId: unitId });
+
+        expect(service.floatMenu).toBeNull();
+        expect(popupService.ranges).toEqual([]);
+    });
+
+    it('does not show the floating toolbar when the document is disabled', () => {
+        const unitId = 'doc-disabled-menu';
+        const { popupService, selectionManager, service, univerInstanceService } = createActiveFloatMenuHarness(unitId, {
+            dataStream: 'Locked text\r\n',
+            paragraphs: [{ paragraphId: 'para_docs_ui_float_menu_fixture_4', startIndex: 11 }],
+            sectionBreaks: [],
+            customRanges: [],
+            tables: [],
+            textRuns: [],
+        });
+        univerInstanceService.getUnit<DocumentDataModel>(unitId)?.setDisabled(true);
+
+        selectionManager.__replaceTextRangesWithNoRefresh({
+            textRanges: [{
+                startOffset: 0,
+                endOffset: 6,
+                collapsed: false,
+            }],
+            rectRanges: [],
+            segmentId: '',
+            segmentPage: -1,
+            style: NORMAL_TEXT_SELECTION_PLUGIN_STYLE,
+            isEditing: false,
+        }, { unitId, subUnitId: unitId });
+
+        expect(service.floatMenu).toBeNull();
+        expect(popupService.ranges).toEqual([]);
+    });
+
+    it('does not show the text toolbar while a drawing is focused', () => {
+        const unitId = 'doc-drawing-menu';
+        const { injector, popupService, selectionManager, service } = createActiveFloatMenuHarness(unitId, {
+            dataStream: 'Drawing anchor\r\n',
+            paragraphs: [{ paragraphId: 'para_docs_ui_float_menu_drawing', startIndex: 14 }],
+            sectionBreaks: [],
+            customRanges: [],
+            tables: [],
+            textRuns: [],
+        });
+        injector.get(IContextService).setContextValue(FOCUSING_COMMON_DRAWINGS, true);
+
+        selectionManager.__replaceTextRangesWithNoRefresh({
+            textRanges: [{
+                startOffset: 0,
+                endOffset: 1,
+                collapsed: false,
+            }],
+            rectRanges: [],
+            segmentId: '',
+            segmentPage: -1,
+            style: NORMAL_TEXT_SELECTION_PLUGIN_STYLE,
+            isEditing: false,
+        }, { unitId, subUnitId: unitId });
+
+        expect(service.floatMenu).toBeNull();
+        expect(popupService.ranges).toEqual([]);
+    });
+
+    it('hides and suppresses the text toolbar while another floating menu is active', () => {
+        const unitId = 'doc-suppressed-menu';
+        const { popupService, selectionManager, service } = createActiveFloatMenuHarness(unitId, {
+            dataStream: 'Suppressed menu\r\n',
+            paragraphs: [{ paragraphId: 'para_docs_ui_float_menu_suppressed', startIndex: 15 }],
+            sectionBreaks: [],
+            customRanges: [],
+            tables: [],
+            textRuns: [],
+        });
+        selectionManager.__replaceTextRangesWithNoRefresh({
+            textRanges: [{
+                startOffset: 0,
+                endOffset: 10,
+                collapsed: false,
+            }],
+            rectRanges: [],
+            segmentId: '',
+            segmentPage: -1,
+            style: NORMAL_TEXT_SELECTION_PLUGIN_STYLE,
+            isEditing: false,
+        }, { unitId, subUnitId: unitId });
+
+        expect(service.floatMenu).toMatchObject({ start: 0, end: 10 });
+
+        service.setSuppressed(true);
+
+        expect(service.floatMenu).toBeNull();
+        expect(popupService.disposedCount).toBe(1);
+
+        selectionManager.__replaceTextRangesWithNoRefresh({
+            textRanges: [{
+                startOffset: 1,
+                endOffset: 10,
+                collapsed: false,
+            }],
+            rectRanges: [],
+            segmentId: '',
+            segmentPage: -1,
+            style: NORMAL_TEXT_SELECTION_PLUGIN_STYLE,
+            isEditing: false,
+        }, { unitId, subUnitId: unitId });
+
+        expect(service.floatMenu).toBeNull();
+        expect(popupService.ranges).toEqual(['0:10']);
+    });
+
+    it('does not restore a stale host text toolbar when an embed child session ends', () => {
+        const unitId = 'doc-embed-host-menu';
+        const runtimeFocusCoordinator = new EmbedRuntimeFocusCoordinator();
+        const { popupService, selectionManager, selectionRenderService, service } = createActiveFloatMenuHarness(unitId, {
+            dataStream: 'Embed host document\r\n',
+            paragraphs: [{ paragraphId: 'para_docs_ui_embed_host_menu', startIndex: 19 }],
+            sectionBreaks: [],
+            customRanges: [],
+            tables: [],
+            textRuns: [],
+        }, runtimeFocusCoordinator);
+        const selection = {
+            textRanges: [{ startOffset: 0, endOffset: 10, collapsed: false }],
+            rectRanges: [],
+            segmentId: '',
+            segmentPage: -1,
+            style: NORMAL_TEXT_SELECTION_PLUGIN_STYLE,
+            isEditing: false,
+        };
+
+        selectionManager.__replaceTextRangesWithNoRefresh(selection, { unitId, subUnitId: unitId });
+        expect(service.floatMenu).toMatchObject({ start: 0, end: 10 });
+
+        const lease = runtimeFocusCoordinator.acquireLease({
+            embedId: 'docs-floating-board',
+            role: 'child-session',
+            hostUnitId: unitId,
+            childUnitId: 'child-board',
+        });
+        expect(service.floatMenu).toBeNull();
+
+        lease.dispose();
+        selectionManager.__replaceTextRangesWithNoRefresh(selection, { unitId, subUnitId: unitId });
+        expect(service.floatMenu).toBeNull();
+
+        selectionRenderService.emitSelectionStart();
+        selectionManager.__replaceTextRangesWithNoRefresh(selection, { unitId, subUnitId: unitId });
+
+        expect(service.floatMenu).toMatchObject({ start: 0, end: 10 });
+        expect(popupService.ranges).toEqual(['0:10', '0:10']);
+    });
+
+    it('does not restore a dismissed toolbar until a new selection gesture', () => {
+        const unitId = 'doc-dismissed-menu';
+        const { popupService, selectionManager, selectionRenderService, service, injector } = createActiveFloatMenuHarness(unitId, {
+            dataStream: 'Hello world\r\n',
+            paragraphs: [{ paragraphId: 'paragraph', startIndex: 11 }],
+        });
+        const selection = {
+            textRanges: [{ startOffset: 0, endOffset: 5, collapsed: false }],
+            rectRanges: [],
+            segmentId: '',
+            segmentPage: -1,
+            style: NORMAL_TEXT_SELECTION_PLUGIN_STYLE,
+            isEditing: false,
+        };
+        selectionManager.__replaceTextRangesWithNoRefresh(selection, { unitId, subUnitId: unitId });
+        popupService.onDismiss?.();
+        expect(service.floatMenu).toBeNull();
+        selectionManager.__replaceTextRangesWithNoRefresh(selection, { unitId, subUnitId: unitId });
+        expect(service.floatMenu).toBeNull();
+        expect(popupService.ranges).toHaveLength(1);
+        selectionRenderService.emitSelectionStart();
+        selectionManager.__replaceTextRangesWithNoRefresh(selection, { unitId, subUnitId: unitId });
+        expect(service.floatMenu).toMatchObject({ start: 0, end: 5 });
+        service.dispose();
+        injector.dispose();
+    });
+
+    it('places the floating toolbar above the focus end of a multiline selection', () => {
+        const unitId = 'doc-direction-menu';
+        const { popupService, selectionManager, service } = createActiveFloatMenuHarness(unitId, {
+            dataStream: 'First line\rSecond line\r\n',
+            paragraphs: [
+                { paragraphId: 'para_docs_ui_float_menu_fixture_5', startIndex: 10 },
+                { paragraphId: 'para_docs_ui_float_menu_fixture_6', startIndex: 22 },
+            ],
+            sectionBreaks: [],
+            customRanges: [],
+            tables: [],
+            textRuns: [],
+        });
+
+        selectionManager.__replaceTextRangesWithNoRefresh({
+            textRanges: [{
+                startOffset: 0,
+                endOffset: 18,
+                collapsed: false,
+                direction: RANGE_DIRECTION.FORWARD,
+                startNodePosition: { page: 0, section: 0, column: 0, line: 0, divide: 0, glyph: 0, isBack: false } as never,
+                endNodePosition: { page: 0, section: 0, column: 0, line: 1, divide: 0, glyph: 4, isBack: false } as never,
+            }],
+            rectRanges: [],
+            segmentId: '',
+            segmentPage: -1,
+            style: NORMAL_TEXT_SELECTION_PLUGIN_STYLE,
+            isEditing: false,
+        }, { unitId, subUnitId: unitId });
+
+        expect(service.floatMenu).toMatchObject({ start: 0, end: 18 });
+        expect(popupService.ranges).toEqual(['0:18']);
+        expect(popupService.directions).toEqual(['top-left']);
+
+        service.dispose();
+        expect(popupService.disposedCount).toBe(1);
+    });
+});

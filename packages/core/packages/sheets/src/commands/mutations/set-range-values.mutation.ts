@@ -1,0 +1,284 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type {
+    IAccessor,
+    ICellData,
+    IMutation,
+    IMutationCommonParams,
+    IObjectMatrixPrimitiveType,
+    IRange,
+    IStyleData,
+    Nullable,
+    Workbook,
+} from '@univerjs/core';
+import {
+    CommandType,
+    isFormulaId,
+    IUniverInstanceService,
+    ObjectMatrix,
+    Styles,
+    Tools,
+    UniverInstanceType,
+} from '@univerjs/core';
+import { handleStyle, transformStyle } from '../../basics/cell-style';
+import { getCellType } from '../../basics/cell-type';
+import { getCellValue, setNull } from '../../basics/cell-value';
+
+/** Params of `SetRangeValuesMutation` */
+export interface ISetRangeValuesMutationParams extends IMutationCommonParams {
+    subUnitId: string;
+    unitId: string;
+
+    /**
+     * null for clear all
+     */
+    cellValue?: IObjectMatrixPrimitiveType<Nullable<ICellData>>;
+
+    /**
+     * Whether to override the style of the cell, used for paste related operations.
+     * @default false
+     */
+    isOverrideStyle?: boolean;
+
+    /** Formula identities retained for conditional result application across Worker replay. */
+    sourceFormulaData?: IObjectMatrixPrimitiveType<Pick<ICellData, 'f' | 'si'>>;
+}
+
+export interface ISetRangeValuesRangeMutationParams extends ISetRangeValuesMutationParams {
+    range: IRange[];
+}
+
+/**
+ * Read-only native value preparation for caller-owned atomic model staging. The resulting style IDs
+ * must travel with the prepared cells; replay installs them and must not allocate replacement IDs.
+ * This does not execute handlers, publish notifications, or own style garbage collection.
+ */
+export function prepareSetRangeValuesMutation(
+    cells: ObjectMatrix<Nullable<ICellData>>,
+    styles: Styles,
+    params: Pick<ISetRangeValuesMutationParams, 'cellValue' | 'isOverrideStyle' | 'sourceFormulaData'>
+): {
+    before: IObjectMatrixPrimitiveType<Nullable<ICellData>>;
+    after: IObjectMatrixPrimitiveType<Nullable<ICellData>>;
+    styles: Record<string, IStyleData>;
+} {
+    const detachedStyles = new Styles(Tools.deepClone(styles.toJSON()));
+    const before = new ObjectMatrix<Nullable<ICellData>>();
+    const after = new ObjectMatrix<Nullable<ICellData>>();
+    new ObjectMatrix(Tools.deepClone(params.cellValue)).forValue((row, column, value) => {
+        const original = Tools.deepClone(cells.getValue(row, column) ?? null);
+        if (isStaleFormulaResult(original, params.sourceFormulaData?.[row]?.[column])) {
+            return;
+        }
+        before.setValue(row, column, original);
+        const next = value ? mergeCellData(value, Tools.deepClone(original ?? {}), detachedStyles, !!params.isOverrideStyle) : null;
+        after.setValue(row, column, next && !Tools.isEmptyObject(next) ? next : null);
+    });
+    const addedStyles: Record<string, IStyleData> = {};
+    for (const [id, style] of Object.entries(detachedStyles.toJSON())) {
+        if (!style) {
+            continue;
+        }
+        const current = styles.get(id);
+        if (current && !Tools.diffValue(current, style)) {
+            throw new TypeError('Prepared style ID collides with an existing style.');
+        }
+        if (!current) {
+            addedStyles[id] = Tools.deepClone(style);
+        }
+    }
+    return { before: before.getMatrix(), after: after.getMatrix(), styles: addedStyles };
+}
+
+/**
+ * Generate undo mutation of a `SetRangeValuesMutation`
+ *
+ * @param {IAccessor} accessor - injector accessor
+ * @param {ISetRangeValuesMutationParams} params - do mutation params
+ * @returns {ISetRangeValuesMutationParams} undo mutation params
+ */
+export const SetRangeValuesUndoMutationFactory = (
+    accessor: IAccessor,
+    params: ISetRangeValuesMutationParams
+): ISetRangeValuesMutationParams => {
+    const { unitId, subUnitId, cellValue, isOverrideStyle } = params;
+    const univerInstanceService = accessor.get(IUniverInstanceService);
+    const workbook = univerInstanceService.getUnit<Workbook>(unitId, UniverInstanceType.UNIVER_SHEET);
+
+    if (workbook == null) {
+        throw new Error('workbook is null error!');
+    }
+
+    const worksheet = workbook.getSheetBySheetId(subUnitId);
+    if (worksheet == null) {
+        throw new Error('worksheet is null error!');
+    }
+
+    const cellMatrix = worksheet.getCellMatrix();
+    const styles = workbook.getStyles();
+    const undoData = new ObjectMatrix<Nullable<ICellData>>();
+
+    const newValues = new ObjectMatrix(cellValue);
+
+    newValues.forValue((row, col, newVal) => {
+        const cell = Tools.deepClone(cellMatrix?.getValue(row, col)) || {}; // clone cell data，prevent modify the original data
+        const oldStyle = styles.getStyleByCell(cell);
+        // transformStyle does not accept style id
+        const newStyle = styles.getStyleByCell(newVal);
+
+        cell.s = isOverrideStyle && Object.prototype.hasOwnProperty.call(newVal ?? {}, 's')
+            ? oldStyle ?? null
+            : transformStyle(oldStyle, newStyle);
+
+        undoData.setValue(row, col, setNull(cell));
+    });
+
+    return {
+        ...params,
+        cellValue: undoData.getMatrix(),
+    } as ISetRangeValuesMutationParams;
+};
+
+export const SetRangeValuesMutation: IMutation<ISetRangeValuesMutationParams, boolean> = {
+    id: 'sheet.mutation.set-range-values',
+
+    type: CommandType.MUTATION,
+
+    handler: (accessor, params) => {
+        const { cellValue, subUnitId, unitId, isOverrideStyle, sourceFormulaData } = params;
+        const univerInstanceService = accessor.get(IUniverInstanceService);
+        const workbook = univerInstanceService.getUnit<Workbook>(unitId);
+        if (!workbook) {
+            return false;
+        }
+
+        const worksheet = workbook.getSheetBySheetId(subUnitId);
+        if (!worksheet) {
+            return false;
+        }
+
+        const cellMatrix = worksheet.getCellMatrix();
+        const styles = workbook.getStyles();
+        const newValues = new ObjectMatrix(cellValue);
+
+        newValues.forValue((row, col, newVal) => {
+            if (isStaleFormulaResult(cellMatrix.getValue(row, col), sourceFormulaData?.[row]?.[col])) {
+                return;
+            }
+            // clear all
+            if (!newVal) {
+                cellMatrix.realDeleteValue(row, col);
+            } else {
+                let oldVal = cellMatrix.getValue(row, col) || {};
+                oldVal = mergeCellData(newVal, oldVal, styles, !!isOverrideStyle);
+
+                if (Tools.isEmptyObject(oldVal)) {
+                    cellMatrix.realDeleteValue(row, col);
+                } else {
+                    cellMatrix.setValue(row, col, oldVal);
+                }
+            }
+        });
+
+        return true;
+    },
+};
+
+function isStaleFormulaResult(cell: Nullable<ICellData>, source: Nullable<Pick<ICellData, 'f' | 'si'>>): boolean {
+    return source != null && (source.f !== (cell?.f ?? '') || source.si !== (cell?.si ?? undefined));
+}
+
+const overwriteCellPropertiesSet = new Set(['f', 'p', 'si', 'custom', 'ref', 'xf', 'ft', 'fd']);
+function mergeCellData(newValue: ICellData, oldValue: ICellData, styles: Styles, isOverrideStyle = false) {
+    const canPreserveValue = newValue.v === undefined && newValue.t === undefined && oldValue.t != null;
+    const previousStyle = canPreserveValue ? styles.getStyleByCell(oldValue) : undefined;
+    const type = canPreserveValue ? oldValue.t : getCellType(styles, newValue, oldValue);
+    Object.keys(newValue).forEach((key) => {
+        const cellPropertyKey = key as keyof ICellData;
+        if (overwriteCellPropertiesSet.has(cellPropertyKey)) {
+            const propertyValue = newValue[cellPropertyKey];
+            updateCellProperty(oldValue, cellPropertyKey, propertyValue);
+        } else if (cellPropertyKey === 'v') {
+            if (newValue.v !== undefined) {
+                oldValue.v = getCellValue(type, newValue);
+            }
+        } else if (cellPropertyKey === 's') {
+            if (isOverrideStyle) {
+                overrideStyle(styles, oldValue, newValue);
+            } else {
+                handleStyle(styles, oldValue, newValue);
+            }
+        }
+    });
+
+    // Shared formula followers have no f, but still carry formula metadata.
+    if ((newValue.f === null || newValue.f === '') && !isFormulaId(newValue.si)) {
+        delete oldValue.ft;
+        delete oldValue.fd;
+    }
+
+    const numberFormatChanged = canPreserveValue &&
+        previousStyle?.n?.pattern !== styles.getStyleByCell(oldValue)?.n?.pattern;
+    if (oldValue.v !== undefined && (!canPreserveValue || numberFormatChanged)) {
+        // Format changes still infer from the original style, including forced/text-formatted values.
+        const nextType = numberFormatChanged ? getCellType(styles, newValue, { ...oldValue, s: previousStyle }) : type;
+        oldValue.t = nextType;
+        oldValue.v = getCellValue(nextType, oldValue);
+    }
+
+    if (oldValue.v === null) {
+        delete oldValue.t;
+        delete oldValue.v;
+    }
+
+    return oldValue;
+}
+
+function overrideStyle(styles: Styles, oldValue: ICellData, newValue: ICellData) {
+    if (newValue.s === undefined) {
+        return;
+    }
+
+    if (newValue.s === null) {
+        delete oldValue.s;
+        return;
+    }
+
+    const styleValue = typeof newValue.s === 'string' ? styles.get(newValue.s) : newValue.s;
+    const styleCell: ICellData = {};
+    handleStyle(styles, styleCell, { s: styleValue });
+
+    if (styleCell.s == null) {
+        delete oldValue.s;
+    } else {
+        oldValue.s = styleCell.s;
+    }
+}
+
+function updateCellProperty<K extends keyof ICellData>(
+    cell: ICellData,
+    key: K,
+    value: ICellData[K]
+): void {
+    if (value === undefined) {
+        // Do nothing if the value is undefined
+    } else if (value === null) {
+        delete cell[key];
+    } else {
+        cell[key] = Tools.deepClone(value);
+    }
+}

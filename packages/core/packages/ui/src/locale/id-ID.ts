@@ -1,0 +1,202 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type enUS from './en-US';
+import emojiLocale from './emoji-locale/id-ID.generated';
+
+const locale: typeof enUS = {
+    ui: {
+        clearFormatting: 'Hapus pemformatan',
+        formatPainter: 'Salin Format',
+        accessibility: {
+            menu: 'Menu',
+            zoom: 'Zoom',
+            zoomIn: 'Perbesar',
+            zoomOut: 'Perkecil',
+            resetZoom: 'Atur ulang zoom',
+        },
+        objectPermission: {
+            operationDenied: 'Konten ini dilindungi. Tindakan ini tidak diizinkan.',
+            remove: 'Hapus perlindungan',
+            roleOwner: 'Pemilik file',
+            roleEditor: 'Editor file',
+            selectedCount: 'Dipilih: {0}',
+            searchPeople: 'Cari pengguna',
+            noMatchingPeople: 'Tidak ada pengguna yang cocok',
+            loadMore: 'Muat lebih banyak',
+            fileHint: 'Berbagi file mengatur keanggotaan. Pengaturan ini membatasi tindakan anggota tersebut.',
+            documentParent: 'Pembatasan pengeditan dokumen juga berlaku untuk bagian ini.',
+            paragraphParent: 'Pembatasan pengeditan dokumen dan bagian yang memuat paragraf ini juga berlaku.',
+            documentObjectParent: 'Dokumen serta bagian dan paragraf yang memuat atau menjadi jangkar objek ini juga dapat membatasi pengeditan.',
+            slideParent: 'Pembatasan pengeditan presentasi juga berlaku.',
+            slideObjectParent: 'Pembatasan pengeditan presentasi dan slide atau master yang memuat objek ini juga berlaku.',
+            baseParent: 'Pembatasan pengeditan Base juga berlaku.',
+            baseObjectParent: 'Pembatasan pengeditan Base dan tabel yang memuat objek ini juga berlaku.',
+            recordParent: 'Pembatasan Base dan tabel tetap berlaku. Mengedit nilai juga memerlukan izin untuk kolomnya.',
+            boardParent: 'Pembatasan pengeditan papan juga berlaku untuk objek ini.',
+            ownerInherit: 'Pemilik file, akses yang diwariskan',
+            peopleError: 'Tidak dapat memuat pengguna. Silakan coba lagi.',
+            document: 'Dokumen',
+            section: 'Bagian',
+            paragraph: 'Paragraf',
+            entity: 'Objek',
+            presentation: 'Presentasi',
+            page: 'Slide',
+            master: 'Tampilan master',
+            base: 'Base',
+            table: 'Tabel',
+            field: 'Kolom',
+            record: 'Rekaman',
+            view: 'Tampilan',
+            board: 'Papan',
+            objectName: '{0}: {1}',
+
+            search: 'Cari objek',
+            empty: 'Tidak ada objek yang cocok',
+            more: 'Menampilkan 100 objek pertama. Cari untuk mempersempit daftar.',
+            title: 'Izin',
+            cancel: 'Batal',
+            save: 'Simpan',
+            saving: 'Menyimpan…',
+            loading: 'Memuat…',
+            conflict: 'Izin telah berubah. Muat ulang sebelum menyimpan.',
+            error: 'Tidak dapat memuat atau menyimpan izin. Perubahan Anda tetap disimpan.',
+            reload: 'Muat ulang',
+            denied: 'Anda tidak dapat mengelola izin untuk objek ini.',
+            edit: 'Siapa yang dapat mengedit',
+            all: 'Semua editor file',
+            owner: 'Hanya pemilik objek',
+            members: 'Anggota yang dipilih',
+            copy: 'Izinkan editor menyalin',
+            print: 'Izinkan editor mencetak',
+            export: 'Izinkan editor mengekspor',
+            comment: 'Izinkan editor berkomentar',
+            parentHint: 'Pembatasan file dan objek induk tetap berlaku.',
+        },
+        featureSearch: {
+            title: 'Cari fitur',
+            placeholder: 'Ketik nama fitur atau menu...',
+            empty: 'Tidak ada fitur yang tersedia',
+            ribbon: 'Pita',
+            contextMenu: 'Menu konteks',
+        },
+        emojiPicker: {
+            search: 'Cari',
+            random: 'Emoji acak',
+            recents: 'Terbaru',
+            emojis: 'Emoji',
+            animals: 'Hewan',
+            food: 'Makanan',
+            activities: 'Aktivitas',
+            places: 'Tempat',
+            objects: 'Objek',
+            symbols: 'Simbol',
+            searchResults: 'Hasil pencarian',
+            noResults: 'Emoji tidak ditemukan',
+            ...emojiLocale,
+        },
+        symbolPicker: {
+            mathematics: 'Matematika',
+            greek: 'Yunani',
+            common: 'Umum',
+        },
+        toolbar: {
+            heading: {
+                normal: 'Normal',
+                title: 'Judul',
+                subTitle: 'Sub Judul',
+                1: 'Judul 1',
+                2: 'Judul 2',
+                3: 'Judul 3',
+                4: 'Judul 4',
+                5: 'Judul 5',
+            },
+        },
+        ribbon: {
+            start: 'Mulai',
+            startDesc: 'Inisiasi lembar kerja dan atur parameter dasar.',
+            insert: 'Sisipkan',
+            insertDesc: 'Sisipkan baris, kolom, grafik, dan berbagai elemen lainnya.',
+            formulas: 'Rumus',
+            formulasDesc: 'Gunakan fungsi dan rumus untuk perhitungan data.',
+            data: 'Data',
+            dataDesc: 'Kelola data, termasuk impor, pengurutan, dan penyaringan.',
+            view: 'Tampilan',
+            viewDesc: 'Ganti mode tampilan dan sesuaikan efek tampilan.',
+            others: 'Lainnya',
+            othersDesc: 'Fungsi dan pengaturan lainnya.',
+            more: 'Lebih Banyak',
+            groups: {
+                clipboard: 'Papan klip',
+                font: 'Font',
+                layout: 'Perataan dan tata letak',
+                number: 'Format angka',
+                tools: 'Alat',
+                editing: 'Pengeditan',
+                media: 'Media',
+                cells: 'Sel',
+                formulas: 'Rumus',
+                rules: 'Aturan',
+                organization: 'Penataan data',
+                display: 'Tampilan',
+                visibility: 'Visibilitas',
+            },
+        },
+        fontFamily: {
+            'not-supported': 'Font tidak ditemukan di sistem, menggunakan font default.',
+        },
+        'shortcut-panel': {
+            title: 'Pintasan',
+        },
+        shortcut: {
+            undo: 'Batalkan',
+            redo: 'Ulangi',
+            cut: 'Potong',
+            copy: 'Salin',
+            paste: 'Tempel',
+            'shortcut-panel': 'Alihkan Panel Pintasan',
+        },
+        'common-edit': 'Pintasan Edit Umum',
+        'toggle-shortcut-panel': 'Alihkan Panel Pintasan',
+        navigation: {
+            back: 'Kembali',
+            previous: 'Sebelumnya',
+            next: 'Berikutnya',
+        },
+        sidebar: {
+            panel: 'Panel samping',
+            resize: 'Ubah ukuran panel samping',
+            close: 'Tutup panel samping',
+        },
+        beforeClose: {
+            title: 'Beberapa perubahan belum disimpan',
+        },
+        clipboard: {
+            authentication: {
+                title: 'Izin Ditolak',
+                content: 'Izinkan Univer untuk mengakses clipboard Anda.',
+            },
+        },
+        rangeSelector: {
+            cancel: 'Batal',
+        },
+        'global-shortcut': 'Pintasan Global',
+        row: 'Baris',
+        column: 'Kolom',
+    },
+};
+
+export default locale;

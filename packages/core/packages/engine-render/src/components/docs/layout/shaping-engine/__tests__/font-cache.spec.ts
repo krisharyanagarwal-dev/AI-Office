@@ -1,0 +1,388 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { FontCache, invalidateDocumentFontMetrics } from '../font-cache';
+
+describe('font cache', () => {
+    it('isolates kerning metrics and resets the context for legacy measurements', () => {
+        const context = {
+            font: '',
+            fontKerning: 'auto',
+            measureText: () => ({
+                width: context.fontKerning === 'normal' ? 18 : 20,
+                fontBoundingBoxAscent: 10,
+                fontBoundingBoxDescent: 2,
+                actualBoundingBoxAscent: 10,
+                actualBoundingBoxDescent: 2,
+            }),
+        };
+        vi.stubGlobal('document', undefined);
+        vi.stubGlobal('OffscreenCanvas', class {
+            getContext() {
+                return context;
+            }
+        });
+        expect(FontCache.getMeasureText('AV', '12pt Arial', 'normal').width).toBe(18);
+        expect(FontCache.getMeasureText('AV', '12pt Arial', 'none').width).toBe(20);
+        expect(FontCache.getMeasureText('AV', '12pt Arial').width).toBe(20);
+        expect(context.fontKerning).toBe('auto');
+        expect(FontCache.getMeasureText('AV', '12pt Arial', 'normal').width).toBe(18);
+    });
+
+    beforeEach(() => {
+        invalidateDocumentFontMetrics(() => true);
+        (FontCache as any)._globalFontMeasureCache = new Map();
+        (FontCache as any)._fontDataMap = new Map();
+        (FontCache as any)._getTextHeightCache = {};
+        (FontCache as any)._context = null;
+    });
+
+    afterEach(() => {
+        invalidateDocumentFontMetrics(() => true);
+        vi.unstubAllGlobals();
+        vi.restoreAllMocks();
+    });
+
+    it('remeasures glyph widths and DOM fallback heights after font metrics are invalidated', () => {
+        let width = 12;
+        let height = 20;
+        vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+            font: '',
+            textBaseline: 'alphabetic',
+            measureText: () => ({
+                width,
+                actualBoundingBoxAscent: height,
+                actualBoundingBoxDescent: 0,
+            }),
+        } as unknown as CanvasRenderingContext2D);
+        vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(() => ({
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: height,
+            x: 0,
+            y: 0,
+            width,
+            height,
+            toJSON: () => ({}),
+        }));
+        const first = FontCache.getMeasureText('Agent', '14px FontChange');
+        const unrelated = FontCache.getMeasureText('Agent', '14px Unrelated');
+        const unrelatedHeight = FontCache.getTextSizeByDom('Agent', '14px Unrelated');
+        const domOnly = FontCache.getTextSizeByDom('Agent', '14px DOMOnly');
+        expect(first).toMatchObject({ width: 12, fontBoundingBoxAscent: 20 });
+        width = 24;
+        height = 40;
+        expect(FontCache.getMeasureText('Agent', '14px FontChange')).toBe(first);
+        expect(FontCache.getTextSizeByDom('Agent', '14px FontChange').height).toBe(20);
+
+        expect(invalidateDocumentFontMetrics((font) => font === '14px FontChange')).toBe(true);
+        const next = FontCache.getMeasureText('Agent', '14px FontChange');
+        expect(next).toMatchObject({ width: 24, fontBoundingBoxAscent: 40 });
+        expect(next).not.toBe(first);
+        expect(FontCache.getTextSizeByDom('Agent', '14px FontChange').height).toBe(40);
+        expect(FontCache.getMeasureText('Agent', '14px Unrelated')).toBe(unrelated);
+        expect(FontCache.getTextSizeByDom('Agent', '14px Unrelated')).toBe(unrelatedHeight);
+        expect(invalidateDocumentFontMetrics((font) => font === '14px DOMOnly')).toBe(true);
+        expect(FontCache.getTextSizeByDom('Agent', '14px DOMOnly')).not.toBe(domOnly);
+        expect(FontCache.getTextSizeByDom('Agent', '14px DOMOnly').height).toBe(40);
+        expect(invalidateDocumentFontMetrics(() => false)).toBe(false);
+        expect(invalidateDocumentFontMetrics((font) => font === '14px FontChange')).toBe(true);
+        expect(invalidateDocumentFontMetrics((font) => font === '14px FontChange')).toBe(false);
+        expect(FontCache.getMeasureText('Agent', '14px FontChange')).toEqual(next);
+    });
+
+    it('preserves fractional normal spacing across font sizes and transfers it to a DOM-free Worker', () => {
+        let normalHeight = 3066;
+        const measureRect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(() => ({
+            height: normalHeight,
+        } as DOMRect));
+        vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+            font: '',
+            measureText: () => ({
+                width: 8,
+                fontBoundingBoxAscent: 14,
+                fontBoundingBoxDescent: 3,
+                actualBoundingBoxAscent: 11,
+                actualBoundingBoxDescent: 2,
+            }),
+        } as unknown as CanvasRenderingContext2D);
+        const style = {
+            fontString: '12pt FixtureFont',
+            fontCache: '12pt FixtureFont',
+            fontFamily: 'FixtureFont',
+            fontSize: 12,
+            originFontSize: 12,
+        };
+        const originalChildCount = document.body.childElementCount;
+        const main = FontCache.getTextSize('A', style, true);
+        expect(main.normalLineHeight).toBeCloseTo(18.396);
+        expect(FontCache.getTextSize('A', style).normalLineHeight).toBe(17);
+        expect(FontCache.getNormalLineHeight({ ...style, originFontSize: 10 })).toBeCloseTo(15.33);
+        expect(measureRect).toHaveBeenCalledTimes(1);
+        expect(document.body.childElementCount).toBe(originalChildCount);
+
+        const transferred = FontCache.getNormalLineHeightCache();
+        // Superscript keeps the paragraph's original font size for normal spacing.
+        expect(FontCache.getNormalLineHeight({ ...style, fontSize: 7.2, fontString: '7.2pt FixtureFont' }))
+            .toBeCloseTo(main.normalLineHeight!);
+        invalidateDocumentFontMetrics((font) => font === style.fontString);
+        normalHeight = 3200;
+        expect(FontCache.getTextSize('A', style, true).normalLineHeight).toBeCloseTo(19.2);
+
+        vi.stubGlobal('document', undefined);
+        invalidateDocumentFontMetrics(() => true);
+        FontCache.setNormalLineHeightCache(transferred);
+        expect(FontCache.getTextSize('A', style, true)).toEqual(main);
+        expect(measureRect).toHaveBeenCalledTimes(2);
+    });
+
+    it('uses scalable print advances and line metrics without changing native ink or screen measurements', () => {
+        const measureText = vi.fn(function (this: CanvasRenderingContext2D) {
+            return {
+                width: this.font.startsWith('1024px') ? 1024 : 16,
+                fontBoundingBoxAscent: this.font.startsWith('1024px') ? 880 : 13,
+                fontBoundingBoxDescent: this.font.startsWith('1024px') ? 144 : 2,
+                actualBoundingBoxAscent: 11,
+                actualBoundingBoxDescent: 0,
+            };
+        });
+        vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+            font: '',
+            measureText,
+        } as unknown as CanvasRenderingContext2D);
+        const fontStyle = {
+            fontString: '11pt "MS Gothic"',
+            fontCache: '11pt "MS Gothic"',
+            fontSize: 11,
+            originFontSize: 11,
+            fontFamily: 'MS Gothic',
+        };
+        const screen = FontCache.getTextSize('☐', fontStyle);
+        const print = FontCache.getTextSize('☐', fontStyle, true);
+        expect(screen.width).toBe(16);
+        expect(print.width).toBeCloseTo(44 / 3);
+        expect(print).toMatchObject({ aba: screen.aba, abd: screen.abd });
+        expect(print.ba).toBeCloseTo(880 * (44 / 3) / 1024);
+        expect(print.bd).toBeCloseTo(144 * (44 / 3) / 1024);
+        expect(print.normalLineHeight).toBeCloseTo(44 / 3);
+        expect(screen).toMatchObject({ ba: 13, bd: 2, normalLineHeight: 15 });
+        expect(FontCache.getTextSize('☐', fontStyle).width).toBe(16);
+        expect(FontCache.getTextSize('☐', fontStyle, true)).toEqual(print);
+        expect(measureText).toHaveBeenCalledTimes(2);
+    });
+
+    it.each(['auto', 'normal', 'none'] as const)('measures text without a DOM or native kerning support in %s mode', (kerning) => {
+        const measureText = vi.fn(() => ({
+            width: 16,
+            fontBoundingBoxAscent: 9,
+            fontBoundingBoxDescent: 3,
+            actualBoundingBoxAscent: 8,
+            actualBoundingBoxDescent: 2,
+        }));
+
+        vi.stubGlobal('document', undefined);
+        vi.stubGlobal('OffscreenCanvas', class {
+            getContext() {
+                return {
+                    font: '',
+                    textBaseline: 'alphabetic',
+                    measureText,
+                };
+            }
+        });
+
+        const result = FontCache.getMeasureText('W', '12px Arial', kerning);
+
+        expect(result).toEqual({
+            width: 16,
+            fontBoundingBoxAscent: 9,
+            fontBoundingBoxDescent: 3,
+            actualBoundingBoxAscent: 8,
+            actualBoundingBoxDescent: 2,
+        });
+        expect(measureText).toHaveBeenCalledWith('W');
+    });
+
+    it('handles measure cache lifecycle and fallback metrics', () => {
+        const fakeContext = {
+            font: '',
+            textBaseline: 'middle',
+            measureText: vi.fn(() => ({
+                width: 20,
+                fontBoundingBoxAscent: Number.NaN,
+                fontBoundingBoxDescent: Number.NaN,
+                actualBoundingBoxAscent: 10,
+                actualBoundingBoxDescent: 5,
+            })),
+        };
+        (FontCache as any)._context = fakeContext;
+        const domSpy = vi.spyOn(FontCache, 'getTextSizeByDom').mockReturnValue({
+            width: 10,
+            height: 18,
+        });
+
+        const first = FontCache.getMeasureText('A', '12px Arial');
+        expect(first.fontBoundingBoxAscent).toBe(9);
+        expect(first.fontBoundingBoxDescent).toBe(9);
+        expect(domSpy).toHaveBeenCalled();
+
+        const second = FontCache.getMeasureText('A', '12px Arial');
+        expect(second).toEqual(first);
+        expect(fakeContext.measureText).toHaveBeenCalledTimes(1);
+
+        FontCache.setFontMeasureCache('12px Arial', 'B', {
+            width: 1,
+            fontBoundingBoxAscent: 1,
+            fontBoundingBoxDescent: 1,
+            actualBoundingBoxAscent: 1,
+            actualBoundingBoxDescent: 1,
+        });
+        expect(FontCache.getFontMeasureCache('12px Arial', 'B')).toBeTruthy();
+        expect(FontCache.clearFontMeasureCache('12px Arial/B')).toBe(true);
+        expect(FontCache.clearFontMeasureCache('12px Arial')).toBe(true);
+    });
+
+    it('calculates the line-height metric without a DOM', () => {
+        const browserDocument = globalThis.document;
+        (FontCache as unknown as { _context: CanvasRenderingContext2D })._context = {
+            font: '',
+            textBaseline: 'alphabetic',
+            measureText: vi.fn(() => ({
+                width: 12,
+                fontBoundingBoxAscent: 8,
+                fontBoundingBoxDescent: 3,
+                actualBoundingBoxAscent: 8,
+                actualBoundingBoxDescent: 3,
+            })),
+        } as unknown as CanvasRenderingContext2D;
+
+        try {
+            vi.stubGlobal('document', undefined);
+            const result = FontCache.getTextSize('A', {
+                fontString: '12px Arial',
+                fontSize: 12,
+                originFontSize: 12,
+                fontFamily: 'Arial',
+                fontCache: '12px Arial',
+            });
+
+            expect(result.normalLineHeight).toBe(11);
+        } finally {
+            vi.stubGlobal('document', browserDocument);
+        }
+    });
+
+    it('auto-cleans overflow cache and computes baseline offsets', () => {
+        const cache = new Map<string, any>();
+        for (let i = 0; i < 10; i++) {
+            cache.set(`k-${i}`, {
+                width: i,
+                fontBoundingBoxAscent: 1,
+                fontBoundingBoxDescent: 1,
+                actualBoundingBoxAscent: 1,
+                actualBoundingBoxDescent: 1,
+            });
+        }
+        (FontCache as any)._globalFontMeasureCache = new Map([
+            ['12px Arial', cache],
+            ['12px Other', new Map(cache)],
+        ]);
+        expect(FontCache.autoCleanFontMeasureCache(5)).toBe(true);
+
+        expect(FontCache.getBaselineOffsetInfo('Unknown', 10)).toEqual({
+            sbr: 0.6,
+            sbo: 10,
+            spr: 0.6,
+            spo: 10,
+        });
+
+        (FontCache as any)._fontDataMap = new Map([
+            ['MyFont', {
+                subscriptSizeRatio: 0.5,
+                subscriptOffset: 0.2,
+                superscriptSizeRatio: 0.4,
+                superscriptOffset: 0.3,
+            }],
+        ]);
+        expect(FontCache.getBaselineOffsetInfo('MyFont', 20)).toEqual({
+            sbr: 0.5,
+            sbo: 4,
+            spr: 0.4,
+            spo: 6,
+        });
+    });
+
+    it('calculates text bounding box by font data and glyph info', () => {
+        (FontCache as any)._fontDataMap = new Map([
+            ['Local Font', {
+                notDefWidth: 0.6,
+                ascender: 0.8,
+                descender: 0.2,
+                typoAscender: 0.75,
+                typoDescender: 0.15,
+                strikeoutPosition: 0.35,
+                subscriptSizeRatio: 0.6,
+                subscriptOffset: 0.3,
+                superscriptSizeRatio: 0.5,
+                superscriptOffset: 0.4,
+                hdmxData: [12],
+                glyphHorizonMap: new Map([
+                    ['A'.charCodeAt(0), {
+                        width: 0.7,
+                        lsb: 0,
+                        pixelsPerEm: [0.65],
+                    }],
+                ]),
+            }],
+        ]);
+
+        invalidateDocumentFontMetrics((font) => font === '12px Local Font');
+        const byFont = FontCache.getTextSize('A', {
+            fontString: '12px Local Font',
+            fontSize: 12,
+            originFontSize: 12,
+            fontFamily: 'Local Font',
+            fontCache: '12px Local Font',
+        } as any);
+        expect(byFont.width).toBeGreaterThan(0);
+        expect(byFont.ba).toBeCloseTo(9.6);
+        expect(byFont.abd).toBeCloseTo(1.8);
+        expect(byFont.normalLineHeight).toBeCloseTo(12);
+
+        (FontCache as any)._context = {
+            font: '',
+            textBaseline: 'alphabetic',
+            measureText: vi.fn(() => ({
+                width: 12,
+                fontBoundingBoxAscent: 8,
+                fontBoundingBoxDescent: 3,
+                actualBoundingBoxAscent: 8,
+                actualBoundingBoxDescent: 3,
+            })),
+        };
+
+        const byMeasure = FontCache.getTextSize('Z', {
+            fontString: '11px Other Font',
+            fontSize: 11,
+            originFontSize: 11,
+            fontFamily: 'Other Font',
+            fontCache: '11px Other Font',
+        } as any);
+        expect(byMeasure.width).toBeGreaterThanOrEqual(0);
+    });
+});

@@ -1,0 +1,436 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type {
+    DocumentDataModel,
+    IDocumentBody,
+    ISectionBreak,
+    JSONXActions,
+    SectionHeaderFooterReferenceKey,
+    TextXAction,
+} from '@univerjs/core';
+import {
+    CustomRangeType,
+    getParagraphContentStartOffset,
+    getParagraphContentStartOffsets,
+    JSON1,
+    resolveSectionHeaderFooterReference,
+    TextX,
+    TextXActionType,
+} from '@univerjs/core';
+import { getTopLevelSectionBreaks } from '../../utils/sections';
+import {
+    getDocumentEntityPermissionObjectId,
+    getDocumentParagraphPermissionObjectId,
+    getDocumentSectionPermissionObjectId,
+} from './document-permission';
+
+const HEADER_FOOTER_REFERENCE_KEYS: SectionHeaderFooterReferenceKey[] = [
+    'defaultHeaderId',
+    'defaultFooterId',
+    'firstPageHeaderId',
+    'firstPageFooterId',
+    'evenPageHeaderId',
+    'evenPageFooterId',
+];
+
+interface IDocumentPermissionEntityRange extends IDocumentPermissionRange {
+    id: string;
+    type: string;
+}
+
+interface IDocumentPermissionSegmentIndex {
+    body: IDocumentBody | null;
+    entities: IDocumentPermissionEntityRange[];
+    entityRanges: Map<string, IDocumentPermissionRange>;
+    paragraphContentStartOffsets: Map<number, number>;
+    paragraphsById: Map<string, NonNullable<IDocumentBody['paragraphs']>[number]>;
+}
+
+interface IDocumentPermissionResolverIndex {
+    drawingSegmentIds: Map<string, string>;
+    footnoteReferenceRanges: Map<string, IDocumentPermissionRange>;
+    mutationRevision: number;
+    segments: Map<string, IDocumentPermissionSegmentIndex>;
+    topLevelSections: ISectionBreak[];
+}
+
+const documentPermissionResolverIndexCache = new WeakMap<DocumentDataModel, IDocumentPermissionResolverIndex>();
+
+export interface IDocumentPermissionRange {
+    startOffset: number;
+    endOffset: number;
+}
+
+function getDocumentPermissionResolverIndex(documentDataModel: DocumentDataModel): IDocumentPermissionResolverIndex {
+    const mutationRevision = (documentDataModel as Partial<Pick<DocumentDataModel, 'getMutationRevision'>>)
+        .getMutationRevision?.() ?? Number.NaN;
+    const cached = documentPermissionResolverIndexCache.get(documentDataModel);
+    if (cached?.mutationRevision === mutationRevision) {
+        return cached;
+    }
+
+    const snapshot = documentDataModel.getSnapshot();
+    const topLevelSections = snapshot.body ? getTopLevelSectionBreaks(snapshot.body) : [];
+    const drawingSegmentIds = new Map<string, string>();
+    const addDrawingSegments = (body: IDocumentBody | undefined, segmentId: string): void => {
+        for (const block of body?.customBlocks ?? []) {
+            if (!drawingSegmentIds.has(block.blockId)) {
+                drawingSegmentIds.set(block.blockId, segmentId);
+            }
+        }
+    };
+    addDrawingSegments(snapshot.body, '');
+    Object.entries(snapshot.headers ?? {}).forEach(([segmentId, header]) => addDrawingSegments(header.body, segmentId));
+    Object.entries(snapshot.footers ?? {}).forEach(([segmentId, footer]) => addDrawingSegments(footer.body, segmentId));
+    Object.entries(snapshot.notes ?? {}).forEach(([segmentId, footnote]) => addDrawingSegments(footnote.body, segmentId));
+    const footnoteReferenceRanges = new Map<string, IDocumentPermissionRange>();
+    for (const reference of snapshot.body?.customRanges ?? []) {
+        if ((reference.rangeType === CustomRangeType.FOOTNOTE || reference.rangeType === CustomRangeType.ENDNOTE) && typeof reference.properties?.noteId === 'string') {
+            footnoteReferenceRanges.set(reference.properties.noteId, {
+                startOffset: reference.startIndex,
+                endOffset: reference.endIndex + 1,
+            });
+        }
+    }
+
+    const index: IDocumentPermissionResolverIndex = {
+        drawingSegmentIds,
+        footnoteReferenceRanges,
+        mutationRevision,
+        segments: new Map(),
+        topLevelSections,
+    };
+    documentPermissionResolverIndexCache.set(documentDataModel, index);
+    return index;
+}
+
+function getDocumentPermissionSegmentIndex(
+    documentDataModel: DocumentDataModel,
+    segmentId: string,
+    resolverIndex = getDocumentPermissionResolverIndex(documentDataModel)
+): IDocumentPermissionSegmentIndex {
+    const cached = resolverIndex.segments.get(segmentId);
+    if (cached) {
+        return cached;
+    }
+
+    const body = documentDataModel.getSelfOrHeaderFooterModel(segmentId)?.getBody() ?? null;
+    const snapshot = documentDataModel.getSnapshot();
+    const note = snapshot.notes?.[segmentId];
+    const drawings = (note ? note.drawings : snapshot.drawings) ?? {};
+    const entities: IDocumentPermissionEntityRange[] = body == null
+        ? []
+        : [
+            ...(body.tables ?? []).map((item) => ({ type: 'table', id: item.tableId, startOffset: item.startIndex, endOffset: item.endIndex })),
+            ...(body.customBlocks ?? []).map((item) => ({
+                type: drawings[item.blockId] ? 'drawing' : 'custom-block',
+                id: item.blockId,
+                startOffset: item.startIndex,
+                endOffset: item.startIndex + 1,
+            })),
+            ...(body.blockRanges ?? []).map((item) => ({ type: 'block-range', id: item.blockId, startOffset: item.startIndex, endOffset: item.endIndex + 1 })),
+            ...(body.customRanges ?? []).map((item) => ({ type: 'custom-range', id: item.rangeId, startOffset: item.startIndex, endOffset: item.endIndex + 1 })),
+            ...(body.columnGroups ?? []).map((item) => ({ type: 'column-group', id: item.columnGroupId, startOffset: item.startIndex, endOffset: item.endIndex + 1 })),
+        ];
+    const entityRanges = new Map(entities.map((entity) => [
+        `${entity.type}:${entity.id}`,
+        { startOffset: entity.startOffset, endOffset: entity.endOffset },
+    ]));
+    for (const block of body?.customBlocks ?? []) {
+        const range = { startOffset: block.startIndex, endOffset: block.startIndex + 1 };
+        entityRanges.set(`custom-block:${block.blockId}`, range);
+        entityRanges.set(`drawing:${block.blockId}`, range);
+    }
+    const segmentIndex: IDocumentPermissionSegmentIndex = {
+        body,
+        entities,
+        entityRanges,
+        paragraphContentStartOffsets: body == null ? new Map() : getParagraphContentStartOffsets(body),
+        paragraphsById: new Map((body?.paragraphs ?? [])
+            .filter((paragraph) => paragraph.paragraphId != null)
+            .map((paragraph) => [paragraph.paragraphId!, paragraph])),
+    };
+    resolverIndex.segments.set(segmentId, segmentIndex);
+    return segmentIndex;
+}
+
+export function getDocumentDrawingSegmentId(documentDataModel: DocumentDataModel, drawingId: string): string {
+    return getDocumentPermissionResolverIndex(documentDataModel).drawingSegmentIds.get(drawingId) ?? '';
+}
+
+export function getDocumentEditTargetObjectIds(
+    documentDataModel: DocumentDataModel,
+    segmentId: string,
+    range: IDocumentPermissionRange
+): string[] {
+    const resolverIndex = getDocumentPermissionResolverIndex(documentDataModel);
+    const segmentIndex = getDocumentPermissionSegmentIndex(documentDataModel, segmentId, resolverIndex);
+    const { body } = segmentIndex;
+    if (!body) {
+        return [];
+    }
+    return [
+        ...getSectionPermissionObjectIds(documentDataModel, segmentId, range, resolverIndex),
+        ...getParagraphPermissionObjectIds(body, segmentId, range, segmentIndex),
+        ...getEntityPermissionObjectIds(segmentId, range, segmentIndex),
+    ];
+}
+
+export function getDocumentEditTargetObjectIdsFromActions(
+    documentDataModel: DocumentDataModel,
+    segmentId: string,
+    actions: JSONXActions
+): string[] {
+    const result = new Set<string>();
+    if (actions == null) {
+        return [];
+    }
+    const cursor = JSON1.type.readCursor(actions);
+    cursor.traverse(null, () => {
+        const path = cursor.getPath();
+        const edit = cursor.getComponent();
+        const scopedSegment = ['headers', 'footers', 'notes'].includes(String(path[0])) && typeof path[1] === 'string'
+            ? path[1]
+            : segmentId;
+        if (path[0] === 'notes' && typeof path[1] === 'string') {
+            getSectionPermissionObjectIds(documentDataModel, path[1], { startOffset: 0, endOffset: 0 })
+                .forEach((objectId) => result.add(objectId));
+        }
+        if (path[0] === 'noteSettings') {
+            getDocumentPermissionResolverIndex(documentDataModel).topLevelSections.forEach((section) => {
+                result.add(getDocumentSectionPermissionObjectId('', section.sectionId));
+            });
+        }
+        if (path[0] === 'body' && path[1] === 'sectionBreaks' && typeof path[2] === 'number' && (path[3] === 'noteProperties' || path[3] === 'suppressEndnotes')) {
+            const sectionId = documentDataModel.getBody()?.sectionBreaks?.[path[2]]?.sectionId;
+            if (sectionId) {
+                result.add(getDocumentSectionPermissionObjectId('', sectionId));
+            }
+        }
+        if (path[path.length - 1] !== 'body' || edit?.et !== TextX.id || !Array.isArray(edit.e) || !edit.e.every(isTextXAction)) {
+            return;
+        }
+        const textActions = edit.e;
+        let offset = 0;
+        const addRange = (startOffset: number, endOffset: number): void => {
+            getDocumentEditTargetObjectIds(documentDataModel, scopedSegment, { startOffset, endOffset })
+                .forEach((objectId) => result.add(objectId));
+        };
+
+        textActions.forEach((action) => {
+            if (action.t === TextXActionType.INSERT) {
+                addRange(offset, offset);
+                return;
+            }
+            if (action.t === TextXActionType.DELETE) {
+                addRange(offset, offset + action.len);
+                offset += action.len;
+                return;
+            }
+            if (action.body !== undefined || action.oldBody !== undefined || action.coverType !== undefined) {
+                addRange(offset, offset + action.len);
+            }
+            offset += action.len;
+        });
+    });
+
+    getDrawingIdsFromActions(actions).forEach((drawingId) => {
+        result.add(getDocumentEntityPermissionObjectId(segmentId, 'drawing', drawingId));
+        const body = documentDataModel.getSelfOrHeaderFooterModel(segmentId)?.getBody();
+        const block = body?.customBlocks?.find((item) => item.blockId === drawingId);
+        if (block) {
+            getSectionPermissionObjectIds(documentDataModel, segmentId, {
+                startOffset: block.startIndex,
+                endOffset: block.startIndex + 1,
+            }).forEach((objectId) => result.add(objectId));
+        }
+    });
+
+    return [...result];
+}
+
+function getDrawingIdsFromActions(actions: JSONXActions): string[] {
+    const result = new Set<string>();
+    const visit = (value: unknown): void => {
+        if (Array.isArray(value)) {
+            value.forEach((item, index) => {
+                if (item === 'drawings' && typeof value[index + 1] === 'string') {
+                    result.add(value[index + 1]);
+                }
+                visit(item);
+            });
+            return;
+        }
+        if (!isRecord(value)) {
+            return;
+        }
+        Object.values(value).forEach(visit);
+    };
+    visit(actions);
+    return [...result];
+}
+
+function isTextXAction(value: unknown): value is TextXAction {
+    if (!isRecord(value) || typeof value.len !== 'number') {
+        return false;
+    }
+    if (value.t === TextXActionType.INSERT) {
+        return isRecord(value.body);
+    }
+    return value.t === TextXActionType.RETAIN || value.t === TextXActionType.DELETE;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+export function getDocumentEntityParentPermissionObjectIds(
+    documentDataModel: DocumentDataModel,
+    segmentId: string,
+    entityType: string,
+    entityId: string
+): string[] {
+    const resolverIndex = getDocumentPermissionResolverIndex(documentDataModel);
+    const segmentIndex = getDocumentPermissionSegmentIndex(documentDataModel, segmentId, resolverIndex);
+    const range = segmentIndex.entityRanges.get(`${entityType}:${entityId}`) ?? null;
+    return range ? getSectionPermissionObjectIds(documentDataModel, segmentId, range, resolverIndex) : [];
+}
+
+export function getDocumentParagraphParentPermissionObjectIds(
+    documentDataModel: DocumentDataModel,
+    segmentId: string,
+    paragraphId: string
+): string[] {
+    const resolverIndex = getDocumentPermissionResolverIndex(documentDataModel);
+    const segmentIndex = getDocumentPermissionSegmentIndex(documentDataModel, segmentId, resolverIndex);
+    const { body } = segmentIndex;
+    const paragraph = segmentIndex.paragraphsById.get(paragraphId);
+    if (!body || !paragraph) {
+        return [];
+    }
+    return getSectionPermissionObjectIds(documentDataModel, segmentId, {
+        startOffset: segmentIndex.paragraphContentStartOffsets.get(paragraph.startIndex) ?? getParagraphContentStartOffset(body, paragraph),
+        endOffset: paragraph.startIndex + 1,
+    }, resolverIndex);
+}
+
+export function getDocumentSectionPermissionObjectIdsByIds(
+    sectionIds: Iterable<string>
+): string[] {
+    return Array.from(sectionIds, (sectionId) => getDocumentSectionPermissionObjectId('', sectionId));
+}
+
+export function getDocumentSectionIdsAtOffset(body: IDocumentBody, offset: number): string[] {
+    return getSectionsIntersectingRange(getTopLevelSectionBreaks(body), {
+        startOffset: offset,
+        endOffset: offset,
+    }).map((section) => section.sectionId);
+}
+
+function getSectionPermissionObjectIds(
+    documentDataModel: DocumentDataModel,
+    segmentId: string,
+    range: IDocumentPermissionRange,
+    resolverIndex = getDocumentPermissionResolverIndex(documentDataModel)
+): string[] {
+    if (segmentId) {
+        const referenceRange = resolverIndex.footnoteReferenceRanges.get(segmentId);
+        if (referenceRange) {
+            // A note belongs to its reference, including the enclosing paragraph,
+            // table and section. Moving the reference moves those restrictions too.
+            return getDocumentEditTargetObjectIds(documentDataModel, '', referenceRange);
+        }
+        return getHeaderFooterOwnerSectionIds(documentDataModel, segmentId, resolverIndex.topLevelSections)
+            .map((sectionId) => getDocumentSectionPermissionObjectId('', sectionId));
+    }
+    return getSectionsIntersectingRange(resolverIndex.topLevelSections, range)
+        .map((section) => getDocumentSectionPermissionObjectId('', section.sectionId));
+}
+
+function getParagraphPermissionObjectIds(
+    body: IDocumentBody,
+    segmentId: string,
+    range: IDocumentPermissionRange,
+    segmentIndex: IDocumentPermissionSegmentIndex
+): string[] {
+    const startOffset = Math.min(range.startOffset, range.endOffset);
+    const endOffset = Math.max(range.startOffset, range.endOffset);
+    return (body.paragraphs ?? [])
+        .filter((paragraph) => intersectsRange(
+            segmentIndex.paragraphContentStartOffsets.get(paragraph.startIndex) ?? getParagraphContentStartOffset(body, paragraph),
+            paragraph.startIndex + 1,
+            startOffset,
+            endOffset
+        ))
+        .flatMap((paragraph) => paragraph.paragraphId
+            ? [getDocumentParagraphPermissionObjectId(segmentId, paragraph.paragraphId)]
+            : []);
+}
+
+function getEntityPermissionObjectIds(
+    segmentId: string,
+    range: IDocumentPermissionRange,
+    segmentIndex: IDocumentPermissionSegmentIndex
+): string[] {
+    const startOffset = Math.min(range.startOffset, range.endOffset);
+    const endOffset = Math.max(range.startOffset, range.endOffset);
+    return segmentIndex.entities
+        .filter((item) => intersectsRange(item.startOffset, item.endOffset, startOffset, endOffset))
+        .map((item) => getDocumentEntityPermissionObjectId(segmentId, item.type, item.id));
+}
+
+function getSectionsIntersectingRange(
+    sections: ISectionBreak[],
+    range: IDocumentPermissionRange
+): ISectionBreak[] {
+    const startOffset = Math.min(range.startOffset, range.endOffset);
+    const endOffset = Math.max(range.startOffset, range.endOffset);
+    return sections.filter((section, index) => intersectsRange(
+        index === 0 ? 0 : sections[index - 1].startIndex + 1,
+        section.startIndex + 1,
+        startOffset,
+        endOffset
+    ));
+}
+
+function intersectsRange(
+    targetStart: number,
+    targetEnd: number,
+    rangeStart: number,
+    rangeEnd: number
+): boolean {
+    if (rangeStart === rangeEnd) {
+        return rangeStart >= targetStart && rangeStart < targetEnd;
+    }
+    return rangeStart < targetEnd && rangeEnd > targetStart;
+}
+
+function getHeaderFooterOwnerSectionIds(
+    documentDataModel: DocumentDataModel,
+    segmentId: string,
+    sections = getDocumentPermissionResolverIndex(documentDataModel).topLevelSections
+): string[] {
+    const snapshot = documentDataModel.getSnapshot();
+    const result = new Set<string>();
+    sections.forEach((section, sectionIndex) => {
+        if (HEADER_FOOTER_REFERENCE_KEYS.some((key) =>
+            resolveSectionHeaderFooterReference(snapshot.documentStyle, sections, sectionIndex, key).segmentId === segmentId)) {
+            result.add(section.sectionId);
+        }
+    });
+    return [...result];
+}

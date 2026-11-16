@@ -1,0 +1,152 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type { DocumentDataModel } from '@univerjs/core';
+import type { IRenderContext, IRenderModule } from '@univerjs/engine-render';
+import {
+    CustomRangeType,
+    Disposable,
+    DOCS_NORMAL_EDITOR_UNIT_ID_KEY,
+    ICommandService,
+    Inject,
+} from '@univerjs/core';
+import { DocSelectionManagerService, DocSkeletonManagerService } from '@univerjs/docs';
+import { DocEventManagerService, getEditorRuntimeConfig } from '@univerjs/docs-ui';
+import {
+    ClickDocHyperLinkOperation,
+    ToggleDocHyperLinkInfoPopupOperation,
+} from '../../commands/operations/popup.operation';
+import { DocHyperLinkPopupService } from '../../services/hyper-link-popup.service';
+
+export class DocHyperLinkEventRenderController extends Disposable implements IRenderModule {
+    get _skeleton() {
+        return this._docSkeletonManagerService.getSkeleton();
+    }
+
+    constructor(
+        private readonly _context: IRenderContext<DocumentDataModel>,
+        @Inject(DocEventManagerService) private readonly _docEventManagerService: DocEventManagerService,
+        @ICommandService private readonly _commandService: ICommandService,
+        @Inject(DocHyperLinkPopupService) private readonly _hyperLinkPopupService: DocHyperLinkPopupService,
+        @Inject(DocSkeletonManagerService) private readonly _docSkeletonManagerService: DocSkeletonManagerService,
+        @Inject(DocSelectionManagerService) private readonly _docSelectionManagerService: DocSelectionManagerService
+    ) {
+        super();
+
+        if (this._context.unitId === DOCS_NORMAL_EDITOR_UNIT_ID_KEY || getEditorRuntimeConfig(this._context.unit)?.customHyperLinkUI) {
+            return;
+        }
+
+        this._initPointerDown();
+        this._initHover();
+        this._initClick();
+    }
+
+    private _hideInfoPopup() {
+        if (this._hyperLinkPopupService.infoPopupPinned) {
+            return;
+        }
+
+        if (this._hyperLinkPopupService.showing) {
+            this._hyperLinkPopupService.scheduleHideInfoPopup();
+        }
+    }
+
+    private _normalizeSegmentId(segmentId?: string): string {
+        if (!segmentId) {
+            return '';
+        }
+
+        return this._context.unit.getBody()?.tables?.some((table) => table.tableId === segmentId) ? '' : segmentId;
+    }
+
+    private _initPointerDown() {
+        this.disposeWithMe(
+            this._docEventManagerService.pointerDownCustomRanges$.subscribe((ranges) => {
+                const link = ranges.find((range) => range.range.rangeType === CustomRangeType.HYPERLINK);
+                if (!link) {
+                    this._hyperLinkPopupService.hideInfoPopupOnPointerDown();
+                }
+            })
+        );
+    }
+
+    private _initHover() {
+        this.disposeWithMe(
+            this._docEventManagerService.hoverCustomRanges$.subscribe((ranges) => {
+                const link = ranges.find((range) => range.range.rangeType === CustomRangeType.HYPERLINK);
+                const activeRanges = this._docSelectionManagerService.getTextRanges();
+                const currentSegmentId = activeRanges?.[0]?.segmentId;
+                if (this._normalizeSegmentId(link?.segmentId) !== this._normalizeSegmentId(currentSegmentId)) {
+                    this._hideInfoPopup();
+                    return;
+                }
+
+                if (link) {
+                    const info = {
+                        unitId: this._context.unitId,
+                        linkId: link.range.rangeId,
+                        segmentId: link.segmentId,
+                        segmentPage: link.segmentPageIndex,
+                        startIndex: link.range.startIndex,
+                        endIndex: link.range.endIndex,
+                    };
+                    this._commandService.executeCommand(
+                        ToggleDocHyperLinkInfoPopupOperation.id,
+                        { ...info, fromHover: true }
+                    );
+                } else {
+                    this._hideInfoPopup();
+                }
+            })
+        );
+    }
+
+    private _initClick() {
+        this.disposeWithMe(
+            this._docEventManagerService.clickCustomRanges$.subscribe((range) => {
+                const link = range.range;
+                if (link.rangeType !== CustomRangeType.HYPERLINK) {
+                    return;
+                }
+
+                if (!range.ctrlKey && !range.metaKey) {
+                    this._hyperLinkPopupService.showInfoPopup(
+                        {
+                            unitId: this._context.unitId,
+                            linkId: link.rangeId,
+                            segmentId: range.segmentId,
+                            segmentPage: range.segmentPageIndex,
+                            startIndex: link.startIndex,
+                            endIndex: link.endIndex,
+                        },
+                        { pinned: true }
+                    );
+                    return;
+                }
+
+                this._commandService.executeCommand(
+                    ClickDocHyperLinkOperation.id,
+                    {
+                        unitId: this._context.unitId,
+                        linkId: link.rangeId,
+                        segmentId: range.segmentId,
+                    }
+                );
+            })
+        );
+    }
+}

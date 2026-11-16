@@ -1,0 +1,57 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type enUS from './en-US';
+
+const locale: typeof enUS = {
+    'thread-comment-ui': {
+        mobile: { back: '戻る' },
+        panel: {
+            title: 'コメント管理',
+            empty: 'まだコメントはありません',
+            reset: 'フィルタをリセット',
+            addComment: 'コメントを追加',
+            solved: '解決済み',
+        },
+        editor: {
+            placeholder: '返信または@で他のユーザーを追加',
+            reply: '返信',
+            cancel: 'キャンセル',
+            save: '保存',
+        },
+        item: {
+            markResolved: '解決済みにする',
+            markUnresolved: '未解決にする',
+            edit: '編集',
+            delete: 'コメントを削除',
+            more: 'もっと見る',
+        },
+        filter: {
+            sheet: {
+                all: 'すべてのシート',
+                current: '現在のシート',
+            },
+            status: {
+                all: 'すべてのコメント',
+                resolved: '解決済み',
+                unsolved: '未解決',
+                concernMe: '自分に関連',
+            },
+        },
+    },
+};
+
+export default locale;

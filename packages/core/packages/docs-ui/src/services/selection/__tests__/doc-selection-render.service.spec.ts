@@ -1,0 +1,2667 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+// @vitest-environment jsdom
+
+import type { IDisposable, IDocumentData, ITextRangeParam } from '@univerjs/core';
+import type { Mock } from 'vitest';
+import {
+    createInternalEditorID,
+    DataStreamTreeTokenType,
+    DisposableCollection,
+    DOC_RANGE_TYPE,
+    DOCS_COMMENT_EDITOR_UNIT_ID_KEY,
+    DOCS_FORMULA_BAR_EDITOR_UNIT_ID_KEY,
+    DOCS_NORMAL_EDITOR_UNIT_ID_KEY,
+    DocumentDataModel,
+    DocumentFlavor,
+    EventSubject,
+    Univer,
+    UniverInstanceType,
+} from '@univerjs/core';
+import { DocLayoutExecutorService, DocSelectionManagerService, DocSkeletonManagerService } from '@univerjs/docs';
+import {
+    DeviceType,
+    GlyphType,
+    NORMAL_TEXT_SELECTION_PLUGIN_STYLE,
+    PointerInput,
+    RenderUnit,
+} from '@univerjs/engine-render';
+import { DesktopLayoutService, ILayoutService } from '@univerjs/ui';
+import { Subject } from 'rxjs';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+    EMBED_INTERACTION_BOUNDARY_OWNER_ATTRIBUTE,
+    EmbedInteractionBoundaryService,
+    EmbedRuntimeFocusCoordinator,
+} from '../../doc-embed-integration.service';
+import { MobileDocSelectionRenderService } from '../../mobile/doc-selection-render.service';
+import { DocSelectionRenderService } from '../doc-selection-render.service';
+import { TextRange } from '../text-range';
+
+const {
+    cursorConvertToTextRangeMock,
+    getCanvasOffsetByEngineMock,
+    getRangeListFromCharIndexMock,
+    getRangeListFromSelectionMock,
+    getRectRangeFromCharIndexMock,
+    getTextRangeFromCharIndexMock,
+    mobileSelectionVisualsMock,
+} = vi.hoisted(() => ({
+    cursorConvertToTextRangeMock: vi.fn(),
+    getCanvasOffsetByEngineMock: vi.fn(),
+    getRangeListFromCharIndexMock: vi.fn(),
+    getRangeListFromSelectionMock: vi.fn(),
+    getRectRangeFromCharIndexMock: vi.fn(),
+    getTextRangeFromCharIndexMock: vi.fn(),
+    mobileSelectionVisualsMock: {
+        dispose: vi.fn(),
+        hide: vi.fn(),
+        show: vi.fn(),
+    },
+}));
+
+vi.mock('../../mobile/mobile-text-selection-visuals', () => ({
+    MobileTextSelectionVisuals: class {
+        dispose = mobileSelectionVisualsMock.dispose;
+        hide = mobileSelectionVisualsMock.hide;
+        show = mobileSelectionVisualsMock.show;
+    },
+}));
+
+vi.mock('../selection-utils', async () => {
+    const actual = await vi.importActual<typeof import('../selection-utils')>('../selection-utils');
+
+    return {
+        ...actual,
+        getCanvasOffsetByEngine: getCanvasOffsetByEngineMock,
+        getRangeListFromCharIndex: getRangeListFromCharIndexMock,
+        getRangeListFromSelection: getRangeListFromSelectionMock,
+        getRectRangeFromCharIndex: getRectRangeFromCharIndexMock,
+        getTextRangeFromCharIndex: getTextRangeFromCharIndexMock,
+    };
+});
+
+vi.mock('../text-range', async () => {
+    const actual = await vi.importActual<typeof import('../text-range')>('../text-range');
+
+    return {
+        ...actual,
+        cursorConvertToTextRange: cursorConvertToTextRangeMock,
+    };
+});
+
+type VoidMock = Mock<() => void>;
+type BooleanMock = Mock<() => boolean>;
+interface IFakeAnchor {
+    hide: VoidMock;
+    left: number;
+    show: VoidMock;
+    top: number;
+    visible: boolean;
+}
+
+type AnchorMock = Mock<() => IFakeAnchor | null>;
+type IntersectionMock = Mock<(range: unknown) => boolean>;
+
+interface IFakeTextRange {
+    activate: VoidMock;
+    deactivate: VoidMock;
+    dispose: VoidMock;
+    refresh: VoidMock;
+    getAnchor: AnchorMock;
+    isActive: BooleanMock;
+    isIntersection: IntersectionMock;
+    collapsed?: boolean;
+    anchorNodePosition?: Record<string, unknown> | null;
+    focusNodePosition?: Record<string, unknown> | null;
+    style?: { strokeWidth: number };
+    segmentId?: string;
+    segmentPage?: number;
+    startOffset?: number;
+    endOffset?: number;
+}
+
+interface IFakeRectRange {
+    activate: VoidMock;
+    deactivate: VoidMock;
+    dispose: VoidMock;
+    isIntersection: IntersectionMock;
+}
+
+interface IServiceHarness {
+    _anchorNodePosition?: unknown;
+    _focusNodePosition?: unknown;
+    _onPointerEvent: boolean;
+    _rangeList: IFakeTextRange[];
+    _rangeListCache: IFakeTextRange[];
+    _rectRangeList: IFakeRectRange[];
+    _rectRangeListCache: IFakeRectRange[];
+    _scenePointerMoveSubs: Array<{ unsubscribe: VoidMock }>;
+    _scenePointerUpSubs: Array<{ unsubscribe: VoidMock }>;
+    _scrollTimers: Array<{ dispose: VoidMock }>;
+    _selectionStyle: { strokeWidth: number };
+    _textSelectionInner$: { next: Mock<(...args: unknown[]) => void>; value: { isEditing: boolean } | null };
+    _contextService: { getContextValue: Mock<() => boolean> };
+    focus: Mock<() => void>;
+    _getAllTextRanges: Mock<() => string[]>;
+    _getAllRectRanges: Mock<() => string[]>;
+    _findNodeByCoord: Mock<(...args: unknown[]) => unknown>;
+    _getNodePosition: Mock<(...args: unknown[]) => unknown>;
+    _interactTextRanges(textRanges: IFakeTextRange[]): void;
+    _interactRectRanges(rectRanges: IFakeRectRange[]): void;
+    _removeAllRanges(): void;
+    _removeAllCacheRanges(): void;
+    _removeAllCollapsedTextRanges(): void;
+    _addTextRangesToCache(textRanges: IFakeTextRange[]): void;
+    _addTextRange(textRange: IFakeTextRange): void;
+    _addRectRangesToCache(rectRanges: IFakeRectRange[]): void;
+    _addRectRanges(rectRanges: IFakeRectRange[]): void;
+    _createTextRangeByAnchorPosition(position: Record<string, unknown>): void;
+    _isEmpty(): boolean;
+    _getCanvasOffset(): { left: number; top: number };
+    _moving(moveOffsetX: number, moveOffsetY: number): void;
+    _isAnotherEditorFocused: Mock<() => boolean>;
+    _updateInputPosition(): void;
+    refreshRanges(): void;
+    addDocRanges(ranges: Array<Record<string, unknown>>, isEditing?: boolean, options?: Record<string, boolean>): void;
+    cancelPointerSelection(): void;
+    replaceDocRanges(ranges: Array<Record<string, unknown>>, isEditing?: boolean, options?: Record<string, boolean>): boolean;
+    setCursorManually(evtOffsetX: number, evtOffsetY: number): void;
+}
+
+function createTextRange(overrides: Partial<IFakeTextRange> = {}): IFakeTextRange {
+    const anchor = { hide: vi.fn(), left: 12, show: vi.fn(), top: 34, visible: true };
+    return {
+        activate: vi.fn(),
+        deactivate: vi.fn(),
+        dispose: vi.fn(),
+        refresh: vi.fn(),
+        getAnchor: vi.fn(() => anchor),
+        isActive: vi.fn(() => false),
+        isIntersection: vi.fn(() => false),
+        collapsed: false,
+        anchorNodePosition: { glyph: 1 },
+        ...overrides,
+    };
+}
+
+function createRectRange(overrides: Partial<IFakeRectRange> = {}): IFakeRectRange {
+    return {
+        activate: vi.fn(),
+        deactivate: vi.fn(),
+        dispose: vi.fn(),
+        isIntersection: vi.fn(() => false),
+        ...overrides,
+    };
+}
+
+function createService() {
+    const engine = { name: 'engine', setCapture: vi.fn() };
+    const skeleton = { name: 'skeleton' };
+    const mainComponent = { name: 'doc-component' };
+    const scene = {
+        enableObjectsEvent: vi.fn(),
+        getEngine: vi.fn(() => engine),
+        getViewports: vi.fn(() => []),
+    };
+
+    const service = Object.setPrototypeOf({
+        _rangeList: [],
+        _rangeListCache: [],
+        _rectRangeList: [],
+        _rectRangeListCache: [],
+        _scenePointerMoveSubs: [],
+        _scenePointerUpSubs: [],
+        _scrollTimers: [],
+        _onPointerEvent: false,
+        _selectionStyle: { strokeWidth: 1 },
+        _mobileSelectionHandleColor: '#0f6bdc',
+        _mobileHandleDragDisposables: new DisposableCollection(),
+        _currentSegmentId: 'segment-1',
+        _currentSegmentPage: 2,
+        _context: {
+            scene,
+            mainComponent,
+            unitId: 'unit-1',
+            unit: new DocumentDataModel({ id: 'unit-1' }),
+        },
+        _container: {
+            style: {},
+        },
+        _docSkeletonManagerService: {
+            getSkeleton: vi.fn(() => skeleton),
+        },
+        _contextService: {
+            getContextValue: vi.fn(() => false),
+        },
+        _logService: {
+            error: vi.fn(),
+        },
+        _movingSelection$: new Subject(),
+        _textSelectionInner$: {
+            next: vi.fn(),
+            value: { isEditing: false },
+        },
+        _getAllTextRanges: vi.fn(() => ['serialized-text']),
+        _getAllRectRanges: vi.fn(() => ['serialized-rect']),
+        _findNodeByCoord: vi.fn(),
+        _getNodePosition: vi.fn(),
+        _isAnotherEditorFocused: vi.fn(() => false),
+        focus: vi.fn(),
+    }, DocSelectionRenderService.prototype) as IServiceHarness;
+
+    return {
+        engine,
+        mainComponent,
+        scene,
+        service,
+        skeleton,
+    };
+}
+
+class TestLayoutService {
+    static root: HTMLDivElement;
+    static registeredElements: HTMLElement[] = [];
+
+    static reset() {
+        this.root = document.createElement('div');
+        document.body.appendChild(this.root);
+        this.registeredElements = [];
+    }
+
+    get rootContainerElement() {
+        return TestLayoutService.root;
+    }
+
+    registerContainerElement(element: HTMLElement): IDisposable {
+        TestLayoutService.registeredElements.push(element);
+
+        return {
+            dispose: () => {
+                const nextElements: HTMLElement[] = [];
+                for (const current of TestLayoutService.registeredElements) {
+                    if (current !== element) {
+                        nextElements.push(current);
+                    }
+                }
+                TestLayoutService.registeredElements = nextElements;
+            },
+        };
+    }
+}
+
+class TestDocSkeletonManagerService {
+    static skeleton: {
+        getLayoutProgress: () => null;
+        findPositionByGlyph: () => unknown;
+        findNodeByCoord: () => unknown;
+    } = {
+        getLayoutProgress: () => null,
+        findPositionByGlyph: () => null,
+        findNodeByCoord: () => null,
+    };
+
+    static reset() {
+        this.skeleton = {
+            getLayoutProgress: () => null,
+            findPositionByGlyph: () => null,
+            findNodeByCoord: () => null,
+        };
+    }
+
+    getSkeleton() {
+        return TestDocSkeletonManagerService.skeleton;
+    }
+}
+
+class TestRenderEvent<T> {
+    private readonly _listeners: Array<(param: T) => void> = [];
+
+    subscribeEvent(listener: (param: T) => void) {
+        this._listeners.push(listener);
+
+        return {
+            unsubscribe: () => {
+                const nextListeners: Array<(param: T) => void> = [];
+                for (const current of this._listeners) {
+                    if (current !== listener) {
+                        nextListeners.push(current);
+                    }
+                }
+                this._listeners.length = 0;
+                this._listeners.push(...nextListeners);
+            },
+        };
+    }
+
+    emit(param: T) {
+        for (const listener of this._listeners) {
+            listener(param);
+        }
+    }
+}
+
+function createRealSelectionRenderService(options: {
+    documentData?: IDocumentData;
+    embedInteractionBoundaryService?: Partial<EmbedInteractionBoundaryService>;
+    embedRuntimeFocusCoordinator?: EmbedRuntimeFocusCoordinator;
+    layoutMounted?: boolean;
+    mainComponent?: unknown;
+    mobile?: boolean;
+    scene?: unknown;
+    unitId?: string;
+} = {}) {
+    TestLayoutService.reset();
+    if (options.layoutMounted === false) {
+        TestLayoutService.root.remove();
+    }
+    TestDocSkeletonManagerService.reset();
+    const univer = new Univer();
+    const injector = univer.__getInjector();
+    injector.add([DocSelectionManagerService]);
+    injector.add([ILayoutService, { useClass: TestLayoutService as never }]);
+    if (options.embedInteractionBoundaryService) {
+        injector.add([EmbedInteractionBoundaryService, { useValue: options.embedInteractionBoundaryService as never }]);
+    }
+    if (options.embedRuntimeFocusCoordinator) {
+        injector.add([EmbedRuntimeFocusCoordinator, { useValue: options.embedRuntimeFocusCoordinator }]);
+    }
+    const documentData: IDocumentData = options.documentData ?? {
+        id: options.unitId ?? 'selection-render-doc',
+        body: {
+            dataStream: 'Hello\r\n',
+            paragraphs: [{ paragraphId: 'para_docs_ui_selection_fixture_1', startIndex: 5 }],
+            sectionBreaks: [],
+        },
+        documentStyle: {},
+    };
+    const doc = univer.createUnit(UniverInstanceType.UNIVER_DOC, documentData);
+    const renderUnit = injector.createInstance(RenderUnit, {
+        engine: { name: 'engine' } as never,
+        scene: (options.scene ?? {
+            getViewports: () => [],
+            getEngine: () => null,
+        }) as never,
+        isMainScene: true,
+        unit: doc,
+    });
+    if (options.mainComponent) {
+        renderUnit.mainComponent = options.mainComponent as never;
+    }
+    renderUnit.addRenderDependencies([
+        [DocSkeletonManagerService, { useClass: TestDocSkeletonManagerService as never }],
+        [DocSelectionRenderService, { useClass: options.mobile ? MobileDocSelectionRenderService : DocSelectionRenderService }],
+    ] as never);
+
+    return {
+        input: document.getElementById(`__editor_${documentData.id}`) as HTMLDivElement,
+        renderUnit,
+        service: renderUnit.with(DocSelectionRenderService),
+        univer,
+    };
+}
+
+describe('doc selection render service internals', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        getCanvasOffsetByEngineMock.mockReturnValue({ left: 8, top: 16 });
+        getRangeListFromCharIndexMock.mockReturnValue(null);
+        getRangeListFromSelectionMock.mockReturnValue(null);
+        getRectRangeFromCharIndexMock.mockReturnValue(null);
+        getTextRangeFromCharIndexMock.mockReturnValue(null);
+        cursorConvertToTextRangeMock.mockReturnValue(null);
+        vi.spyOn(TextRange.prototype as unknown as Record<'_anchorBlink', () => void>, '_anchorBlink').mockImplementation(() => {});
+        vi.spyOn(TextRange.prototype, 'refresh').mockImplementation(() => {});
+    });
+
+    it('drops intersecting text and rect ranges while keeping unrelated ones', () => {
+        const { service } = createService();
+        const overlappedText = createTextRange();
+        const preservedText = createTextRange();
+        const nextText = createTextRange();
+        const overlappedRect = createRectRange();
+        const preservedRect = createRectRange();
+        const nextRect = createRectRange();
+
+        nextText.isIntersection.mockImplementation((range) => range === overlappedText);
+        nextRect.isIntersection.mockImplementation((range) => range === overlappedRect);
+
+        service._rangeList = [overlappedText, preservedText];
+        service._rectRangeList = [overlappedRect, preservedRect];
+
+        service._interactTextRanges([nextText]);
+        service._interactRectRanges([nextRect]);
+
+        expect(overlappedText.dispose).toHaveBeenCalledTimes(1);
+        expect(preservedText.dispose).not.toHaveBeenCalled();
+        expect(service._rangeList).toEqual([preservedText]);
+        expect(overlappedRect.dispose).toHaveBeenCalledTimes(1);
+        expect(preservedRect.dispose).not.toHaveBeenCalled();
+        expect(service._rectRangeList).toEqual([preservedRect]);
+    });
+
+    it('adds cache and active ranges, then clears them through shared cleanup', () => {
+        const { service } = createService();
+        const currentText = createTextRange();
+        const currentRect = createRectRange();
+        const cachedText = createTextRange();
+        const cachedRect = createRectRange();
+        const appendedText = createTextRange();
+        const appendedRect = createRectRange();
+        const appendedRectLast = createRectRange();
+
+        service._rangeList = [currentText];
+        service._rectRangeList = [currentRect];
+
+        expect(service._isEmpty()).toBe(false);
+
+        service._addTextRangesToCache([cachedText]);
+        service._addRectRangesToCache([cachedRect]);
+        service._addTextRange(appendedText);
+        service._addRectRanges([appendedRect, appendedRectLast]);
+
+        expect(currentText.deactivate).toHaveBeenCalledTimes(1);
+        expect(appendedText.activate).toHaveBeenCalledTimes(1);
+        expect(currentRect.deactivate).toHaveBeenCalledTimes(1);
+        expect(appendedRect.activate).not.toHaveBeenCalled();
+        expect(appendedRectLast.activate).toHaveBeenCalledTimes(1);
+        expect(service._rangeListCache).toEqual([cachedText]);
+        expect(service._rectRangeListCache).toEqual([cachedRect]);
+        expect(service._rangeList).toEqual([currentText, appendedText]);
+        expect(service._rectRangeList).toEqual([currentRect, appendedRect, appendedRectLast]);
+
+        service._removeAllCacheRanges();
+
+        expect(cachedText.dispose).toHaveBeenCalledTimes(1);
+        expect(cachedRect.dispose).toHaveBeenCalledTimes(1);
+        expect(service._rangeListCache).toEqual([]);
+        expect(service._rectRangeListCache).toEqual([]);
+
+        service._removeAllRanges();
+
+        expect(currentText.dispose).toHaveBeenCalledTimes(1);
+        expect(appendedText.dispose).toHaveBeenCalledTimes(1);
+        expect(currentRect.dispose).toHaveBeenCalledTimes(1);
+        expect(appendedRect.dispose).toHaveBeenCalledTimes(1);
+        expect(appendedRectLast.dispose).toHaveBeenCalledTimes(1);
+        expect(service._rangeList).toEqual([]);
+        expect(service._rectRangeList).toEqual([]);
+        expect(service._isEmpty()).toBe(true);
+    });
+
+    it('removes only collapsed text ranges and focuses when input anchor is unavailable', () => {
+        const { service } = createService();
+        const collapsedRange = createTextRange({
+            collapsed: true,
+            getAnchor: vi.fn(() => null),
+            isActive: vi.fn(() => true),
+        });
+        const expandedRange = createTextRange({ collapsed: false });
+
+        service._rangeList = [collapsedRange, expandedRange];
+
+        service._removeAllCollapsedTextRanges();
+        service._updateInputPosition();
+
+        expect(collapsedRange.dispose).toHaveBeenCalledTimes(1);
+        expect(expandedRange.dispose).not.toHaveBeenCalled();
+        expect(service._rangeList).toEqual([expandedRange]);
+        expect(service.focus).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not steal focus from another editor when input anchor is unavailable', () => {
+        const { service } = createService();
+        service._isAnotherEditorFocused.mockReturnValue(true);
+        service._rangeList = [createTextRange({
+            getAnchor: vi.fn(() => null),
+            isActive: vi.fn(() => true),
+        })];
+
+        service._updateInputPosition();
+
+        expect(service.focus).not.toHaveBeenCalled();
+    });
+
+    it('creates a text range from anchor position with current skeleton and segment context', () => {
+        const { service } = createService();
+        const oldText = createTextRange();
+        const oldRect = createRectRange();
+        const position = { glyph: 9, line: 3 };
+
+        service._rangeList = [oldText];
+        service._rectRangeList = [oldRect];
+
+        service._createTextRangeByAnchorPosition(position);
+
+        expect(oldText.dispose).toHaveBeenCalledTimes(1);
+        expect(oldRect.dispose).toHaveBeenCalledTimes(1);
+        expect(service._rangeList[0]).toBeInstanceOf(TextRange);
+        expect(service._rangeList[0].anchorNodePosition).toEqual(position);
+        expect(service._rangeList[0].focusNodePosition).toBeUndefined();
+        expect(service._rangeList[0].style).toBe(service._selectionStyle);
+        expect(service._rangeList[0].segmentId).toBe('segment-1');
+        expect(service._rangeList[0].segmentPage).toBe(2);
+        expect(service._rangeList).toHaveLength(1);
+        expect(service._rangeList[0].isActive()).toBe(true);
+    });
+
+    it('adds document ranges across rect, text, and fallback branches without focusing', () => {
+        const { mainComponent, scene, service, skeleton } = createService();
+        const rectRange = createRectRange();
+        const textRange = createTextRange();
+        const fallbackTextRange = createTextRange();
+        const fallbackRectRange = createRectRange();
+        const generalTextRange = createTextRange();
+        const generalRectRange = createRectRange();
+        const updateInputPositionSpy = vi.fn();
+
+        service._updateInputPosition = updateInputPositionSpy;
+
+        getRectRangeFromCharIndexMock.mockReturnValueOnce(rectRange);
+        getTextRangeFromCharIndexMock
+            .mockReturnValueOnce(textRange)
+            .mockImplementationOnce(() => {
+                throw new Error('split across pages');
+            });
+        getRangeListFromCharIndexMock
+            .mockReturnValueOnce({
+                textRanges: [fallbackTextRange],
+                rectRanges: [fallbackRectRange],
+            })
+            .mockReturnValueOnce({
+                textRanges: [generalTextRange],
+                rectRanges: [generalRectRange],
+            });
+
+        service.addDocRanges([
+            { startOffset: 10, endOffset: 14, rangeType: DOC_RANGE_TYPE.RECT },
+            {
+                startOffset: 21,
+                endOffset: 25,
+                rangeType: DOC_RANGE_TYPE.TEXT,
+                startNodePosition: { isBack: false },
+                endNodePosition: { isBack: true },
+            },
+            { startOffset: 31, endOffset: 35, rangeType: DOC_RANGE_TYPE.TEXT },
+            { startOffset: 41, endOffset: 44, rangeType: 'other' },
+        ], false, {
+            fromToolbar: true,
+            shouldFocus: false,
+        });
+
+        expect(getRectRangeFromCharIndexMock).toHaveBeenCalledWith(
+            10,
+            14,
+            scene,
+            mainComponent,
+            skeleton,
+            service._selectionStyle,
+            'segment-1',
+            2
+        );
+        expect(getTextRangeFromCharIndexMock).toHaveBeenNthCalledWith(
+            1,
+            20,
+            25,
+            scene,
+            mainComponent,
+            skeleton,
+            service._selectionStyle,
+            'segment-1',
+            2,
+            false,
+            true
+        );
+        expect(getTextRangeFromCharIndexMock).toHaveBeenNthCalledWith(
+            2,
+            31,
+            35,
+            scene,
+            mainComponent,
+            skeleton,
+            service._selectionStyle,
+            'segment-1',
+            2
+        );
+        expect(getRangeListFromCharIndexMock).toHaveBeenNthCalledWith(
+            1,
+            31,
+            35,
+            scene,
+            mainComponent,
+            skeleton,
+            service._selectionStyle,
+            'segment-1',
+            2
+        );
+        expect(getRangeListFromCharIndexMock).toHaveBeenNthCalledWith(
+            2,
+            41,
+            44,
+            scene,
+            mainComponent,
+            skeleton,
+            service._selectionStyle,
+            'segment-1',
+            2
+        );
+        expect(service._textSelectionInner$.next).toHaveBeenCalledWith({
+            textRanges: ['serialized-text'],
+            rectRanges: ['serialized-rect'],
+            segmentId: 'segment-1',
+            segmentPage: 2,
+            style: service._selectionStyle,
+            isEditing: false,
+            options: {
+                fromToolbar: true,
+                shouldFocus: false,
+            },
+        });
+        expect(updateInputPositionSpy).not.toHaveBeenCalled();
+        expect(service._rangeList).toEqual([textRange, fallbackTextRange, generalTextRange]);
+        expect(service._rectRangeList).toEqual([rectRange, fallbackRectRange, generalRectRange]);
+    });
+
+    it('uses a range-specific selection style when one is supplied', () => {
+        const { mainComponent, scene, service, skeleton } = createService();
+        const customStyle = {
+            fill: 'rgba(0, 0, 0, 0)',
+            stroke: 'rgba(0, 0, 0, 0)',
+            strokeActive: 'rgba(0, 0, 0, 0)',
+            strokeWidth: 0,
+        };
+        getRangeListFromCharIndexMock.mockReturnValueOnce({
+            textRanges: [createTextRange()],
+            rectRanges: [],
+        });
+
+        service.addDocRanges([{
+            startOffset: 10,
+            endOffset: 11,
+            style: customStyle,
+        }], false, {
+            shouldFocus: false,
+        });
+
+        expect(getRangeListFromCharIndexMock).toHaveBeenCalledWith(
+            10,
+            11,
+            scene,
+            mainComponent,
+            skeleton,
+            customStyle,
+            'segment-1',
+            2
+        );
+    });
+
+    it('reconstructs a collapsed document range as a cursor instead of an expanded whole-entity selection', () => {
+        const { mainComponent, scene, service, skeleton } = createService();
+        const cursorRange = createTextRange({ collapsed: true, focusNodePosition: null });
+        const customStyle = {
+            fill: 'rgba(0, 0, 0, 0)',
+            stroke: 'rgba(0, 0, 0, 0)',
+            strokeActive: 'rgba(0, 0, 0, 0)',
+            strokeWidth: 0,
+        };
+        cursorConvertToTextRangeMock.mockReturnValueOnce(cursorRange);
+
+        service.addDocRanges([{
+            startOffset: 35,
+            endOffset: 35,
+            collapsed: true,
+            style: customStyle,
+        }], true, {
+            shouldFocus: false,
+        });
+
+        expect(cursorConvertToTextRangeMock).toHaveBeenCalledWith(
+            scene,
+            {
+                startOffset: 35,
+                endOffset: 35,
+                collapsed: true,
+                segmentId: 'segment-1',
+                segmentPage: 2,
+                style: customStyle,
+            },
+            skeleton,
+            mainComponent
+        );
+        expect(getTextRangeFromCharIndexMock).not.toHaveBeenCalled();
+        expect(getRangeListFromCharIndexMock).not.toHaveBeenCalled();
+        expect(service._rangeList).toEqual([cursorRange]);
+    });
+
+    it('keeps the rendered caret when its replacement page is not resolved yet', ({ onTestFinished }) => {
+        const univer = new Univer();
+        const injector = univer.__getInjector();
+        injector.add([DocSelectionManagerService]);
+        injector.add([DocLayoutExecutorService]);
+        injector.add([ILayoutService, { useClass: DesktopLayoutService }]);
+        const doc = univer.createUnit(UniverInstanceType.UNIVER_DOC, {
+            id: 'unresolved-caret',
+            body: { dataStream: 'Caret\r\n', paragraphs: [{ paragraphId: 'p', startIndex: 5 }] },
+        });
+        const render = injector.createInstance(RenderUnit, {
+            engine: {} as never,
+            scene: { getViewports: () => [], getEngine: () => null, enableObjectsEvent: () => {} } as never,
+            isMainScene: true,
+            unit: doc,
+        });
+        render.addRenderDependencies([[DocSkeletonManagerService], [DocSelectionRenderService]]);
+        onTestFinished(() => {
+            render.dispose();
+            univer.dispose();
+        });
+        const subject = render.with(DocSelectionRenderService);
+        const service = subject as unknown as IServiceHarness;
+        const publish = vi.spyOn(service._textSelectionInner$, 'next');
+        const currentCaret = createTextRange({
+            collapsed: true,
+            startOffset: 34,
+            endOffset: 34,
+        });
+        const unresolvedCaret = createTextRange({
+            collapsed: true,
+        });
+        service._rangeList = [currentCaret];
+        cursorConvertToTextRangeMock.mockReturnValueOnce(unresolvedCaret);
+
+        const replaced = service.replaceDocRanges([{
+            startOffset: 35,
+            endOffset: 35,
+            collapsed: true,
+        }], true);
+
+        expect(replaced).toBe(false);
+        expect(service._rangeList).toEqual([currentCaret]);
+        expect(currentCaret.dispose).not.toHaveBeenCalled();
+        expect(unresolvedCaret.dispose).toHaveBeenCalledTimes(1);
+        expect(publish).not.toHaveBeenCalled();
+    });
+
+    it('deactivates structural carets when document ranges contain a visible selection', () => {
+        const { service } = createService();
+        const leadingCaret = createTextRange({ collapsed: true });
+        const expandedRange = createTextRange({ collapsed: false });
+        const trailingCaret = createTextRange({ collapsed: true });
+
+        cursorConvertToTextRangeMock
+            .mockReturnValueOnce(leadingCaret)
+            .mockReturnValueOnce(trailingCaret);
+        getTextRangeFromCharIndexMock.mockReturnValueOnce(expandedRange);
+
+        service.addDocRanges([
+            { startOffset: 2, endOffset: 2, rangeType: DOC_RANGE_TYPE.TEXT },
+            { startOffset: 4, endOffset: 8, rangeType: DOC_RANGE_TYPE.TEXT },
+            { startOffset: 10, endOffset: 10, rangeType: DOC_RANGE_TYPE.TEXT },
+        ], false, { shouldFocus: false });
+
+        expect(leadingCaret.deactivate).toHaveBeenCalled();
+        expect(trailingCaret.deactivate).toHaveBeenCalled();
+        expect(expandedRange.activate).toHaveBeenCalledTimes(2);
+        expect(service._rangeList).toEqual([leadingCaret, expandedRange, trailingCaret]);
+    });
+
+    it('sets the cursor manually from the resolved paragraph node and emits selection state', () => {
+        const { service } = createService();
+        const position = { glyph: 3 };
+        const createTextRangeByAnchorPositionSpy = vi.fn();
+
+        service._createTextRangeByAnchorPosition = createTextRangeByAnchorPositionSpy;
+        service._findNodeByCoord.mockReturnValue({
+            node: {
+                streamType: DataStreamTreeTokenType.PARAGRAPH,
+            },
+        });
+        service._getNodePosition.mockReturnValue(position);
+
+        service.setCursorManually(12, 24);
+
+        expect(service._findNodeByCoord).toHaveBeenCalledWith(12, 24, {
+            strict: true,
+            segmentId: 'segment-1',
+            segmentPage: 2,
+        });
+        expect(position).toEqual({ glyph: 3, isBack: true });
+        expect(createTextRangeByAnchorPositionSpy).toHaveBeenCalledWith(position);
+        expect(service._textSelectionInner$.next).toHaveBeenCalledWith({
+            textRanges: ['serialized-text'],
+            rectRanges: ['serialized-rect'],
+            segmentId: 'segment-1',
+            segmentPage: 2,
+            style: service._selectionStyle,
+            isEditing: false,
+        });
+    });
+
+    it('snaps reverse drag focus to the start of the first glyph so the first character remains selectable', () => {
+        const { engine, mainComponent, scene, service, skeleton } = createService();
+        const firstGlyph: {
+            content: string;
+            count: number;
+            glyphType: GlyphType;
+            parent?: unknown;
+        } = {
+            content: 'D',
+            count: 1,
+            glyphType: GlyphType.WORD,
+        };
+        const secondGlyph: {
+            content: string;
+            count: number;
+            glyphType: GlyphType;
+            parent?: unknown;
+        } = {
+            content: 'o',
+            count: 1,
+            glyphType: GlyphType.WORD,
+        };
+        const divide = {
+            glyphGroup: [firstGlyph, secondGlyph],
+        };
+        firstGlyph.parent = divide;
+        secondGlyph.parent = divide;
+
+        const anchorPosition = {
+            page: 0,
+            section: 0,
+            column: 0,
+            line: 1,
+            divide: 0,
+            glyph: 4,
+            isBack: false,
+        };
+        const focusPosition = {
+            page: 0,
+            section: 0,
+            column: 0,
+            line: 0,
+            divide: 0,
+            glyph: 0,
+            isBack: false,
+        };
+        const textRange = createTextRange({ collapsed: false });
+
+        service._anchorNodePosition = anchorPosition;
+        service._findNodeByCoord.mockReturnValue({ node: firstGlyph });
+        service._getNodePosition.mockReturnValue(focusPosition);
+        getRangeListFromSelectionMock.mockReturnValue({
+            textRanges: [textRange],
+            rectRanges: [],
+        });
+
+        service._moving(120, 80);
+
+        expect(focusPosition.isBack).toBe(true);
+        expect(getRangeListFromSelectionMock).toHaveBeenCalledWith(
+            anchorPosition,
+            expect.objectContaining({
+                glyph: 0,
+                isBack: true,
+            }),
+            scene,
+            mainComponent,
+            skeleton,
+            service._selectionStyle,
+            'segment-1',
+            2
+        );
+        expect(service._rangeListCache).toEqual([textRange]);
+        expect(engine.setCapture).toHaveBeenCalledTimes(1);
+    });
+
+    it('disposes collapsed transient ranges while moving so they do not leak as extra cursors', () => {
+        const { engine, service } = createService();
+        const glyph = {
+            content: 'D',
+            count: 1,
+            glyphType: GlyphType.WORD,
+            parent: {
+                glyphGroup: [] as unknown[],
+            },
+        };
+        glyph.parent.glyphGroup = [glyph];
+        const anchorPosition = {
+            page: 0,
+            section: 0,
+            column: 0,
+            line: 0,
+            divide: 0,
+            glyph: 0,
+            isBack: true,
+        };
+        const focusPosition = { ...anchorPosition };
+        const collapsedTextRange = createTextRange({ collapsed: true });
+
+        service._anchorNodePosition = anchorPosition;
+        service._findNodeByCoord.mockReturnValue({ node: glyph });
+        service._getNodePosition.mockReturnValue(focusPosition);
+        getRangeListFromSelectionMock.mockReturnValue({
+            textRanges: [collapsedTextRange],
+            rectRanges: [],
+        });
+
+        service._moving(120, 80);
+
+        expect(collapsedTextRange.dispose).toHaveBeenCalledTimes(1);
+        expect(service._focusNodePosition).toBeUndefined();
+        expect(service._rangeListCache).toEqual([]);
+        expect(engine.setCapture).not.toHaveBeenCalled();
+    });
+
+    it('reads canvas offsets from the current engine', () => {
+        const { engine, service } = createService();
+
+        expect(service._getCanvasOffset()).toEqual({ left: 8, top: 16 });
+        expect(getCanvasOffsetByEngineMock).toHaveBeenCalledWith(engine);
+    });
+});
+
+describe('DocSelectionRenderService', () => {
+    it.each(['', 'note', 'header', 'footer'])('uses the logical caret in segment "%s" while replacement layout is pending', (segmentId) => {
+        const univer = new Univer();
+        const injector = univer.__getInjector();
+        injector.add([DocSelectionManagerService]);
+        injector.add([DocLayoutExecutorService]);
+        injector.add([ILayoutService, { useClass: DesktopLayoutService }]);
+        const doc = univer.createUnit(UniverInstanceType.UNIVER_DOC, {
+            id: 'pending-input',
+            headers: { header: { headerId: 'header', body: { dataStream: 'Header\r\n', paragraphs: [{ paragraphId: 'hp', startIndex: 6 }] } } },
+            footers: { footer: { footerId: 'footer', body: { dataStream: 'Footer\r\n', paragraphs: [{ paragraphId: 'fp', startIndex: 6 }] } } },
+            documentStyle: { documentFlavor: DocumentFlavor.TRADITIONAL },
+            body: { dataStream: 'Body\r\n', paragraphs: [{ paragraphId: 'p', startIndex: 4 }] },
+            notes: { note: { type: 'footnote' as const, noteId: 'note', body: {
+                dataStream: 'Note\r\n',
+                paragraphs: [{ paragraphId: 'np', startIndex: 4 }],
+            } } },
+        });
+        const render = injector.createInstance(RenderUnit, {
+            engine: {} as never,
+            scene: { getViewports: () => [], getEngine: () => null, enableObjectsEvent: () => {} } as never,
+            isMainScene: true,
+            unit: doc,
+        });
+        render.addRenderDependencies([[DocSkeletonManagerService], [DocSelectionRenderService]]);
+        try {
+            const service = render.with(DocSelectionRenderService);
+            service.setSegment(segmentId);
+            render.with(DocSkeletonManagerService).getSkeleton().beginExternalLayout({ reason: 'edit' });
+            const manager = injector.get(DocSelectionManagerService);
+            manager.__TEST_ONLY_setCurrentSelection({ unitId: 'pending-input', subUnitId: 'pending-input' });
+            manager.replaceSelectionInfoWithoutRefresh({
+                textRanges: [{ startOffset: 3, endOffset: 3, collapsed: true, isActive: true, segmentId }],
+                rectRanges: [],
+                segmentId,
+                segmentPage: -1,
+                isEditing: true,
+                style: NORMAL_TEXT_SELECTION_PLUGIN_STYLE,
+            });
+            expect(service.replaceDocRanges(manager.getSelectionInfo()!.textRanges)).toBe(false);
+            expect(service.hasPendingSelection).toBe(true);
+            const received: Array<ITextRangeParam | null> = [];
+            const subscription = service.onInput$.subscribe((event) => received.push(event.activeRange ?? null));
+            try {
+                const input = document.getElementById('__editor_pending-input')!;
+                input.textContent = 'X';
+                input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: 'X' }));
+                expect(received).toEqual([expect.objectContaining({ startOffset: 3, endOffset: 3, segmentId })]);
+            } finally {
+                subscription.unsubscribe();
+            }
+        } finally {
+            render.dispose();
+            univer.dispose();
+        }
+    });
+
+    it('cancels an active pointer selection and disposes its cached ranges', () => {
+        const { scene, service } = createService();
+        const liveTextRange = createTextRange();
+        const liveRectRange = createRectRange();
+        const cachedTextRange = createTextRange();
+        const cachedRectRange = createRectRange();
+        const moveSubscription = { unsubscribe: vi.fn() };
+        const upSubscription = { unsubscribe: vi.fn() };
+        const scrollTimer = { dispose: vi.fn() };
+        service._anchorNodePosition = { row: 0 };
+        service._focusNodePosition = { row: 1 };
+        service._onPointerEvent = true;
+        service._rangeList = [liveTextRange];
+        service._rectRangeList = [liveRectRange];
+        service._rangeListCache = [cachedTextRange];
+        service._rectRangeListCache = [cachedRectRange];
+        service._scenePointerMoveSubs = [moveSubscription];
+        service._scenePointerUpSubs = [upSubscription];
+        service._scrollTimers = [scrollTimer];
+
+        service.cancelPointerSelection();
+
+        expect(moveSubscription.unsubscribe).toHaveBeenCalledOnce();
+        expect(upSubscription.unsubscribe).toHaveBeenCalledOnce();
+        expect(liveTextRange.dispose).toHaveBeenCalledOnce();
+        expect(liveRectRange.dispose).toHaveBeenCalledOnce();
+        expect(cachedTextRange.dispose).toHaveBeenCalledOnce();
+        expect(cachedRectRange.dispose).toHaveBeenCalledOnce();
+        expect(scrollTimer.dispose).toHaveBeenCalledOnce();
+        expect(scene.enableObjectsEvent).toHaveBeenCalledOnce();
+        expect(service._anchorNodePosition).toBeNull();
+        expect(service._focusNodePosition).toBeNull();
+        expect(service._onPointerEvent).toBe(false);
+        expect(service._rangeList).toEqual([]);
+        expect(service._rectRangeList).toEqual([]);
+        expect(service._rangeListCache).toEqual([]);
+        expect(service._rectRangeListCache).toEqual([]);
+        expect(service._scenePointerMoveSubs).toEqual([]);
+        expect(service._scenePointerUpSubs).toEqual([]);
+        expect(service._scrollTimers).toEqual([]);
+    });
+
+    let cleanup: Array<() => void> = [];
+
+    beforeEach(() => {
+        vi.clearAllMocks();
+        getCanvasOffsetByEngineMock.mockReturnValue({ left: 0, top: 0 });
+        getRangeListFromCharIndexMock.mockReturnValue(null);
+        getRangeListFromSelectionMock.mockReturnValue(null);
+        getRectRangeFromCharIndexMock.mockReturnValue(null);
+        getTextRangeFromCharIndexMock.mockReturnValue(null);
+    });
+
+    afterEach(() => {
+        for (const dispose of cleanup) {
+            dispose();
+        }
+        cleanup = [];
+        document.body.innerHTML = '';
+    });
+
+    it.each(['pointer', 'manual', 'double', 'triple'] as const)('clears a deferred input position when %s placement cannot resolve a caret', (placement) => {
+        const { input, renderUnit, service, univer } = createRealSelectionRenderService({
+            mainComponent: { getOffsetConfig: () => ({}) },
+        });
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        const manager = univer.__getInjector().get(DocSelectionManagerService);
+        manager.__TEST_ONLY_add([{ startOffset: 2, endOffset: 2, collapsed: true, isActive: true }]);
+        const selection = manager.getSelectionInfo()!;
+        const state = service as unknown as { _pendingSelection: typeof selection };
+        state._pendingSelection = selection;
+        const received: Array<number | null> = [];
+        const inputSubscription = service.onInput$.subscribe((event) => received.push(event.activeRange?.startOffset ?? null));
+        const selectionSubscription = service.textSelectionInner$.subscribe((next) => {
+            if (next != null) {
+                manager.replaceSelectionInfoWithoutRefresh(next);
+            }
+        });
+        cleanup.push(() => inputSubscription.unsubscribe(), () => selectionSubscription.unsubscribe());
+        service.focus();
+
+        input.textContent = 'A';
+        input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: 'A' }));
+        expect(received[0]).toBe(2);
+
+        const event = { offsetX: 10, offsetY: 10, button: 0 } as never;
+        if (placement === 'manual') {
+            service.setCursorManually(10, 10);
+        } else if (placement === 'double') {
+            service.__handleDblClick(event);
+        } else if (placement === 'triple') {
+            service.__handleTripleClick(event);
+        } else {
+            service.__onPointDown(event);
+        }
+        input.textContent = 'B';
+        input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: 'B' }));
+
+        expect(received[1]).toBeNull();
+        expect(manager.getTextRanges()).toEqual([]);
+        expect(service.getAllTextRanges()).toEqual([]);
+        expect(document.activeElement).not.toBe(input);
+    });
+
+    it('keeps the editable input inside the Univer layout root and registers it as an app container', () => {
+        const { renderUnit, service, univer } = createRealSelectionRenderService();
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+
+        const container = document.getElementById('univer-doc-selection-container-selection-render-doc');
+
+        expect(container?.parentElement).toBe(TestLayoutService.root);
+        expect(TestLayoutService.registeredElements).toEqual([container]);
+
+        service.dispose();
+
+        expect(document.getElementById('univer-doc-selection-container-selection-render-doc')).toBeNull();
+        expect(TestLayoutService.registeredElements).toEqual([]);
+    });
+
+    it('focuses the editable input without scrolling the host page', () => {
+        const { input, renderUnit, service, univer } = createRealSelectionRenderService();
+        let hostPageScrolled = false;
+        const focusMock = vi.spyOn(input, 'focus').mockImplementation((options) => {
+            hostPageScrolled = options?.preventScroll !== true;
+        });
+        cleanup.push(() => focusMock.mockRestore(), () => renderUnit.dispose(), () => univer.dispose());
+
+        service.focus();
+
+        expect(hostPageScrolled).toBe(false);
+    });
+
+    it.each([DOCS_NORMAL_EDITOR_UNIT_ID_KEY, DOCS_FORMULA_BAR_EDITOR_UNIT_ID_KEY])(
+        'avoids redundant native focus for mobile sheet editor %s while allowing refocus',
+        (unitId) => {
+            const { input, renderUnit, service, univer } = createRealSelectionRenderService({ unitId, mobile: true });
+            const focusSpy = vi.spyOn(input, 'focus');
+            cleanup.push(() => focusSpy.mockRestore(), () => renderUnit.dispose(), () => univer.dispose());
+
+            service.focus();
+            service.focus();
+
+            expect(document.activeElement).toBe(input);
+            expect(focusSpy).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+
+            service.blur();
+            service.focus();
+
+            expect(document.activeElement).toBe(input);
+            expect(focusSpy).toHaveBeenCalledTimes(2);
+
+            const otherInput = document.createElement('input');
+            document.body.appendChild(otherInput);
+            otherInput.focus();
+            service.focus();
+
+            expect(document.activeElement).toBe(input);
+            expect(focusSpy).toHaveBeenCalledTimes(3);
+        }
+    );
+
+    it.each([
+        { unitId: DOCS_NORMAL_EDITOR_UNIT_ID_KEY, mobile: false },
+        { unitId: DOCS_FORMULA_BAR_EDITOR_UNIT_ID_KEY, mobile: false },
+        { unitId: 'selection-render-doc', mobile: true },
+    ])('preserves native focus behavior outside mobile sheet editors: %s', (options) => {
+        const { input, renderUnit, service, univer } = createRealSelectionRenderService(options);
+        const focusSpy = vi.spyOn(input, 'focus');
+        cleanup.push(() => focusSpy.mockRestore(), () => renderUnit.dispose(), () => univer.dispose());
+
+        service.focus();
+        service.focus();
+
+        expect(document.activeElement).toBe(input);
+        expect(focusSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it.each(['focus', 'sync'] as const)('keeps %s inside a modal after its layout mounts late', (action) => {
+        const { input, renderUnit, service, univer } = createRealSelectionRenderService({ layoutMounted: false });
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        expect(service.selectionContainer.parentElement).toBe(document.body);
+
+        const dialog = document.createElement('div');
+        dialog.setAttribute('role', 'dialog');
+        dialog.appendChild(TestLayoutService.root);
+        document.body.appendChild(dialog);
+
+        service[action]();
+
+        expect(document.activeElement).toBe(input);
+        expect(dialog.contains(document.activeElement)).toBe(true);
+    });
+
+    it('does not steal focus back from an embedded runtime during selection sync', () => {
+        const embedCanvas = document.createElement('canvas');
+        embedCanvas.tabIndex = 0;
+        document.body.appendChild(embedCanvas);
+        const focusCoordinator = new EmbedRuntimeFocusCoordinator();
+        const embedInteractionBoundaryService = {
+            contains: vi.fn((_embedId: string | undefined, target: EventTarget | null | undefined) => target === embedCanvas),
+            hasRecentInteraction: vi.fn(() => false),
+            hasRecentInteractionFor: vi.fn(() => false),
+        };
+        const { input, renderUnit, service, univer } = createRealSelectionRenderService({
+            embedInteractionBoundaryService,
+            embedRuntimeFocusCoordinator: focusCoordinator,
+        });
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+
+        embedCanvas.focus();
+        const lease = focusCoordinator.acquireLease({
+            embedId: 'embed-1',
+            role: 'child-session',
+            owner: 'stage2-runtime',
+            hostUnitId: 'selection-render-doc',
+        });
+        cleanup.push(() => lease.dispose());
+
+        service.sync();
+
+        expect(document.activeElement).toBe(embedCanvas);
+        expect(document.activeElement).not.toBe(input);
+        expect(embedInteractionBoundaryService.contains).not.toHaveBeenCalledWith(undefined, embedCanvas);
+    });
+
+    it('keeps normal host document selection focus when an unrelated embed boundary exists', () => {
+        const embedCanvas = document.createElement('canvas');
+        embedCanvas.tabIndex = 0;
+        document.body.appendChild(embedCanvas);
+        const embedInteractionBoundaryService = {
+            contains: vi.fn((_embedId: string | undefined, target: EventTarget | null | undefined) => target === embedCanvas),
+            hasRecentInteraction: vi.fn(() => true),
+            hasRecentInteractionFor: vi.fn(() => false),
+        };
+        const { input, renderUnit, service, univer } = createRealSelectionRenderService({ embedInteractionBoundaryService });
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+
+        embedCanvas.focus();
+        service.sync();
+
+        expect(document.activeElement).toBe(input);
+    });
+
+    it('does not steal focus from an embed-owned child element inside the Univer layout root', () => {
+        const focusCoordinator = new EmbedRuntimeFocusCoordinator();
+        const embedInteractionBoundaryService = {
+            contains: vi.fn(() => true),
+            hasRecentInteraction: vi.fn(() => false),
+            hasRecentInteractionFor: vi.fn(() => false),
+        };
+        const { input, renderUnit, service, univer } = createRealSelectionRenderService({
+            embedInteractionBoundaryService,
+            embedRuntimeFocusCoordinator: focusCoordinator,
+        });
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+
+        const runtimeCanvas = document.createElement('canvas');
+        runtimeCanvas.tabIndex = 0;
+        TestLayoutService.root.appendChild(runtimeCanvas);
+
+        runtimeCanvas.focus();
+        const lease = focusCoordinator.acquireLease({
+            embedId: 'embed-1',
+            role: 'child-session',
+            owner: 'stage2-runtime',
+            hostUnitId: 'selection-render-doc',
+        });
+        cleanup.push(() => lease.dispose());
+
+        service.sync();
+
+        expect(document.activeElement).toBe(runtimeCanvas);
+        expect(document.activeElement).not.toBe(input);
+    });
+
+    it('does not steal focus back while an embedded child editor owns an interaction lease', () => {
+        const focusCoordinator = new EmbedRuntimeFocusCoordinator();
+        const { input, renderUnit, service, univer } = createRealSelectionRenderService({
+            embedInteractionBoundaryService: {
+                contains: vi.fn(() => false),
+                hasRecentInteraction: vi.fn(() => false),
+            },
+            embedRuntimeFocusCoordinator: focusCoordinator,
+        });
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+
+        TestLayoutService.root.tabIndex = 0;
+        TestLayoutService.root.focus();
+        const lease = focusCoordinator.acquireLease({
+            embedId: 'embed-1',
+            role: 'child-editor',
+            owner: 'sheet-cell-editor',
+        });
+        cleanup.push(() => lease.dispose());
+
+        service.sync();
+
+        expect(document.activeElement).toBe(TestLayoutService.root);
+        expect(document.activeElement).not.toBe(input);
+    });
+
+    it('keeps host document focus suspended during a plain stage2 child session', () => {
+        const focusCoordinator = new EmbedRuntimeFocusCoordinator();
+        const { input, renderUnit, service, univer } = createRealSelectionRenderService({
+            embedInteractionBoundaryService: {
+                contains: vi.fn(() => false),
+                hasRecentInteraction: vi.fn(() => false),
+            },
+            embedRuntimeFocusCoordinator: focusCoordinator,
+        });
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+
+        const lease = focusCoordinator.acquireLease({
+            embedId: 'embed-1',
+            role: 'child-session',
+            owner: 'stage2-runtime',
+        });
+        cleanup.push(() => lease.dispose());
+
+        input.blur();
+        expect(document.activeElement).toBe(document.body);
+
+        service.sync();
+
+        expect(document.activeElement).toBe(document.body);
+        expect(document.activeElement).not.toBe(input);
+    });
+
+    it('does not force-focus the host hidden editor while a child session owns the host document', () => {
+        const focusCoordinator = new EmbedRuntimeFocusCoordinator();
+        const { input, renderUnit, service, univer } = createRealSelectionRenderService({
+            embedInteractionBoundaryService: {
+                contains: vi.fn(() => false),
+                hasRecentInteraction: vi.fn(() => false),
+            },
+            embedRuntimeFocusCoordinator: focusCoordinator,
+        });
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+
+        const lease = focusCoordinator.acquireLease({
+            embedId: 'embed-1',
+            role: 'child-session',
+            owner: 'stage2-runtime',
+            hostUnitId: 'selection-render-doc',
+            childUnitId: 'child-sheet',
+        });
+        cleanup.push(() => lease.dispose());
+
+        input.blur();
+        expect(document.activeElement).toBe(document.body);
+
+        service.activate(12, 34, true);
+
+        expect(document.activeElement).toBe(document.body);
+        expect(document.activeElement).not.toBe(input);
+    });
+
+    it('does not treat its own embedded runtime as external focus while a child editor lease is active', () => {
+        const focusCoordinator = new EmbedRuntimeFocusCoordinator();
+        const { input, renderUnit, service, univer } = createRealSelectionRenderService({
+            embedInteractionBoundaryService: {
+                contains: vi.fn(() => true),
+                hasRecentInteraction: vi.fn(() => false),
+            },
+            embedRuntimeFocusCoordinator: focusCoordinator,
+        });
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+
+        TestLayoutService.root.setAttribute(EMBED_INTERACTION_BOUNDARY_OWNER_ATTRIBUTE, 'embed-1');
+        const runtimeCanvas = document.createElement('canvas');
+        runtimeCanvas.tabIndex = 0;
+        runtimeCanvas.setAttribute(EMBED_INTERACTION_BOUNDARY_OWNER_ATTRIBUTE, 'embed-1');
+        input.setAttribute(EMBED_INTERACTION_BOUNDARY_OWNER_ATTRIBUTE, 'embed-1');
+        input.parentElement?.setAttribute(EMBED_INTERACTION_BOUNDARY_OWNER_ATTRIBUTE, 'embed-1');
+        TestLayoutService.root.appendChild(runtimeCanvas);
+        runtimeCanvas.focus();
+        const lease = focusCoordinator.acquireLease({
+            embedId: 'embed-1',
+            role: 'child-editor',
+            owner: 'sheet-cell-editor',
+        });
+        cleanup.push(() => lease.dispose());
+
+        expect(service.canFocusing).toBe(true);
+
+        service.sync();
+
+        expect(document.activeElement).toBe(input);
+    });
+
+    it.each(['input', 'textarea', 'select'])('preserves an embed-owned %s during selection synchronization', (tagName) => {
+        const { input, renderUnit, service, univer } = createRealSelectionRenderService();
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        TestLayoutService.root.setAttribute(EMBED_INTERACTION_BOUNDARY_OWNER_ATTRIBUTE, 'embed-1');
+        input.setAttribute(EMBED_INTERACTION_BOUNDARY_OWNER_ATTRIBUTE, 'embed-1');
+        const control = document.createElement(tagName);
+        TestLayoutService.root.appendChild(control);
+        control.focus();
+        expect(document.activeElement).toBe(control);
+        expect(service.canFocusing).toBe(false);
+        service.sync();
+        expect(document.activeElement).toBe(control);
+        service.activate(12, 34, true);
+        expect(document.activeElement).toBe(control);
+    });
+
+    it('preserves focus inside an open popover during selection synchronization', () => {
+        const { input, renderUnit, service, univer } = createRealSelectionRenderService();
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        TestLayoutService.root.setAttribute(EMBED_INTERACTION_BOUNDARY_OWNER_ATTRIBUTE, 'embed-1');
+        input.setAttribute(EMBED_INTERACTION_BOUNDARY_OWNER_ATTRIBUTE, 'embed-1');
+        const popover = document.createElement('div');
+        popover.dataset.slot = 'popover-content';
+        popover.dataset.state = 'open';
+        const button = document.createElement('button');
+        popover.appendChild(button);
+        TestLayoutService.root.appendChild(popover);
+        button.focus();
+
+        service.sync();
+        expect(document.activeElement).toBe(button);
+        service.activate(12, 34, true);
+        expect(document.activeElement).toBe(button);
+
+        popover.dataset.state = 'closed';
+        service.sync();
+        expect(document.activeElement).toBe(input);
+    });
+
+    it.each(['button', 'tab'])('refocuses the document from a Ribbon %s when setting a selection', (role) => {
+        const { input, renderUnit, service, univer } = createRealSelectionRenderService();
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        TestLayoutService.root.setAttribute(EMBED_INTERACTION_BOUNDARY_OWNER_ATTRIBUTE, 'embed-1');
+        input.setAttribute(EMBED_INTERACTION_BOUNDARY_OWNER_ATTRIBUTE, 'embed-1');
+        const button = document.createElement('button');
+        button.setAttribute('role', role);
+        TestLayoutService.root.appendChild(button);
+        button.focus();
+
+        service.sync();
+        expect(document.activeElement).toBe(input);
+    });
+
+    it('allows the internal sheet cell editor to refocus from an embed-owned canvas', () => {
+        const focusCoordinator = new EmbedRuntimeFocusCoordinator();
+        const { input, renderUnit, service, univer } = createRealSelectionRenderService({
+            embedInteractionBoundaryService: {
+                contains: vi.fn(() => true),
+                hasRecentInteraction: vi.fn(() => false),
+            },
+            embedRuntimeFocusCoordinator: focusCoordinator,
+        });
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+
+        const runtimeCanvas = document.createElement('canvas');
+        runtimeCanvas.tabIndex = 0;
+        runtimeCanvas.setAttribute(EMBED_INTERACTION_BOUNDARY_OWNER_ATTRIBUTE, 'embed-1');
+        input.setAttribute(EMBED_INTERACTION_BOUNDARY_OWNER_ATTRIBUTE, 'embed-1');
+        input.parentElement?.setAttribute(EMBED_INTERACTION_BOUNDARY_OWNER_ATTRIBUTE, 'embed-1');
+        TestLayoutService.root.appendChild(runtimeCanvas);
+        runtimeCanvas.focus();
+        (service as unknown as { _context: { unitId: string } })._context.unitId = DOCS_NORMAL_EDITOR_UNIT_ID_KEY;
+        const lease = focusCoordinator.acquireLease({
+            embedId: 'embed-1',
+            role: 'child-editor',
+            owner: 'sheet-cell-editor',
+        });
+        cleanup.push(() => lease.dispose());
+
+        expect(input.closest(`[${EMBED_INTERACTION_BOUNDARY_OWNER_ATTRIBUTE}]`)?.getAttribute(EMBED_INTERACTION_BOUNDARY_OWNER_ATTRIBUTE)).toBe('embed-1');
+        expect(runtimeCanvas.closest(`[${EMBED_INTERACTION_BOUNDARY_OWNER_ATTRIBUTE}]`)?.getAttribute(EMBED_INTERACTION_BOUNDARY_OWNER_ATTRIBUTE)).toBe('embed-1');
+        expect((service as unknown as { _containsCurrentEmbedRuntimeElement(element: HTMLElement): boolean })._containsCurrentEmbedRuntimeElement(runtimeCanvas)).toBe(true);
+        expect(service.canFocusing).toBe(true);
+
+        service.activate(12, 34);
+
+        expect(document.activeElement).toBe(input);
+    });
+
+    it('preserves the sibling editor focus during passive updates inside the same embed', () => {
+        const { input, renderUnit, service, univer } = createRealSelectionRenderService();
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        TestLayoutService.root.setAttribute(EMBED_INTERACTION_BOUNDARY_OWNER_ATTRIBUTE, 'embed-1');
+        const formulaInput = document.createElement('div');
+        formulaInput.dataset.uComp = input.dataset.uComp;
+        formulaInput.tabIndex = -1;
+        TestLayoutService.root.appendChild(formulaInput);
+        formulaInput.focus();
+
+        service.activate(12, 34);
+
+        expect(document.activeElement).toBe(formulaInput);
+        expect(service.canFocusing).toBe(false);
+
+        // An explicit pointer selection can still move focus between the editors.
+        service.activate(12, 34, true);
+        expect(document.activeElement).toBe(input);
+    });
+
+    it.each([
+        { geometry: false, retainedEditor: false },
+        { geometry: false, retainedEditor: true },
+        { geometry: true, retainedEditor: false },
+        { geometry: true, retainedEditor: true },
+    ])('preserves external frame focus during passive selection refresh: %j', ({ geometry, retainedEditor }) => {
+        const frame = document.createElement('iframe');
+        document.body.appendChild(frame);
+        const ownerDocument = frame.contentDocument!;
+        const { input, renderUnit, service, univer } = createRealSelectionRenderService({
+            scene: {
+                getViewports: () => geometry ? [{ getAbsoluteVector: () => ({ x: 30, y: 40 }) }] : [],
+                getEngine: () => ({ name: 'engine' }),
+            },
+        });
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        ownerDocument.body.appendChild(TestLayoutService.root);
+        if (geometry) {
+            (service as unknown as { _rangeList: TextRange[] })._rangeList = [{
+                isActive: () => true,
+                getAnchor: () => ({ left: 12, top: 20, visible: true }),
+                dispose: vi.fn(),
+            } as never];
+        }
+        if (retainedEditor) {
+            input.focus();
+        }
+        const peerInput = document.createElement('div');
+        peerInput.tabIndex = -1;
+        document.body.appendChild(peerInput);
+        peerInput.focus();
+        vi.spyOn(ownerDocument, 'hasFocus').mockReturnValue(false);
+        const focus = vi.spyOn(input, 'focus');
+
+        expect(service.canFocusing).toBe(false);
+        service.sync();
+        if (geometry) {
+            expect(service.selectionContainer.style.left).toBe('30px');
+            expect(service.selectionContainer.style.top).toBe('40px');
+        }
+        service.activate(12, 34);
+
+        expect(document.activeElement).toBe(peerInput);
+        expect(focus).not.toHaveBeenCalled();
+        expect(service.selectionContainer.style.left).toBe('12px');
+        expect(service.selectionContainer.style.top).toBe('34px');
+
+        service.activate(12, 34, true);
+        expect(focus).toHaveBeenCalledOnce();
+        expect(ownerDocument.activeElement).toBe(input);
+    });
+
+    it('retains top-level focus recovery when the browser window is inactive', () => {
+        const { input, renderUnit, service, univer } = createRealSelectionRenderService();
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+
+        service.sync();
+
+        expect(document.activeElement).toBe(input);
+    });
+
+    it('publishes hidden editor input, paste, focus, and blur events with the typed content', () => {
+        const { input, renderUnit, service, univer } = createRealSelectionRenderService();
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        const received: Array<{ type: string; content?: string }> = [];
+        const subscriptions = [
+            service.onInputBefore$.subscribe((config) => received.push({ type: 'before-input', content: config?.content })),
+            service.onInput$.subscribe((config) => received.push({ type: 'input', content: config.content })),
+            service.onPaste$.subscribe((config) => received.push({ type: 'paste', content: config.content })),
+            service.onFocus$.subscribe((config) => received.push({ type: 'focus', content: config.content })),
+            service.onBlur$.subscribe((config) => received.push({ type: 'blur', content: config.content })),
+        ];
+        cleanup.push(() => {
+            for (const subscription of subscriptions) {
+                subscription.unsubscribe();
+            }
+        });
+
+        input.textContent = 'typed text';
+        input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
+        input.textContent = 'pasted text';
+        input.dispatchEvent(new Event('paste', { bubbles: true }));
+        input.dispatchEvent(new Event('focus', { bubbles: true }));
+        input.textContent = 'leaving editor';
+        input.dispatchEvent(new Event('blur', { bubbles: true }));
+
+        expect(received).toEqual([
+            { type: 'before-input', content: 'typed text' },
+            { type: 'input', content: 'typed text' },
+            { type: 'paste', content: 'pasted text' },
+            { type: 'focus', content: '' },
+            { type: 'blur', content: 'leaving editor' },
+        ]);
+        expect(input.textContent).toBe('');
+    });
+
+    it.each(['input', 'compositionupdate'])('retains the first %s content when before-input restores a missing caret', (type) => {
+        const { input, renderUnit, service, univer } = createRealSelectionRenderService();
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        const caret = {
+            ...createTextRange({ isActive: vi.fn(() => true), collapsed: true }),
+            startOffset: 0,
+            endOffset: 0,
+        };
+        const before = service.onInputBefore$.subscribe((config) => {
+            expect(config?.activeRange).toBeNull();
+            (service as unknown as { _rangeList: TextRange[] })._rangeList = [caret as never];
+        });
+        const received: Array<{ content?: string; start?: number; end?: number }> = [];
+        const inputStream = type === 'input' ? service.onInput$ : service.onCompositionupdate$;
+        const subscription = inputStream.subscribe((config) => {
+            if (config) {
+                received.push({
+                    content: config.content,
+                    start: config.activeRange?.startOffset,
+                    end: config.activeRange?.endOffset,
+                });
+            }
+        });
+        cleanup.push(() => before.unsubscribe(), () => subscription.unsubscribe());
+
+        input.textContent = '首';
+        input.dispatchEvent(type === 'input'
+            ? new InputEvent(type, { bubbles: true, data: '首', inputType: 'insertText' })
+            : new CompositionEvent(type, { bubbles: true, data: '首' }));
+
+        expect(received).toEqual([{ content: '首', start: 0, end: 0 }]);
+    });
+
+    it('preserves an existing input selection snapshot when before-input changes the caret', () => {
+        const { input, renderUnit, service, univer } = createRealSelectionRenderService();
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        const range = {
+            ...createTextRange({ isActive: vi.fn(() => true) }),
+            startOffset: 1,
+            endOffset: 3,
+        };
+        (service as unknown as { _rangeList: TextRange[] })._rangeList = [range as never];
+        const before = service.onInputBefore$.subscribe(() => {
+            (service as unknown as { _rangeList: TextRange[] })._rangeList = [];
+        });
+        const received: Array<{ start?: number; end?: number }> = [];
+        const subscription = service.onInput$.subscribe((config) => received.push({
+            start: config.activeRange?.startOffset,
+            end: config.activeRange?.endOffset,
+        }));
+        cleanup.push(() => before.unsubscribe(), () => subscription.unsubscribe());
+
+        input.textContent = 'A';
+        input.dispatchEvent(new InputEvent('input', { bubbles: true, data: 'A', inputType: 'insertText' }));
+
+        expect(received).toEqual([{ start: 1, end: 3 }]);
+    });
+
+    it.each([
+        { unitId: DOCS_FORMULA_BAR_EDITOR_UNIT_ID_KEY, offset: 0, expected: 0 },
+        { unitId: DOCS_FORMULA_BAR_EDITOR_UNIT_ID_KEY, offset: 1, expected: undefined },
+        { unitId: 'selection-render-doc', offset: 0, expected: undefined },
+    ])('uses only a valid empty formula-bar caret before geometry is ready ($unitId, $offset)', ({ unitId, offset, expected }) => {
+        const { input, renderUnit, service, univer } = createRealSelectionRenderService({
+            documentData: {
+                id: unitId,
+                body: { dataStream: '\r\n', paragraphs: [{ startIndex: 0, paragraphId: 'empty-editor-paragraph' }] },
+                documentStyle: {},
+            },
+        });
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        const manager = univer.__getInjector().get(DocSelectionManagerService);
+        manager.replaceSelectionInfoWithoutRefresh({
+            textRanges: [{ startOffset: offset, endOffset: offset, collapsed: true, isActive: true }],
+            rectRanges: [],
+            segmentId: '',
+            segmentPage: -1,
+            style: NORMAL_TEXT_SELECTION_PLUGIN_STYLE,
+            isEditing: true,
+        }, { unitId, subUnitId: unitId });
+        const received: Array<{ content?: string; offset?: number }> = [];
+        const subscription = service.onInput$.subscribe((config) => received.push({
+            content: config.content,
+            offset: config.activeRange?.startOffset,
+        }));
+        cleanup.push(() => subscription.unsubscribe());
+
+        input.textContent = '=';
+        input.dispatchEvent(new InputEvent('input', { bubbles: true, data: '=', inputType: 'insertText' }));
+
+        expect(received).toEqual([{ content: '=', offset: expected }]);
+    });
+
+    it.each([
+        { mobile: false, unitId: 'selection-render-doc' },
+        { mobile: true, unitId: DOCS_NORMAL_EDITOR_UNIT_ID_KEY },
+    ])('preserves automatic input focus outside mobile standalone docs ($mobile, $unitId)', (options) => {
+        const { input, renderUnit, service, univer } = createRealSelectionRenderService(options);
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        const focus = vi.spyOn(input, 'focus');
+        cleanup.push(() => focus.mockRestore());
+
+        service.sync();
+
+        expect(focus).toHaveBeenCalledOnce();
+        expect(service.isFocusing).toBe(true);
+    });
+
+    it('does not reopen the mobile keyboard when formatting refreshes a blurred selection', () => {
+        const { input, renderUnit, service: selectionService, univer } = createRealSelectionRenderService({ mobile: true });
+        const service = selectionService as MobileDocSelectionRenderService;
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        service.enterMobileEditMode();
+        service.focus();
+        service.suspendMobileEditingInput();
+        const focus = vi.spyOn(input, 'focus');
+        cleanup.push(() => focus.mockRestore());
+
+        for (let cycle = 0; cycle < 5; cycle++) {
+            service.replaceDocRanges([], true);
+            service.sync();
+        }
+
+        expect(focus).not.toHaveBeenCalled();
+        expect(service.isMobileEditMode).toBe(true);
+        expect(service.isFocusing).toBe(false);
+
+        service.activate(0, 0, true);
+        expect(focus).toHaveBeenCalledOnce();
+        expect(service.isFocusing).toBe(true);
+        focus.mockClear();
+        service.sync();
+        expect(service.isFocusing).toBe(true);
+        expect(focus).not.toHaveBeenCalled();
+    });
+
+    describe.each([false, true])('mobile internal editor blur with visual viewport=%s', (hasVisualViewport) => {
+        it.each([
+            DOCS_NORMAL_EDITOR_UNIT_ID_KEY,
+            DOCS_FORMULA_BAR_EDITOR_UNIT_ID_KEY,
+            `${DOCS_COMMENT_EDITOR_UNIT_ID_KEY}_PANEL_unit-1_sheet-1_comment-1`,
+            createInternalEditorID('RICH_TEXT_EDITOR-range-selector'),
+        ])('publishes native blur immediately after editing in %s', (unitId) => {
+            const originalVisualViewport = window.visualViewport;
+            const visualViewport = Object.assign(new EventTarget(), {
+                height: 900,
+                offsetTop: 0,
+                offsetLeft: 0,
+                width: 430,
+            });
+            Object.defineProperty(window, 'visualViewport', {
+                configurable: true,
+                value: hasVisualViewport ? visualViewport : undefined,
+            });
+            cleanup.push(() => Object.defineProperty(window, 'visualViewport', {
+                configurable: true,
+                value: originalVisualViewport,
+            }));
+
+            const { input, renderUnit, service, univer } = createRealSelectionRenderService({ unitId, mobile: true });
+            cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+            const onBlur = vi.fn();
+            const subscription = service.onBlur$.subscribe(onBlur);
+            cleanup.push(() => subscription.unsubscribe());
+
+            for (let cycle = 0; cycle < 3; cycle++) {
+                service.replaceDocRanges([], true);
+                service.focus();
+                expect(service.isEditing).toBe(true);
+                expect(service.isFocusing).toBe(true);
+                visualViewport.height = 500;
+                visualViewport.dispatchEvent(new Event('resize'));
+
+                input.blur();
+
+                expect(service.isFocusing).toBe(false);
+                expect(service.isEditing).toBe(false);
+                expect(onBlur).toHaveBeenCalledTimes(cycle + 1);
+
+                // Keyboard dismissal must not publish the same native blur a second time.
+                visualViewport.height = 900;
+                visualViewport.dispatchEvent(new Event('resize'));
+                expect(onBlur).toHaveBeenCalledTimes(cycle + 1);
+            }
+        });
+    });
+
+    it('keeps mobile edit mode active without closing a newly focused keyboard', () => {
+        const originalVisualViewport = window.visualViewport;
+        const viewportTarget = new EventTarget();
+        const visualViewport = Object.assign(viewportTarget, {
+            height: 900,
+            offsetTop: 0,
+            offsetLeft: 0,
+            width: 430,
+        });
+        Object.defineProperty(window, 'visualViewport', {
+            configurable: true,
+            value: visualViewport,
+        });
+        cleanup.push(() => Object.defineProperty(window, 'visualViewport', {
+            configurable: true,
+            value: originalVisualViewport,
+        }));
+
+        const { renderUnit, service: selectionService, univer } = createRealSelectionRenderService({
+            mobile: true,
+        });
+        const service = selectionService as MobileDocSelectionRenderService;
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        const blurEvents: Event[] = [];
+        const keyboardVisibility: boolean[] = [];
+        const blurSubscription = service.onBlur$.subscribe((config) => blurEvents.push(config.event));
+        const keyboardSubscription = service.mobileKeyboardVisible$.subscribe((visible) => keyboardVisibility.push(visible));
+        cleanup.push(() => blurSubscription.unsubscribe(), () => keyboardSubscription.unsubscribe());
+
+        service.replaceDocRanges([], true);
+        service.enterMobileEditMode();
+        service.focus();
+        visualViewport.height = 500;
+        viewportTarget.dispatchEvent(new Event('resize'));
+        service.suspendMobileEditingInput();
+
+        expect(service.isEditing).toBe(true);
+        expect(blurEvents).toEqual([]);
+        expect(keyboardVisibility).toEqual([false, true]);
+
+        visualViewport.height = 900;
+        viewportTarget.dispatchEvent(new Event('resize'));
+
+        expect(service.isEditing).toBe(true);
+        expect(service.isMobileEditMode).toBe(true);
+        expect(blurEvents).toHaveLength(1);
+        expect(keyboardVisibility).toEqual([false, true, false]);
+
+        for (let cycle = 0; cycle < 5; cycle++) {
+            service.focus();
+            visualViewport.height = 500;
+            visualViewport.offsetTop = cycle % 2 === 0 ? 0 : 100;
+            viewportTarget.dispatchEvent(new Event('resize'));
+            visualViewport.height = cycle % 2 === 0 ? 880 : 900;
+            visualViewport.offsetTop = 0;
+            viewportTarget.dispatchEvent(new Event('resize'));
+        }
+
+        expect(service.isFocusing).toBe(true);
+        expect(blurEvents).toHaveLength(1);
+        expect(keyboardVisibility).toEqual([
+            false,
+            true,
+            false,
+            true,
+            false,
+            true,
+            false,
+            true,
+            false,
+            true,
+            false,
+            true,
+            false,
+        ]);
+
+        service.exitMobileEditMode();
+
+        expect(service.isEditing).toBe(false);
+        expect(service.isMobileEditMode).toBe(false);
+    });
+
+    it('does not publish host hidden editor events while a child session owns the host document', () => {
+        const focusCoordinator = new EmbedRuntimeFocusCoordinator();
+        const { input, renderUnit, service, univer } = createRealSelectionRenderService({
+            embedInteractionBoundaryService: {
+                contains: vi.fn(() => false),
+                hasRecentInteraction: vi.fn(() => false),
+            },
+            embedRuntimeFocusCoordinator: focusCoordinator,
+        });
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        const received: string[] = [];
+        const subscriptions = [
+            service.onInputBefore$.subscribe(() => received.push('before-input')),
+            service.onInput$.subscribe(() => received.push('input')),
+            service.onKeydown$.subscribe(() => received.push('keydown')),
+            service.onBlur$.subscribe(() => received.push('blur')),
+        ];
+        cleanup.push(() => {
+            for (const subscription of subscriptions) {
+                subscription.unsubscribe();
+            }
+        });
+
+        input.focus();
+        const lease = focusCoordinator.acquireLease({
+            embedId: 'docs-custom-block-sheet',
+            role: 'child-session',
+            owner: 'doc-block-stage2-runtime',
+            hostUnitId: 'selection-render-doc',
+            childUnitId: 'child-sheet',
+        });
+        cleanup.push(() => lease.dispose());
+
+        input.textContent = '=';
+        input.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: '=' }));
+        input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: '=' }));
+        input.textContent = 'leaving host editor';
+        input.dispatchEvent(new Event('blur', { bubbles: true }));
+
+        expect(received).toEqual([]);
+        expect(input.textContent).toBe('leaving host editor');
+    });
+
+    it('blurs the host hidden editor when it is focused during a child session', () => {
+        const focusCoordinator = new EmbedRuntimeFocusCoordinator();
+        const { input, renderUnit, univer } = createRealSelectionRenderService({
+            embedInteractionBoundaryService: {
+                contains: vi.fn(() => false),
+                hasRecentInteraction: vi.fn(() => false),
+            },
+            embedRuntimeFocusCoordinator: focusCoordinator,
+        });
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+
+        input.tabIndex = 0;
+        input.focus();
+        expect(document.activeElement).toBe(input);
+        input.blur();
+        expect(document.activeElement).not.toBe(input);
+
+        const lease = focusCoordinator.acquireLease({
+            embedId: 'docs-custom-block-sheet',
+            role: 'child-session',
+            owner: 'doc-block-stage2-runtime',
+            hostUnitId: 'selection-render-doc',
+            childUnitId: 'child-sheet',
+        });
+        cleanup.push(() => lease.dispose());
+
+        input.focus();
+
+        expect(document.activeElement).not.toBe(input);
+    });
+
+    it('suppresses normal keydown while IME composition is active, then resumes key events after composition ends', () => {
+        const { input, renderUnit, service, univer } = createRealSelectionRenderService();
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        const events: Array<{ type: string; content?: string }> = [];
+        const subscriptions = [
+            service.onKeydown$.subscribe((config) => events.push({ type: 'keydown', content: config.content })),
+            service.onCompositionstart$.subscribe((config) => {
+                if (config) {
+                    events.push({ type: 'compositionstart', content: config.content });
+                }
+            }),
+            service.onCompositionupdate$.subscribe((config) => {
+                if (config) {
+                    events.push({ type: 'compositionupdate', content: config.content });
+                }
+            }),
+            service.onCompositionend$.subscribe((config) => {
+                if (config) {
+                    events.push({ type: 'compositionend', content: config.content });
+                }
+            }),
+        ];
+        cleanup.push(() => {
+            for (const subscription of subscriptions) {
+                subscription.unsubscribe();
+            }
+        });
+
+        input.textContent = '拼';
+        input.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true, data: '拼' }));
+        expect(input.textContent).toBe('拼');
+        input.textContent = 'pin';
+        input.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'p' }));
+        input.dispatchEvent(new CompositionEvent('compositionupdate', { bubbles: true, data: '拼' }));
+        expect(input.textContent).toBe('pin');
+        input.textContent = '拼';
+        input.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '拼' }));
+        expect(input.textContent).toBe('');
+        input.textContent = 'done';
+        input.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
+
+        expect(events).toEqual([
+            { type: 'compositionstart', content: '拼' },
+            { type: 'compositionupdate', content: 'pin' },
+            { type: 'compositionend', content: '拼' },
+            { type: 'keydown', content: 'done' },
+        ]);
+    });
+
+    it('preserves the browser composing DOM until composition ends', () => {
+        const { input, renderUnit, univer } = createRealSelectionRenderService();
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+
+        input.textContent = 'n';
+        input.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true, data: '' }));
+        expect(input.textContent).toBe('n');
+
+        input.textContent = '你';
+        input.dispatchEvent(new CompositionEvent('compositionupdate', { bubbles: true, data: '你' }));
+        expect(input.textContent).toBe('你');
+
+        input.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '你' }));
+        expect(input.textContent).toBe('');
+    });
+
+    it('keeps embed-owned select-all keydown inside the child editor without blocking editor input handling', () => {
+        const { input, renderUnit, service, univer } = createRealSelectionRenderService();
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        input.setAttribute(EMBED_INTERACTION_BOUNDARY_OWNER_ATTRIBUTE, 'embed-1');
+        const documentKeydown = vi.fn();
+        const keydownEvents: Array<{ content?: string; defaultPrevented: boolean }> = [];
+        document.addEventListener('keydown', documentKeydown);
+        const subscription = service.onKeydown$.subscribe((config) => {
+            keydownEvents.push({
+                content: config.content,
+                defaultPrevented: config.event.defaultPrevented,
+            });
+        });
+        cleanup.push(
+            () => document.removeEventListener('keydown', documentKeydown),
+            () => subscription.unsubscribe()
+        );
+
+        input.textContent = 'cell text';
+        input.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'a', metaKey: true }));
+
+        expect(keydownEvents).toEqual([{ content: 'cell text', defaultPrevented: false }]);
+        expect(documentKeydown).not.toHaveBeenCalled();
+    });
+
+    it('keeps segment state stable while the editor is reused by header, footer, and body selection flows', () => {
+        const { renderUnit, service, univer } = createRealSelectionRenderService();
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        const contexts: Array<{ segmentId: string; segmentPage: number }> = [];
+        const subscription = service.segmentContext$.subscribe((context) => contexts.push(context));
+        cleanup.push(() => subscription.unsubscribe());
+
+        service.setSegment('header-1');
+        service.setSegmentPage(3);
+        service.setReserveRangesStatus(true);
+
+        expect(service.getSegment()).toBe('header-1');
+        expect(service.getSegmentPage()).toBe(3);
+
+        service.setSegment('');
+        service.setSegmentPage(-1);
+
+        expect(service.getSegment()).toBe('');
+        expect(service.getSegmentPage()).toBe(-1);
+        expect(contexts).toEqual([
+            { segmentId: '', segmentPage: -1 },
+            { segmentId: 'header-1', segmentPage: -1 },
+            { segmentId: 'header-1', segmentPage: 3 },
+            { segmentId: '', segmentPage: 3 },
+            { segmentId: '', segmentPage: -1 },
+        ]);
+    });
+
+    it.each([
+        { unitId: 'word-selection-doc', glyphIndex: 7, word: '6:11' },
+        { unitId: 'word-selection-doc', glyphIndex: 11, word: null },
+        { unitId: DOCS_NORMAL_EDITOR_UNIT_ID_KEY, glyphIndex: 0, word: '0:5' },
+        { unitId: DOCS_NORMAL_EDITOR_UNIT_ID_KEY, glyphIndex: 11, word: '6:11' },
+        { unitId: DOCS_FORMULA_BAR_EDITOR_UNIT_ID_KEY, glyphIndex: 11, word: '6:11' },
+    ])('selects the nearest sheet-editor word on double click ($unitId, glyph=$glyphIndex)', ({ unitId, glyphIndex, word }) => {
+        const viewport = {
+            transformVector2SceneCoord: () => ({ x: 8, y: 12 }),
+            getAbsoluteVector: () => ({ x: 16, y: 24 }),
+        };
+        const scene = {
+            getViewports: () => [viewport],
+            getEngine: () => ({ name: 'engine' }),
+        };
+        const documentTransform = {
+            clone: () => ({
+                invert: () => ({
+                    applyPoint: (point: unknown) => point,
+                }),
+            }),
+        };
+        const mainComponent = {
+            getOffsetConfig: () => ({
+                documentTransform,
+                pageMarginLeft: 0,
+                pageMarginTop: 0,
+            }),
+        };
+        const { renderUnit, service, univer } = createRealSelectionRenderService({
+            mainComponent,
+            scene,
+            documentData: {
+                id: unitId,
+                body: { dataStream: 'Hello world\r\n', paragraphs: [{ startIndex: 11, paragraphId: 'word-selection-paragraph' }] },
+                documentStyle: {},
+            },
+        });
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        const column = { lines: [] as unknown[] };
+        const line = { paragraphIndex: 11, st: 0, parent: column, divides: [] as unknown[] };
+        const divide = { parent: line, glyphGroup: [] as Array<{ content: string; count: number; glyphType: GlyphType; parent?: unknown }> };
+        const glyphs: Array<{ content: string; count: number; glyphType: GlyphType; parent?: unknown }> = [];
+        for (const content of 'Hello world\r') {
+            glyphs.push({ content, count: 1, glyphType: GlyphType.WORD, parent: divide });
+        }
+        divide.glyphGroup = glyphs;
+        line.divides = [divide];
+        column.lines = [line];
+        (service as unknown as { _findNodeByCoord: () => unknown })._findNodeByCoord = () => ({ node: glyphs[glyphIndex], ratioX: 0.4, segmentPage: -1 });
+        getRangeListFromCharIndexMock.mockImplementation((startOffset, endOffset) => ({
+            textRanges: [{
+                ...createTextRange({ isActive: vi.fn(() => true) }),
+                startOffset,
+                endOffset,
+                collapsed: startOffset === endOffset,
+                rangeType: DOC_RANGE_TYPE.TEXT,
+                segmentId: '',
+                segmentPage: -1,
+                direction: 'forward',
+                startNodePosition: null,
+                endNodePosition: null,
+            }],
+            rectRanges: [],
+        }));
+        const selections: string[] = [];
+        const subscription = service.textSelectionInner$.subscribe((selection) => {
+            if (!selection) {
+                return;
+            }
+            for (const range of selection.textRanges) {
+                selections.push(`${range.startOffset}:${range.endOffset}`);
+            }
+        });
+        cleanup.push(() => subscription.unsubscribe());
+
+        service.__handleDblClick({ offsetX: 10, offsetY: 12 } as never);
+        service.__handleTripleClick({ offsetX: 10, offsetY: 12 } as never);
+
+        expect(selections).toEqual(word ? [word, '0:11'] : ['0:11']);
+    });
+
+    it('moves the hidden editor to the active visible selection when syncing canvas selection to DOM input', () => {
+        getCanvasOffsetByEngineMock.mockReturnValue({ left: 5, top: 7 });
+        const viewport = {
+            getAbsoluteVector: () => ({ x: 30, y: 40 }),
+        };
+        const scene = {
+            getViewports: () => [viewport],
+            getEngine: () => ({ name: 'engine' }),
+        };
+        const { renderUnit, service, univer } = createRealSelectionRenderService({ scene });
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        vi.spyOn(TestLayoutService.root, 'getBoundingClientRect').mockReturnValue({ left: 100, top: 200 } as DOMRect);
+        const activeRange = {
+            isActive: () => true,
+            getAnchor: () => ({ left: 12, top: 20, visible: true }),
+            dispose: vi.fn(),
+        };
+        (service as unknown as { _rangeList: TextRange[] })._rangeList = [activeRange as never];
+
+        service.sync();
+
+        const container = document.getElementById('univer-doc-selection-container-selection-render-doc')!;
+        expect(container.style.left).toBe('35px');
+        expect(container.style.top).toBe('47px');
+        expect(container.style.zIndex).toBe('1000');
+    });
+
+    it('converts the hidden editor position for a fixed containing block', () => {
+        const { renderUnit, service, univer } = createRealSelectionRenderService();
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        const container = document.getElementById('univer-doc-selection-container-selection-render-doc')!;
+        vi.spyOn(container, 'offsetParent', 'get').mockReturnValue(TestLayoutService.root);
+        vi.spyOn(TestLayoutService.root, 'getBoundingClientRect').mockReturnValue({ left: 100, top: 200 } as DOMRect);
+
+        service.activate(35, 47);
+
+        expect(container.style.position).toBe('fixed');
+        expect(container.style.left).toBe('-65px');
+        expect(container.style.top).toBe('-153px');
+    });
+
+    it('parks the mobile hidden editor inside the visual viewport instead of moving it to the canvas caret', () => {
+        const originalVisualViewport = window.visualViewport;
+        const viewportEvents = new EventTarget();
+        Object.defineProperty(window, 'visualViewport', {
+            configurable: true,
+            value: {
+                addEventListener: viewportEvents.addEventListener.bind(viewportEvents),
+                removeEventListener: viewportEvents.removeEventListener.bind(viewportEvents),
+                height: 700,
+                width: 430,
+                offsetLeft: 5,
+                offsetTop: 120,
+            },
+        });
+        const { renderUnit, service, univer } = createRealSelectionRenderService({ mobile: true });
+        cleanup.push(
+            () => Object.defineProperty(window, 'visualViewport', {
+                configurable: true,
+                value: originalVisualViewport,
+            }),
+            () => renderUnit.dispose(),
+            () => univer.dispose()
+        );
+
+        service.activate(350, 470);
+
+        const container = document.getElementById('univer-doc-selection-container-selection-render-doc')!;
+        expect(container.style.left).toBe('6px');
+        expect(container.style.top).toBe('121px');
+    });
+
+    it('does not apply the visual viewport offset twice inside a fixed containing block', () => {
+        const originalVisualViewport = window.visualViewport;
+        const viewportEvents = new EventTarget();
+        const visualViewport = Object.assign(viewportEvents, {
+            height: 900,
+            width: 430,
+            offsetLeft: 0,
+            offsetTop: 0,
+        });
+        Object.defineProperty(window, 'visualViewport', {
+            configurable: true,
+            value: visualViewport,
+        });
+        const { renderUnit, service, univer } = createRealSelectionRenderService({ mobile: true });
+        cleanup.push(
+            () => Object.defineProperty(window, 'visualViewport', {
+                configurable: true,
+                value: originalVisualViewport,
+            }),
+            () => renderUnit.dispose(),
+            () => univer.dispose()
+        );
+        const container = document.getElementById('univer-doc-selection-container-selection-render-doc')!;
+        vi.spyOn(container, 'offsetParent', 'get').mockReturnValue(TestLayoutService.root);
+        vi.spyOn(TestLayoutService.root, 'getBoundingClientRect').mockImplementation(() => ({
+            left: 0,
+            top: -visualViewport.offsetTop,
+        } as DOMRect));
+
+        for (let cycle = 0; cycle < 5; cycle++) {
+            visualViewport.height = 500;
+            visualViewport.offsetTop = 120;
+            viewportEvents.dispatchEvent(new Event('resize'));
+            service.activate(350, 470);
+            expect(container.style.left).toBe('1px');
+            expect(container.style.top).toBe('121px');
+
+            visualViewport.height = 900;
+            visualViewport.offsetTop = 0;
+            viewportEvents.dispatchEvent(new Event('resize'));
+            service.activate(350, 470);
+            expect(container.style.top).toBe('1px');
+        }
+    });
+
+    it.each(['editor', 'button', 'input'] as const)('updates the caret position after scrolling without moving focus from the %s', (target) => {
+        getCanvasOffsetByEngineMock.mockReturnValue({ left: 1, top: 2 });
+        const scrollAfter$ = new TestRenderEvent<{ viewport: unknown }>();
+        const scrollEnd$ = new TestRenderEvent<{ viewport: unknown }>();
+        const activeStatic = vi.fn();
+        const deactivateStatic = vi.fn();
+        const viewport = {
+            onScrollAfter$: scrollAfter$,
+            onScrollEnd$: scrollEnd$,
+            getAbsoluteVector: () => ({ x: 4, y: 8 }),
+            calcViewportInfo: () => ({
+                viewBound: {
+                    left: 0,
+                    top: 0,
+                    right: 100,
+                    bottom: 100,
+                },
+            }),
+        };
+        const scene = {
+            getViewports: () => [viewport],
+            getEngine: () => ({ name: 'engine' }),
+        };
+        const { input, renderUnit, service, univer } = createRealSelectionRenderService({ scene });
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        TestLayoutService.root.setAttribute(EMBED_INTERACTION_BOUNDARY_OWNER_ATTRIBUTE, 'embed-1');
+        const focusTarget = target === 'editor' ? input : document.createElement(target);
+        if (focusTarget !== input) {
+            TestLayoutService.root.appendChild(focusTarget);
+            focusTarget.focus();
+        } else {
+            service.focus();
+        }
+        expect(document.activeElement).toBe(focusTarget);
+        const activeRange = {
+            isActive: () => true,
+            activeStatic,
+            deactivateStatic,
+            getAnchor: () => ({ left: 10, top: 12, visible: true }),
+            dispose: vi.fn(),
+        };
+        (service as unknown as { _rangeList: TextRange[] })._rangeList = [activeRange as never];
+
+        service.__attachScrollEvent();
+        scrollAfter$.emit({ viewport });
+        scrollEnd$.emit({ viewport });
+
+        expect(document.activeElement).toBe(focusTarget);
+        const container = document.getElementById('univer-doc-selection-container-selection-render-doc')!;
+        expect(activeStatic).toHaveBeenCalledTimes(1);
+        expect(deactivateStatic).not.toHaveBeenCalled();
+        expect(container.style.left).toBe('5px');
+        expect(container.style.top).toBe('10px');
+    });
+
+    it('commits a dragged text selection when the pointer is released', () => {
+        vi.spyOn(TextRange.prototype as unknown as Record<'_anchorBlink', () => void>, '_anchorBlink').mockImplementation(() => {});
+        vi.spyOn(TextRange.prototype, 'refresh').mockImplementation(() => {});
+        const pointerMove$ = new TestRenderEvent<{ offsetX: number; offsetY: number }>();
+        const pointerUp$ = new TestRenderEvent<Record<string, never>>();
+        const disableObjectsEvent = vi.fn();
+        const enableObjectsEvent = vi.fn();
+        const clearSelectedObjects = vi.fn();
+        const setCursor = vi.fn();
+        const scene = {
+            getViewports: () => [],
+            getEngine: () => ({ name: 'engine' }),
+            findViewportByPosToScene: () => ({
+                top: 0,
+                left: 0,
+                width: 500,
+                height: 500,
+                scrollByViewportDeltaVal: () => true,
+                transScroll2ViewportScrollValue: () => ({ x: 0, y: 0 }),
+            }),
+            disableObjectsEvent,
+            enableObjectsEvent,
+            getTransformer: () => ({ clearSelectedObjects }),
+            setCursor,
+            onPointerMove$: pointerMove$,
+            onPointerUp$: pointerUp$,
+        };
+        const { renderUnit, service, univer } = createRealSelectionRenderService({ scene });
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        const dragRange = {
+            ...createTextRange({ isActive: vi.fn(() => true) }),
+            startOffset: 2,
+            endOffset: 6,
+            collapsed: false,
+            rangeType: DOC_RANGE_TYPE.TEXT,
+            segmentId: '',
+            segmentPage: -1,
+            direction: 'forward',
+            startNodePosition: null,
+            endNodePosition: null,
+        };
+        const focusNodePosition = {
+            page: 0,
+            section: 0,
+            column: 0,
+            line: 0,
+            divide: 0,
+            glyph: 6,
+            isBack: false,
+        };
+        (service as unknown as { _findNodeByCoord: () => unknown })._findNodeByCoord = () => ({
+            node: { streamType: DataStreamTreeTokenType.LETTER },
+            segmentId: '',
+            segmentPage: -1,
+        });
+        (service as unknown as { _getNodePosition: () => unknown })._getNodePosition = () => ({
+            page: 0,
+            section: 0,
+            column: 0,
+            line: 0,
+            divide: 0,
+            glyph: 2,
+            isBack: true,
+        });
+        (service as unknown as { _moving: () => void })._moving = () => {
+            (service as unknown as { _focusNodePosition: unknown })._focusNodePosition = focusNodePosition;
+            (service as unknown as { _rangeListCache: TextRange[] })._rangeListCache = [dragRange as never];
+        };
+        const selections: string[] = [];
+        const subscription = service.textSelectionInner$.subscribe((selection) => {
+            if (!selection) {
+                return;
+            }
+            for (const range of selection.textRanges) {
+                selections.push(`${range.startOffset}:${range.endOffset}`);
+            }
+        });
+        cleanup.push(() => subscription.unsubscribe());
+
+        service.blur();
+        service.__onPointDown({ offsetX: 10, offsetY: 10, button: 0 } as never, false);
+        pointerMove$.emit({ offsetX: 20, offsetY: 20 });
+        pointerUp$.emit({});
+
+        expect(disableObjectsEvent).toHaveBeenCalledTimes(1);
+        expect(enableObjectsEvent).toHaveBeenCalledTimes(1);
+        expect(clearSelectedObjects).toHaveBeenCalledTimes(1);
+        expect(setCursor).toHaveBeenCalledWith('text');
+        expect(selections.at(-1)).toBe('2:6');
+        expect(service.isFocusing).toBe(false);
+    });
+
+    it.each(['cancel', 'dispose'])('releases mobile handle events and scroll ownership on %s', (reason) => {
+        const pointerMove$ = new EventSubject<MouseEvent>();
+        const pointerUp$ = new EventSubject<MouseEvent>();
+        const pointerCancel$ = new EventSubject<MouseEvent>();
+        const enableObjectsEvent = vi.fn();
+        const scene = {
+            getViewports: () => [],
+            getEngine: () => null,
+            findViewportByPosToScene: () => null,
+            disableObjectsEvent: vi.fn(),
+            enableObjectsEvent,
+            onPointerMove$: pointerMove$,
+            onPointerUp$: pointerUp$,
+            onPointerCancel$: pointerCancel$,
+        };
+        const { renderUnit, service, univer } = createRealSelectionRenderService({ mainComponent: {}, scene, mobile: true });
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        const node = { page: 0, section: 0, column: 0, line: 0, divide: 0, glyph: 0, isBack: true };
+        const range = {
+            ...createTextRange({ isActive: vi.fn(() => true) }),
+            startOffset: 0,
+            endOffset: 3,
+            startNodePosition: node,
+            endNodePosition: { ...node, glyph: 3 },
+        };
+        getRangeListFromCharIndexMock.mockReturnValue({ textRanges: [range], rectRanges: [] });
+        service.addDocRanges([{ startOffset: 0, endOffset: 3 }], false, { shouldFocus: false });
+        const handlePointerDown = mobileSelectionVisualsMock.show.mock.calls[0]?.[4];
+        if (!handlePointerDown) {
+            throw new Error('The mobile selection did not expose its handles');
+        }
+        const event = Object.assign(new MouseEvent('pointerdown', { clientX: 10, clientY: 10 }), {
+            deviceType: DeviceType.Touch,
+            inputIndex: PointerInput.LeftClick,
+            currentState: null,
+            previousState: null,
+        });
+        handlePointerDown('end', event);
+        expect(scene.disableObjectsEvent).toHaveBeenCalledOnce();
+        expect(pointerMove$.observed).toBe(true);
+        if (reason === 'cancel') {
+            pointerCancel$.emitEvent(event);
+            expect(mobileSelectionVisualsMock.show).toHaveBeenCalledTimes(2);
+        } else {
+            renderUnit.dispose();
+        }
+        expect(enableObjectsEvent).toHaveBeenCalledOnce();
+        expect(pointerMove$.observed).toBe(false);
+        expect(pointerUp$.observed).toBe(false);
+        expect(pointerCancel$.observed).toBe(false);
+    });
+
+    it.each([
+        DOCS_NORMAL_EDITOR_UNIT_ID_KEY,
+        DOCS_FORMULA_BAR_EDITOR_UNIT_ID_KEY,
+        `${DOCS_COMMENT_EDITOR_UNIT_ID_KEY}_PANEL_unit-1_sheet-1_comment-1`,
+        createInternalEditorID('RICH_TEXT_EDITOR-range-selector'),
+    ])(
+        'keeps the initial mobile internal editor caret visible before typing in %s',
+        (unitId) => {
+            const { input, service, renderUnit, univer } = createRealSelectionRenderService({ unitId, mobile: true });
+            cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+            const range = createTextRange({
+                collapsed: true,
+                startOffset: 0,
+                endOffset: 0,
+                isActive: vi.fn(() => true),
+            });
+            const anchor = range.getAnchor()!;
+            anchor.show.mockImplementation(() => {
+                anchor.visible = true;
+            });
+            anchor.hide.mockImplementation(() => {
+                anchor.visible = false;
+            });
+            range.activate.mockImplementation(() => anchor.show());
+            cursorConvertToTextRangeMock.mockReturnValue(range);
+
+            // Editor.setSelectionRanges publishes a non-editing selection when opening internal editors.
+            service.addDocRanges([{ startOffset: 0, endOffset: 0 }], false, { shouldFocus: false });
+            service.focus();
+
+            expect(document.activeElement).toBe(input);
+            expect(service.isEditing).toBe(false);
+            expect(anchor.visible).toBe(true);
+
+            range.refresh.mockImplementation(() => anchor.hide());
+            service.refreshRanges();
+
+            expect(anchor.visible).toBe(true);
+            expect(mobileSelectionVisualsMock.show).not.toHaveBeenCalled();
+        }
+    );
+
+    it('keeps the standalone mobile doc caret hidden until entering edit mode', () => {
+        const { service, renderUnit, univer } = createRealSelectionRenderService({ mobile: true });
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        const range = createTextRange({
+            collapsed: true,
+            startOffset: 0,
+            endOffset: 0,
+            isActive: vi.fn(() => true),
+        });
+        const anchor = range.getAnchor()!;
+        anchor.show.mockImplementation(() => {
+            anchor.visible = true;
+        });
+        anchor.hide.mockImplementation(() => {
+            anchor.visible = false;
+        });
+        range.activate.mockImplementation(() => anchor.show());
+        cursorConvertToTextRangeMock.mockReturnValue(range);
+
+        service.addDocRanges([{ startOffset: 0, endOffset: 0 }], false, { shouldFocus: false });
+
+        expect(anchor.visible).toBe(false);
+
+        service.enterEditing();
+
+        expect(anchor.visible).toBe(true);
+    });
+
+    it('shows mobile range controls only for the active non-editing selection', () => {
+        const { service, renderUnit, univer } = createRealSelectionRenderService({ mainComponent: {}, mobile: true });
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        const inactiveRange = createTextRange({ collapsed: false });
+        const activeRange = createTextRange({ collapsed: false, isActive: vi.fn(() => true) });
+        const inactiveAnchor = inactiveRange.getAnchor();
+        const activeAnchor = activeRange.getAnchor();
+        getRangeListFromCharIndexMock.mockReturnValue({ textRanges: [inactiveRange, activeRange], rectRanges: [] });
+        service.addDocRanges([{ startOffset: 0, endOffset: 3 }], false, { shouldFocus: false });
+        expect(inactiveAnchor?.hide).toHaveBeenCalled();
+        expect(activeAnchor?.hide).toHaveBeenCalled();
+        expect(mobileSelectionVisualsMock.show).toHaveBeenCalled();
+        service.addDocRanges([{ startOffset: 0, endOffset: 3 }], true, { shouldFocus: false });
+        expect(activeAnchor?.show).toHaveBeenCalled();
+        expect(mobileSelectionVisualsMock.hide).toHaveBeenCalled();
+    });
+
+    it('places the manual cursor from transformed document coordinates', () => {
+        vi.spyOn(TextRange.prototype as unknown as Record<'_anchorBlink', () => void>, '_anchorBlink').mockImplementation(() => {});
+        vi.spyOn(TextRange.prototype, 'refresh').mockImplementation(() => {});
+        const transformedPoint = { x: 3, y: 4 };
+        const findNodeByCoord = vi.fn(() => ({
+            node: {
+                glyphType: GlyphType.LIST,
+                streamType: DataStreamTreeTokenType.LETTER,
+            },
+            ratioX: 0.8,
+            segmentPage: 2,
+        }));
+        const findPositionByGlyph = vi.fn(() => ({
+            page: 0,
+            section: 0,
+            column: 0,
+            line: 0,
+            divide: 0,
+            glyph: 1,
+            isBack: false,
+        }));
+        const viewport = {
+            transformVector2SceneCoord: () => ({ x: 30, y: 40 }),
+            getAbsoluteVector: () => ({ x: 5, y: 6 }),
+        };
+        const scene = {
+            getViewports: () => [viewport],
+            getEngine: () => ({ name: 'engine' }),
+        };
+        const documentTransform = {
+            clone: () => ({
+                invert: () => ({
+                    applyPoint: () => transformedPoint,
+                }),
+            }),
+        };
+        const mainComponent = {
+            getOffsetConfig: () => ({
+                documentTransform,
+                pageMarginLeft: 9,
+                pageMarginTop: 11,
+            }),
+        };
+        const { renderUnit, service, univer } = createRealSelectionRenderService({ mainComponent, scene });
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        TestDocSkeletonManagerService.skeleton = {
+            getLayoutProgress: () => null,
+            findNodeByCoord,
+            findPositionByGlyph,
+        };
+        (service as unknown as { _getAllTextRanges: () => unknown[] })._getAllTextRanges = () => [{
+            startNodePosition: { glyph: 1, isBack: true },
+            segmentId: 'header-1',
+            segmentPage: 2,
+        }];
+        (service as unknown as { _getAllRectRanges: () => unknown[] })._getAllRectRanges = () => [];
+        service.setSegment('header-1');
+        service.setSegmentPage(2);
+
+        service.setCursorManually(12, 18);
+
+        expect(findNodeByCoord).toHaveBeenCalledWith(
+            transformedPoint,
+            0,
+            9,
+            11,
+            {
+                strict: true,
+                segmentId: 'header-1',
+                segmentPage: 2,
+            }
+        );
+        expect(service.getAllTextRanges()[0]).toMatchObject({
+            startNodePosition: expect.objectContaining({ glyph: 1, isBack: true }),
+            segmentId: 'header-1',
+            segmentPage: 2,
+        });
+
+        findNodeByCoord.mockClear();
+        service.setCursorManually(12, 18, true, false, { strict: false });
+        expect(findNodeByCoord).toHaveBeenCalledWith(
+            transformedPoint,
+            0,
+            9,
+            11,
+            {
+                strict: false,
+                segmentId: 'header-1',
+                segmentPage: 2,
+            }
+        );
+    });
+});

@@ -1,0 +1,430 @@
+/**
+ * Copyright 2023-present DreamNum Co., Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type { ICommand } from '../../command/command.service';
+import { BehaviorSubject } from 'rxjs';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { DOCS_FORMULA_BAR_EDITOR_UNIT_ID_KEY, DOCS_NORMAL_EDITOR_UNIT_ID_KEY } from '../../../common/const';
+import { Injector } from '../../../common/di';
+import { UniverInstanceType } from '../../../common/unit';
+import { DocumentDataModel } from '../../../docs/data-model/document-data-model';
+import { Univer } from '../../../univer';
+import { CommandService, CommandType, ICommandService } from '../../command/command.service';
+import { ConfigService, IConfigService } from '../../config/config.service';
+import { EDITOR_ACTIVATED, FOCUSING_FX_BAR_EDITOR, FOCUSING_SHAPE_TEXT_EDITOR, FOCUSING_SHEET } from '../../context/context';
+import { ContextService, IContextService } from '../../context/context.service';
+import { IUniverInstanceService } from '../../instance/instance.service';
+import { DesktopLogService, ILogService, LogLevel } from '../../log/log.service';
+import {
+    DEFAULT_UNDO_REDO_HISTORY_LIMIT,
+    IUndoRedoService,
+    LocalUndoRedoService,
+    RedoCommandId,
+    UndoCommandId,
+} from '../undoredo.service';
+
+const MUTATION_ID = 'test.mutation';
+
+describe('unit-specific undo redo status', () => {
+    it('tracks an unfocused unit without changing focus or consuming either history', () => {
+        const univer = new Univer();
+        const injector = univer.__getInjector();
+        const instanceService = injector.get(IUniverInstanceService);
+        const historyService = injector.get(IUndoRedoService);
+        const host = injector.createInstance(DocumentDataModel, { id: 'host' });
+        const child = injector.createInstance(DocumentDataModel, { id: 'child' });
+        instanceService.__addUnit(host);
+        instanceService.__addUnit(child);
+        instanceService.focusUnit(host.getUnitId());
+        const focusedStatuses: Array<{ undos: number; redos: number }> = [];
+        const subscription = historyService.undoRedoStatus$.subscribe((status) => focusedStatuses.push(status));
+        try {
+            expect(historyService.getUndoRedoStatus('missing')).toEqual({ undos: 0, redos: 0 });
+            historyService.pushUndoRedo({ unitID: host.getUnitId(), undoMutations: [{ id: MUTATION_ID, params: {} }], redoMutations: [{ id: MUTATION_ID, params: {} }] });
+            historyService.pushUndoRedo({ unitID: child.getUnitId(), undoMutations: [{ id: MUTATION_ID, params: {} }], redoMutations: [{ id: MUTATION_ID, params: {} }] });
+            historyService.pushUndoRedo({ unitID: child.getUnitId(), undoMutations: [{ id: MUTATION_ID, params: {} }], redoMutations: [{ id: MUTATION_ID, params: {} }] });
+            const notificationCount = focusedStatuses.length;
+            expect(historyService.getUndoRedoStatus(child.getUnitId())).toEqual({ undos: 2, redos: 0 });
+            expect(historyService.getUndoRedoStatus(host.getUnitId())).toEqual({ undos: 1, redos: 0 });
+            expect(instanceService.getFocusedUnit()).toBe(host);
+            expect(focusedStatuses).toHaveLength(notificationCount);
+            expect(focusedStatuses[notificationCount - 1]).toEqual({ undos: 1, redos: 0 });
+
+            instanceService.focusUnit(child.getUnitId());
+            historyService.popUndoToRedo();
+            instanceService.focusUnit(host.getUnitId());
+            expect(historyService.getUndoRedoStatus(child.getUnitId())).toEqual({ undos: 1, redos: 1 });
+            historyService.clearUndoRedo(child.getUnitId());
+            expect(historyService.getUndoRedoStatus(child.getUnitId())).toEqual({ undos: 0, redos: 0 });
+            expect(historyService.getUndoRedoStatus(host.getUnitId())).toEqual({ undos: 1, redos: 0 });
+            expect(instanceService.getFocusedUnit()).toBe(host);
+        } finally {
+            subscription.unsubscribe();
+            univer.dispose();
+        }
+    });
+});
+
+describe('shape editor undo routing', () => {
+    it.each([UniverInstanceType.UNIVER_DOC, UniverInstanceType.UNIVER_SHEET])(
+        'uses the active shape history and returns to host history after editing in unit type %s',
+        (hostType) => {
+            const univer = new Univer();
+            const injector = univer.__getInjector();
+            const host = univer.createUnit(hostType, { id: 'host' });
+            const editor = univer.createUnit(UniverInstanceType.UNIVER_DOC, { id: 'shape-editor' });
+            const instances = injector.get(IUniverInstanceService);
+            const context = injector.get(IContextService);
+            const history = injector.get(IUndoRedoService);
+            const commands = injector.get(ICommandService);
+            const mutations: string[] = [];
+            commands.registerCommand({
+                id: MUTATION_ID,
+                type: CommandType.MUTATION,
+                handler: (_accessor, params?: { label: string }) => {
+                    mutations.push(params!.label);
+                    return true;
+                },
+            });
+            try {
+                instances.focusUnit(host.getUnitId());
+                instances.setCurrentUnitForType(editor.getUnitId());
+                for (const unitID of [host.getUnitId(), editor.getUnitId(), DOCS_NORMAL_EDITOR_UNIT_ID_KEY, DOCS_FORMULA_BAR_EDITOR_UNIT_ID_KEY]) {
+                    history.pushUndoRedo({
+                        unitID,
+                        undoMutations: [{ id: MUTATION_ID, params: { label: `${unitID}-undo` } }],
+                        redoMutations: [{ id: MUTATION_ID, params: { label: `${unitID}-redo` } }],
+                    });
+                }
+                context.setContextValue(EDITOR_ACTIVATED, true);
+                context.setContextValue(FOCUSING_SHAPE_TEXT_EDITOR, true);
+                // Shape text takes precedence over the sheet editor and formula-bar contexts.
+                for (const formulaBarFocused of [false, true]) {
+                    context.setContextValue(FOCUSING_FX_BAR_EDITOR, formulaBarFocused);
+                    expect(history.pitchTopUndoElement()?.unitID).toBe(editor.getUnitId());
+                    expect(commands.syncExecuteCommand(UndoCommandId)).toBe(true);
+                    expect(history.pitchTopRedoElement()?.unitID).toBe(editor.getUnitId());
+                    expect(commands.syncExecuteCommand(RedoCommandId)).toBe(true);
+                }
+                expect(mutations).toEqual(['shape-editor-undo', 'shape-editor-redo', 'shape-editor-undo', 'shape-editor-redo']);
+                expect(history.getUndoRedoStatus(host.getUnitId())).toEqual({ undos: 1, redos: 0 });
+                expect(instances.getFocusedUnit()).toBe(host);
+
+                context.setContextValue(EDITOR_ACTIVATED, false);
+                expect(history.pitchTopUndoElement()?.unitID).toBe(host.getUnitId());
+                context.setContextValue(FOCUSING_SHAPE_TEXT_EDITOR, false);
+                expect(commands.syncExecuteCommand(UndoCommandId)).toBe(true);
+                expect(commands.syncExecuteCommand(RedoCommandId)).toBe(true);
+                expect(mutations.slice(-2)).toEqual(['host-undo', 'host-redo']);
+            } finally {
+                univer.dispose();
+            }
+        }
+    );
+});
+
+class FocusedUnit {
+    constructor(private readonly _unitId: string) {}
+
+    getUnitId() {
+        return this._unitId;
+    }
+}
+
+describe('LocalUndoRedoService', () => {
+    let injector: Injector;
+    let commandService: ICommandService;
+    let contextService: ContextService;
+    let logService: DesktopLogService;
+    let focused$: BehaviorSubject<FocusedUnit | null>;
+    let undoRedoService: LocalUndoRedoService;
+    let mutationLog: string[];
+
+    beforeEach(() => {
+        injector = new Injector();
+        injector.add([ICommandService, { useClass: CommandService }]);
+        injector.add([ILogService, { useClass: DesktopLogService }]);
+        injector.add([IContextService, { useClass: ContextService }]);
+        injector.add([IConfigService, { useClass: ConfigService }]);
+
+        commandService = injector.get(ICommandService);
+        contextService = injector.get(IContextService) as ContextService;
+        logService = injector.get(ILogService) as DesktopLogService;
+        logService.setLogLevel(LogLevel.SILENT);
+
+        focused$ = new BehaviorSubject<FocusedUnit | null>(new FocusedUnit('unit-1'));
+        class TestUniverInstanceService {
+            focused$ = focused$.asObservable();
+
+            getFocusedUnit() {
+                return focused$.value;
+            }
+        }
+
+        injector.add([IUniverInstanceService, { useClass: TestUniverInstanceService as never }]);
+        injector.add([IUndoRedoService, { useClass: LocalUndoRedoService }]);
+        undoRedoService = injector.get(IUndoRedoService) as LocalUndoRedoService;
+
+        mutationLog = [];
+        commandService.registerCommand({
+            id: MUTATION_ID,
+            type: CommandType.MUTATION,
+            handler: (_accessor, params?: { label: string; fail?: boolean }) => {
+                mutationLog.push(params?.label ?? 'unknown');
+                return !params?.fail;
+            },
+        } as ICommand);
+    });
+
+    afterEach(() => {
+        undoRedoService.dispose();
+        focused$.complete();
+        logService.dispose();
+        contextService.dispose();
+    });
+
+    it('should push undo items, clear redo stack and expose focused status', () => {
+        const statuses: Array<{ undos: number; redos: number }> = [];
+        undoRedoService.undoRedoStatus$.subscribe((status) => {
+            statuses.push(status);
+        });
+
+        undoRedoService.pushUndoRedo({
+            unitID: 'unit-1',
+            undoMutations: [{ id: MUTATION_ID, params: { label: 'undo-1' } }],
+            redoMutations: [{ id: MUTATION_ID, params: { label: 'redo-1' } }],
+            id: 'item-1',
+        });
+
+        expect(undoRedoService.pitchTopUndoElement()?.id).toBe('item-1');
+        expect(undoRedoService.pitchTopRedoElement()).toBeNull();
+
+        undoRedoService.popUndoToRedo();
+        expect(undoRedoService.pitchTopUndoElement()).toBeNull();
+        expect(undoRedoService.pitchTopRedoElement()?.id).toBe('item-1');
+
+        undoRedoService.pushUndoRedo({
+            unitID: 'unit-1',
+            undoMutations: [{ id: MUTATION_ID, params: { label: 'undo-2' } }],
+            redoMutations: [{ id: MUTATION_ID, params: { label: 'redo-2' } }],
+            id: 'item-2',
+        });
+
+        expect(undoRedoService.pitchTopRedoElement()).toBeNull();
+        expect(statuses.at(-1)).toEqual({ undos: 1, redos: 0 });
+    });
+
+    it('should retain 50 undo items by default', () => {
+        expect(DEFAULT_UNDO_REDO_HISTORY_LIMIT).toBe(50);
+
+        for (let i = 0; i <= DEFAULT_UNDO_REDO_HISTORY_LIMIT; i++) {
+            undoRedoService.pushUndoRedo({
+                unitID: 'unit-1',
+                undoMutations: [],
+                redoMutations: [],
+                id: `item-${i}`,
+            });
+        }
+
+        const itemIds: string[] = [];
+        for (let i = 0; i < DEFAULT_UNDO_REDO_HISTORY_LIMIT; i++) {
+            const item = undoRedoService.pitchTopUndoElement();
+            if (item?.id) {
+                itemIds.push(item.id);
+            }
+            undoRedoService.popUndoToRedo();
+        }
+
+        expect(itemIds).toHaveLength(DEFAULT_UNDO_REDO_HISTORY_LIMIT);
+        expect(itemIds.at(-1)).toBe('item-1');
+        expect(undoRedoService.pitchTopUndoElement()).toBeNull();
+    });
+
+    it('should group consecutive scopes without exposing the group on history items', () => {
+        const replaceGroup = undoRedoService.beginUndoRedoGroup('unit-1', 'property');
+        undoRedoService.pushUndoRedo({
+            unitID: 'unit-1',
+            undoMutations: [{ id: MUTATION_ID, params: { label: 'undo-first' } }],
+            redoMutations: [{ id: MUTATION_ID, params: { label: 'redo-first' } }],
+        });
+        replaceGroup.dispose();
+
+        const nextReplaceGroup = undoRedoService.beginUndoRedoGroup('unit-1', 'property');
+        undoRedoService.pushUndoRedo({
+            unitID: 'unit-1',
+            undoMutations: [{ id: MUTATION_ID, params: { label: 'undo-latest' } }],
+            redoMutations: [{ id: MUTATION_ID, params: { label: 'redo-latest' } }],
+        });
+        nextReplaceGroup.dispose();
+
+        expect(undoRedoService.pitchTopUndoElement()).toEqual(expect.objectContaining({
+            undoMutations: [{ id: MUTATION_ID, params: { label: 'undo-first' } }],
+            redoMutations: [{ id: MUTATION_ID, params: { label: 'redo-latest' } }],
+        }));
+
+        const appendGroup = undoRedoService.beginUndoRedoGroup('unit-1', 'compound', 'append');
+        undoRedoService.pushUndoRedo({
+            unitID: 'unit-1',
+            undoMutations: [{ id: MUTATION_ID, params: { label: 'undo-text' } }],
+            redoMutations: [{ id: MUTATION_ID, params: { label: 'redo-text' } }],
+        });
+        undoRedoService.pushUndoRedo({
+            unitID: 'unit-1',
+            undoMutations: [{ id: MUTATION_ID, params: { label: 'undo-size' } }],
+            redoMutations: [{ id: MUTATION_ID, params: { label: 'redo-size' } }],
+        });
+        appendGroup.dispose();
+
+        expect(undoRedoService.pitchTopUndoElement()).toEqual(expect.objectContaining({
+            undoMutations: [
+                { id: MUTATION_ID, params: { label: 'undo-size' } },
+                { id: MUTATION_ID, params: { label: 'undo-text' } },
+            ],
+            redoMutations: [
+                { id: MUTATION_ID, params: { label: 'redo-text' } },
+                { id: MUTATION_ID, params: { label: 'redo-size' } },
+            ],
+        }));
+    });
+
+    it('should start a new group after undo and redo', () => {
+        const group = undoRedoService.beginUndoRedoGroup('unit-1', 'property');
+        undoRedoService.pushUndoRedo({
+            unitID: 'unit-1',
+            undoMutations: [{ id: MUTATION_ID, params: { label: 'undo-first' } }],
+            redoMutations: [{ id: MUTATION_ID, params: { label: 'redo-first' } }],
+        });
+        group.dispose();
+
+        undoRedoService.popUndoToRedo();
+        undoRedoService.popRedoToUndo();
+
+        const nextGroup = undoRedoService.beginUndoRedoGroup('unit-1', 'property');
+        undoRedoService.pushUndoRedo({
+            unitID: 'unit-1',
+            undoMutations: [{ id: MUTATION_ID, params: { label: 'undo-second' } }],
+            redoMutations: [{ id: MUTATION_ID, params: { label: 'redo-second' } }],
+        });
+        nextGroup.dispose();
+
+        undoRedoService.popUndoToRedo();
+        expect(undoRedoService.pitchTopUndoElement()?.redoMutations).toEqual([
+            { id: MUTATION_ID, params: { label: 'redo-first' } },
+        ]);
+    });
+
+    it('should execute undo and redo commands against registered mutations', () => {
+        undoRedoService.pushUndoRedo({
+            unitID: 'unit-1',
+            undoMutations: [{ id: MUTATION_ID, params: { label: 'undo-run' } }],
+            redoMutations: [{ id: MUTATION_ID, params: { label: 'redo-run' } }],
+            id: 'run',
+        });
+
+        expect(commandService.syncExecuteCommand(UndoCommandId)).toBe(true);
+        expect(mutationLog).toEqual(['undo-run']);
+        expect(undoRedoService.pitchTopRedoElement()?.id).toBe('run');
+
+        expect(commandService.syncExecuteCommand(RedoCommandId)).toBe(true);
+        expect(mutationLog).toEqual(['undo-run', 'redo-run']);
+        expect(undoRedoService.pitchTopUndoElement()?.id).toBe('run');
+    });
+
+    it('should rollback the latest undo item and support batching', () => {
+        const batching = undoRedoService.__tempBatchingUndoRedo('unit-1');
+
+        undoRedoService.pushUndoRedo({
+            unitID: 'unit-1',
+            undoMutations: [{ id: MUTATION_ID, params: { label: 'undo-batch-1' } }],
+            redoMutations: [{ id: MUTATION_ID, params: { label: 'redo-batch-1' } }],
+            id: 'batch',
+        });
+        undoRedoService.pushUndoRedo({
+            unitID: 'unit-1',
+            undoMutations: [{ id: MUTATION_ID, params: { label: 'undo-batch-2' } }],
+            redoMutations: [{ id: MUTATION_ID, params: { label: 'redo-batch-2' } }],
+            id: 'batch',
+        });
+
+        batching.dispose();
+
+        const top = undoRedoService.pitchTopUndoElement();
+        expect(top?.undoMutations).toHaveLength(2);
+        expect(top?.redoMutations).toHaveLength(2);
+
+        undoRedoService.rollback('batch');
+        expect(mutationLog).toEqual(['undo-batch-1', 'undo-batch-2']);
+        expect(undoRedoService.pitchTopUndoElement()).toBeNull();
+    });
+
+    it('should resolve focused unit id from sheet editor contexts and clear unit stacks', () => {
+        contextService.setContextValue(FOCUSING_SHEET, true);
+        contextService.setContextValue(FOCUSING_FX_BAR_EDITOR, true);
+        contextService.setContextValue(EDITOR_ACTIVATED, true);
+        undoRedoService.pushUndoRedo({
+            unitID: DOCS_FORMULA_BAR_EDITOR_UNIT_ID_KEY,
+            undoMutations: [{ id: MUTATION_ID, params: { label: 'fx-undo' } }],
+            redoMutations: [],
+            id: 'fx',
+        });
+        expect(undoRedoService.pitchTopUndoElement()?.id).toBe('fx');
+
+        undoRedoService.pushUndoRedo({
+            unitID: 'unit-1',
+            undoMutations: [{ id: MUTATION_ID, params: { label: 'sheet-undo' } }],
+            redoMutations: [{ id: MUTATION_ID, params: { label: 'sheet-redo' } }],
+        });
+        // Committing a formula ends editing even if its focus context outlives the editor.
+        contextService.setContextValue(EDITOR_ACTIVATED, false);
+        expect(commandService.syncExecuteCommand(UndoCommandId)).toBe(true);
+        expect(commandService.syncExecuteCommand(RedoCommandId)).toBe(true);
+        expect(mutationLog).toEqual(['sheet-undo', 'sheet-redo']);
+
+        contextService.setContextValue(FOCUSING_FX_BAR_EDITOR, false);
+        contextService.setContextValue(EDITOR_ACTIVATED, true);
+        undoRedoService.pushUndoRedo({
+            unitID: DOCS_NORMAL_EDITOR_UNIT_ID_KEY,
+            undoMutations: [{ id: MUTATION_ID, params: { label: 'doc-undo' } }],
+            redoMutations: [],
+            id: 'doc',
+        });
+        expect(undoRedoService.pitchTopUndoElement()?.id).toBe('doc');
+
+        undoRedoService.clearUndoRedo(DOCS_NORMAL_EDITOR_UNIT_ID_KEY);
+        expect(undoRedoService.pitchTopUndoElement()).toBeNull();
+    });
+
+    it('should still move stacks on failed undo or redo execution and reject nested batching', () => {
+        undoRedoService.pushUndoRedo({
+            unitID: 'unit-1',
+            undoMutations: [{ id: MUTATION_ID, params: { label: 'undo-fail', fail: true } }],
+            redoMutations: [{ id: MUTATION_ID, params: { label: 'redo-fail', fail: true } }],
+            id: 'fail',
+        });
+
+        expect(commandService.syncExecuteCommand(UndoCommandId)).toBe(false);
+        expect(undoRedoService.pitchTopUndoElement()?.id).toBe('fail');
+        expect(undoRedoService.pitchTopRedoElement()).toBeNull();
+
+        expect(commandService.syncExecuteCommand(RedoCommandId)).toBe(false);
+        expect(undoRedoService.pitchTopRedoElement()).toBeNull();
+        expect(undoRedoService.pitchTopUndoElement()?.id).toBe('fail');
+
+        const batching = undoRedoService.__tempBatchingUndoRedo('unit-1');
+        expect(() => undoRedoService.__tempBatchingUndoRedo('unit-1')).toThrow(/cannot batching undo redo twice/);
+        batching.dispose();
+    });
+});
