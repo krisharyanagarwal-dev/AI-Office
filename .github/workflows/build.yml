@@ -1,0 +1,63 @@
+name: Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      package:
+        required: true
+        type: string
+
+env:
+  ENVIRONMENT: ${{ github.inputs.environment }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment: ${{ github.inputs.environment }}
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Restore cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache
+            node_modules
+          key: ${{ runner.os }}-build-${{ github.inputs.package }}-${{ hashFiles('**/package.json', '**/package-lock.json', '**/requirements.txt') }}
+          cache-mode: write
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          if [ -f package.json ]; then npm install; fi
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Build package
+        run: |
+          if [ -f package.json ]; then npm run build; fi
+          if [ -f setup.py ]; then python setup.py build; fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: build-${{ github.inputs.package }}-${{ github.inputs.environment }}
+          path: |
+            lib/
+            dist/
+            build/

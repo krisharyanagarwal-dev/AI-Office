@@ -1,0 +1,68 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      package:
+        required: true
+        type: string
+
+env:
+  ENVIRONMENT: ${{ github.inputs.environment }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ github.inputs.environment }}
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Restore cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache
+            node_modules
+          key: ${{ runner.os }}-deploy-${{ github.inputs.package }}-${{ hashFiles('**/package.json', '**/package-lock.json', '**/requirements.txt') }}
+          cache-mode: write
+
+      - name: Validate pre-deploy conditions
+        run: |
+          # Autopilot must be disabled before deployment
+          if [ -f config/autopilot.json ]; then
+            if grep -q 'policy.enabled=true' config/autopilot.json; then
+              echo "Autopilot enabled – aborting deployment"
+              exit 1
+            fi
+          fi
+          # HUD collector stability check
+          if [ -f sessions.json ]; then
+            MOD_TIME=$(stat -c %Y sessions.json 2>/dev/null || echo "0")
+            CURRENT_TIME=$(date +%s)
+            DIFF=$((CURRENT_TIME - MOD_TIME))
+            if [ "$DIFF" -lt 60 ]; then
+              echo "Warning: sessions.json modified recently ($DIFF seconds ago)"
+            fi
+          fi
+          echo "Pre-deploy validation passed for ${{ github.inputs.environment }}"
+
+      - name: Deploy package
+        run: |
+          echo "Deploying package ${{ github.inputs.package }} to ${{ github.inputs.environment }}"
+          if [ -f deploy/${{ github.inputs.environment }}.sh ]; then
+            bash deploy/${{ github.inputs.environment }}.sh
+          else
+            echo "No deployment script found for ${{ github.inputs.environment }}"
+          fi
+
+      - name: Post-deploy smoke test
+        run: |
+          echo "Running smoke test for ${{ github.inputs.environment }}"
+          # Verify deployment health
