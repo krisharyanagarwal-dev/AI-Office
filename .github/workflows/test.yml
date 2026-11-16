@@ -1,0 +1,69 @@
+name: Test
+
+on:
+  push:
+    paths:
+      - '**/*.py'
+      - '**/requirements.txt'
+      - '.github/workflows/test.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      package:
+        required: true
+        type: string
+
+env:
+  ENVIRONMENT: ${{ github.inputs.environment || 'dev' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    environment: ${{ env.ENVIRONMENT }}
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Restore cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache
+            node_modules
+          key: ${{ runner.os }}-test-${{ github.inputs.package || 'python' }}-${{ hashFiles('**/package.json', '**/package-lock.json', '**/requirements.txt') }}
+          cache-mode: write
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          if [ -f package.json ]; then npm install; fi
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install pytest pytest-cov 2>/dev/null || true
+
+      - name: Run tests
+        run: |
+          if [ -f package.json ]; then npm test; fi
+          if [ -f requirements.txt ]; then pytest --cov=.; fi
+
+      - name: Publish test report
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: test-report-${{ github.inputs.package || 'python' }}-${{ env.ENVIRONMENT }}
+          path: |
+            coverage/
+            test-results/
