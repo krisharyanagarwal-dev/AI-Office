@@ -16,10 +16,11 @@ import json
 import os
 import random
 import sys
+import threading
 import time
 from pathlib import Path
 
-sys.path.insert(0, "/Users/aryanagarwal/AI-Office/office-os")
+sys.path.insert(0, "/Users/aryanagarwal/AI-Office/packages/office-os")
 from core.provider_client import ProviderClient
 
 PoolUnavailable = ProviderClient.PoolUnavailable
@@ -79,11 +80,15 @@ class CloudModelOrchestrator:
     - No DNS gate - real call results drive key health
     """
 
-    def __init__(self, config_path="/Users/aryanagarwal/AI-Office/office-os/config/office.json"):
+    def __init__(self, config_path="/Users/aryanagarwal/AI-Office/packages/office-os/config/office.json"):
         self.router = ProviderRouter(config_path)
         self._consecutive_cloud_failures = 0
         self._cloud_failover_threshold = 3
         self._failover_until = 0
+        # Round-robin across all available models so concurrent workers never
+        # share the same model (keeps all keys warm, spreads load evenly).
+        self._model_rr_index = 0
+        self._model_rr_lock = threading.Lock()
 
     def _failover_pools(self, tier):
         """Return ordered pool list for this tier."""
@@ -97,27 +102,19 @@ class CloudModelOrchestrator:
         - model_name: the model to call
         - pool_name: the provider pool it belongs to
         - is_cloud: always True (cloud-only fleet)
+
+        Model assignment round-robins across ALL available models (all pools
+        in the tier's failover chain) so that concurrent workers never share
+        the same model. This keeps every key warm and spreads load evenly.
         """
         agent_id = agent_info["agent_id"]
         tier = agent_info["tier"]
         needs_heavy = agent_needs_heavy_model(agent_id)
 
-        # Primary pool for tier
-        primary_pool = TIER_POOL_MAP.get("pro" if needs_heavy or tier == "pro" else "lite", "nvidia_key1")
-
-        # Build ordered pool list: primary first, then failover chain
-        pool_order = [primary_pool]
-        for p in self._failover_pools(tier):
-            if p not in pool_order:
-                pool_order.append(p)
-
-        # Fully randomize pool order so concurrent workers don't all hit the
-        # same pool first (thundering herd on rate-limited keys). Primary pool
-        # stays in the list but its position is randomized — over many calls
-        # this spreads load evenly across all available keys.
-        random.shuffle(pool_order)
-
-        for pool_name in pool_order:
+        # Build combined list of (model, pool_name) from all available pools
+        # in this tier's failover chain.
+        candidates = []
+        for pool_name in self._failover_pools(tier):
             pool = self.router.pools.get(pool_name)
             if not pool:
                 continue
@@ -125,14 +122,22 @@ class CloudModelOrchestrator:
                 continue
             models = pool["models"]
             if needs_heavy:
-                # Pick the first model in pool (usually the heavy one)
-                model = models[0]
-            else:
-                model = self.router._round_robin_model(pool_name)
-            return model, pool_name, True
+                # Heavy agents: only heavy-ish models (first model in each pool)
+                models = models[:1]
+            for model in models:
+                candidates.append((model, pool_name))
 
-        # No pool available - caller will treat as error
-        raise RuntimeError(f"No cloud pool available for tier={tier} (all pools rate-limited/unavailable)")
+        if not candidates:
+            raise RuntimeError(
+                f"No cloud model available for tier={tier} (all pools rate-limited/unavailable)"
+            )
+
+        # Round-robin pick: concurrent workers get sequential models -> all different
+        with self._model_rr_lock:
+            model, pool_name = candidates[self._model_rr_index % len(candidates)]
+            self._model_rr_index += 1
+
+        return model, pool_name, True
 
     def call_model(self, model, pool_name, prompt, task_id=None, priority="normal",
                    max_tokens=500, temperature=0.7, timeout=None):
@@ -144,7 +149,9 @@ class CloudModelOrchestrator:
         """
         # Jitter: spread out concurrent workers so they don't all hit the same
         # pool simultaneously (thundering herd on rate-limited keys).
-        time.sleep(random.uniform(0, 5))
+        # With 20 parallel workers, wider jitter (0-10s) keeps load off the 4
+        # viable NVIDIA keys while OpenRouter/Google recover from daily caps.
+        time.sleep(random.uniform(0, 10))
 
         client = ProviderClient(pool_name, model)
         timeout = timeout or DEFAULT_TIMEOUT
@@ -169,6 +176,7 @@ class CloudModelOrchestrator:
             self._record_cloud_failure()
             raise
         except Exception as e:
+            self.router.mark_rate_limited(pool_name)
             self._record_cloud_failure()
             raise
 
@@ -217,15 +225,17 @@ class CloudModelOrchestrator:
             plan_pool = plan_pool_used
 
         # --- EXEC (primary pool, then failover chain) ---
+        # Inject the plan into the exec prompt so the exec model knows what to execute.
+        exec_prompt_with_plan = f"{exec_prompt}\n\nPLANNED TASK (from planning phase):\n{plan_text}"
         exec_model, exec_pool, _ = self.decide_model(agent_info, task_type="exec")
         try:
             exec_text, exec_model_used, exec_pool_used = self.call_model(
-                exec_model, exec_pool, exec_prompt,
+                exec_model, exec_pool, exec_prompt_with_plan,
                 task_id=f"{task_id or 'exec'}-exec", priority=priority,
             )
         except Exception as e:
             exec_text, exec_model_used, exec_pool_used = self._call_with_failover(
-                agent_info, exec_prompt, f"{task_id or 'exec'}-exec", priority,
+                agent_info, exec_prompt_with_plan, f"{task_id or 'exec'}-exec", priority,
                 skip_pool=exec_pool,
             )
             exec_model = exec_model_used

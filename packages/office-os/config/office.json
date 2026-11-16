@@ -1,0 +1,306 @@
+{
+  "office": {
+    "name": "Office OS",
+    "version": "1.0.0",
+    "god_agent": "michael",
+    "heartbeat_interval_sec": 120,
+    "max_concurrent_workers": 4,
+    "task_poll_interval_sec": 5,
+    "provider_cooldown_sec": 60,
+    "max_retries_per_task": 3,
+    "task_timeout_sec": 300
+  },
+  "provider_pools": {
+    "nvidia_key1": {
+      "provider": "nvidia",
+      "models": [
+        "nvidia/nemotron-3-ultra-550b-a55b",
+        "nvidia/nemotron-3-super-120b-a12b",
+        "nvidia/llama-3.1-405b-instruct",
+        "deepseek-ai/deepseek-v4.1-flash"
+      ],
+      "tier": "pro",
+      "rate_limit_rpm": 1000,
+      "cooldown_sec": 60
+    },
+    "nvidia_key2": {
+      "provider": "nvidia2",
+      "models": [
+        "mistralai/mistral-large-4-1t-a52b",
+        "nvidia/nemotron-3.5-lightning-30b-a3b",
+        "nvidia/llama-3.1-70b-instruct",
+        "minimax/minimax-01"
+      ],
+      "tier": "pro",
+      "rate_limit_rpm": 1000,
+      "cooldown_sec": 60
+    },
+    "nvidia_key3": {
+      "provider": "nvidia3",
+      "models": [
+        "nvidia/nemotron-3.5-lightning-30b-a3b",
+        "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+        "minimax/minimax-01"
+      ],
+      "tier": [
+        "general",
+        "lite"
+      ],
+      "rate_limit_rpm": 1000,
+      "cooldown_sec": 60
+    },
+    "nvidia_key4": {
+      "provider": "nvidia4",
+      "models": [
+        "deepseek-ai/deepseek-v4.1-flash",
+        "nvidia/nemotron-3-ultra-550b-a55b"
+      ],
+      "tier": "general",
+      "rate_limit_rpm": 1000,
+      "cooldown_sec": 60
+    },
+    "google": {
+      "provider": "google",
+      "models": [
+        "gemini-3.6-flash",
+        "gemini-3.5-flash",
+        "gemini-3.5-flash-lite"
+      ],
+      "tier": "general",
+      "rate_limit_rpm": 250,
+      "cooldown_sec": 120
+    },
+    "openrouter": {
+      "provider": "openrouter",
+      "models": [
+        "nvidia/nemotron-3.5-lightning:free",
+        "nvidia/nemotron-3-ultra-550b-a55b:free"
+      ],
+      "tier": "lite",
+      "rate_limit_rpm": 50,
+      "cooldown_sec": 300
+    },
+    "qwen_local": {
+      "provider": "ollama",
+      "models": [
+        "hauhaucs/qwen3.5-9b-uncensored-aggressive"
+      ],
+      "tier": "general",
+      "rate_limit_rpm": 1000,
+      "cooldown_sec": 0
+    }
+  },
+  "agent_tiers": {
+    "pro": [
+      "quant-research-manager",
+      "quant-researcher",
+      "backtest-auditor",
+      "quant-model-validator",
+      "risk-manager",
+      "risk-control-verifier",
+      "execution-strategist",
+      "execution-analyst",
+      "market-maker",
+      "portfolio-manager",
+      "portfolio-allocation-researcher",
+      "cost-analyst",
+      "strategy-advisor",
+      "market-regime-analyst",
+      "correlation-researcher",
+      "volatility-researcher",
+      "order-book-researcher",
+      "liquidity-researcher",
+      "exposure-analyst",
+      "performance-attribution",
+      "drawdown-analyst",
+      "liquidation-heatmap",
+      "perp-funding-analyst",
+      "signal-analyst",
+      "event-driven-researcher"
+    ],
+    "lite": [
+      "data-feed-monitor",
+      "position-sizing-analyst",
+      "trade-journal-reviewer",
+      "market-data-analyst",
+      "compliance-checker",
+      "research-archivist",
+      "trade-log-archivist"
+    ]
+  },
+  "default_model": "google/gemini-3.5-flash",
+  "small_model": "google/gemini-3.5-flash-lite",
+  "fallback_chain": [
+    "nvidia_key3",
+    "nvidia_key4",
+    "google",
+    "openrouter"
+  ],
+  "autopilot": {
+    "enabled": true,
+    "interval_min": 30,
+    "max_rounds_per_day": 24,
+    "startup_delay_sec": 60,
+    "topic": "Look at what this office has recently done and say what the single most valuable next piece of work in your specialty would be, and why.",
+    "create_tasks": true,
+    "max_reply_tokens": 2000,
+    "parallel_agents": 3,
+    "call_timeout_sec": 150
+  },
+  "autonomy": {
+    "enabled": true,
+    "stop_file": "/Users/aryanagarwal/office-os/STOP",
+    "max_act_tasks_per_day": 6,
+    "repo_allowlist": [
+      "/Users/aryanagarwal/office-os",
+      "/Users/aryanagarwal/dashboard-hub"
+    ],
+    "restart_label_allowlist": [
+      "com.aryan.office-os",
+      "com.aryan.office-os-web"
+    ],
+    "forbidden_path_patterns": [
+      ".env",
+      "*.plist",
+      "*key*",
+      "*secret*",
+      "*token*",
+      "live_orders",
+      "order",
+      "executor"
+    ],
+    "executor_enabled": true
+  },
+  "departments": [
+    {
+      "id": "quant-research",
+      "leads": [
+        "quant-research-manager",
+        "quant-researcher",
+        "signal-analyst"
+      ],
+      "sources": [
+        "dashboard-hub:/api/trading",
+        "polymarket",
+        "openalice"
+      ],
+      "brief": "Discover and validate trading edges on PAPER/TESTNET only. Gross edge is not profit: any claim must state venue, fee and funding. A horizon is viable only when its confidence interval excludes zero AND it clears modelled costs. Never lower a sample floor to get a verdict.",
+      "guardrails": [
+        "paper/testnet only",
+        "no order path ever",
+        "live_orders_allowed stays false",
+        "output to research/ only",
+        "state venue, fee and funding for every claim"
+      ]
+    },
+    {
+      "id": "backtest-validation",
+      "leads": [
+        "backtest-auditor",
+        "quant-model-validator",
+        "event-driven-researcher"
+      ],
+      "sources": [
+        "dashboard-hub:/api/trading",
+        "polymarket"
+      ],
+      "brief": "Audit backtests for look-ahead bias, data leakage, survivorship bias and overfitting. Verify CI excludes zero and that edge clears modelled costs before any strategy is considered viable.",
+      "guardrails": [
+        "paper/testnet only",
+        "no order path ever",
+        "never lower sample floor to force a verdict",
+        "output to research/ only"
+      ]
+    },
+    {
+      "id": "risk-management",
+      "leads": [
+        "risk-manager",
+        "risk-control-verifier",
+        "drawdown-analyst"
+      ],
+      "sources": [
+        "dashboard-hub:/api/trading"
+      ],
+      "brief": "Enforce position sizing, max drawdown protocol, daily loss limits and exposure limits. Verify kill switch status and PAPER-only restrictions on every cycle.",
+      "guardrails": [
+        "paper/testnet only",
+        "no order path ever",
+        "live_orders_allowed stays false",
+        "risk limits are hard gates, not guidance"
+      ]
+    },
+    {
+      "id": "execution",
+      "leads": [
+        "execution-strategist",
+        "execution-analyst",
+        "cost-analyst"
+      ],
+      "sources": [
+        "dashboard-hub:/api/trading"
+      ],
+      "brief": "Model transaction costs, slippage, funding and basis. Run cost_sensitivity on every edge claim; state venue, fee and funding assumption. Binance spot maker and taker are both 0.1% at VIP 0 — limit orders save nothing there.",
+      "guardrails": [
+        "paper/testnet only",
+        "no order path ever",
+        "every edge must pass cost_model.cost_sensitivity",
+        "output to research/ only"
+      ]
+    },
+    {
+      "id": "portfolio-management",
+      "leads": [
+        "portfolio-manager",
+        "portfolio-allocation-researcher",
+        "exposure-analyst"
+      ],
+      "sources": [
+        "dashboard-hub:/api/trading"
+      ],
+      "brief": "Size allocations across strategies, monitor correlated exposure, and enforce diversification. Aggregate exposure must stay within risk-management limits.",
+      "guardrails": [
+        "paper/testnet only",
+        "no order path ever",
+        "respect risk-management position limits"
+      ]
+    },
+    {
+      "id": "market-making",
+      "leads": [
+        "market-maker",
+        "liquidity-researcher",
+        "order-book-researcher"
+      ],
+      "sources": [
+        "dashboard-hub:/api/trading",
+        "polymarket",
+        "openalice"
+      ],
+      "brief": "Study spread capture and inventory-risk models in simulation. Monitor liquidity depth, order book imbalance and liquidation heatmaps. PAPER/TESTNET only — no live quoting.",
+      "guardrails": [
+        "paper/testnet only",
+        "no order path ever",
+        "simulation only, no live orders"
+      ]
+    },
+    {
+      "id": "compliance",
+      "leads": [
+        "compliance-checker",
+        "trade-journal-reviewer",
+        "research-archivist"
+      ],
+      "sources": [
+        "dashboard-hub:/api/trading"
+      ],
+      "brief": "Guard the PAPER-only boundary. Verify live_orders_allowed stays false, no order path exists in research/executor code, and every claim states venue, fee and funding. Audit kill switch LOCKED status.",
+      "guardrails": [
+        "paper/testnet only",
+        "no order path ever",
+        "live_orders_allowed stays false",
+        "kill switch must remain LOCKED"
+      ]
+    }
+  ]
+}
