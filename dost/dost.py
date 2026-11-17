@@ -346,6 +346,107 @@ OFFICE_CONFIG_PATH = Path("/Users/aryanagarwal/AI-Office/packages/office-os/conf
 DEBATE_DEFAULT_AGENTS = ["strategy-advisor", "cost-analyst", "risk-manager"]
 
 
+# --- Debate cost accounting -------------------------------------------------
+# Debate calls bypass the dispatcher (direct CloudModelOrchestrator), so they
+# never hit the dispatcher's record_task_outcome(). Log them here so they
+# appear in office_pnl.json with source="debate" instead of being a blind spot.
+
+TASK_LEDGER_PATH = Path("/Users/aryanagarwal/.openclaw/office_pnl.json")
+
+MODEL_COST_UNITS = {
+    "pro": 3,
+    "general": 2,
+    "lite": 1,
+}
+
+
+def _load_task_ledger() -> list[dict]:
+    try:
+        with open(TASK_LEDGER_PATH) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+def _save_task_ledger(ledger: list[dict]) -> None:
+    tmp = str(TASK_LEDGER_PATH) + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(ledger, f, indent=2)
+    os.replace(tmp, TASK_LEDGER_PATH)
+
+
+def _pool_tier_from_config(pool_name: str) -> str | None:
+    """Look up the tier string for a provider pool from office.json."""
+    try:
+        config = json.loads(OFFICE_CONFIG_PATH.read_text())
+        pools = config.get("provider_pools", {})
+        pinfo = pools.get(pool_name)
+        if pinfo:
+            return pinfo.get("tier")
+    except Exception:
+        pass
+    return None
+
+
+def _cost_units_for_pool(pool_name: str | None) -> int:
+    if not pool_name:
+        return 2
+    tier = _pool_tier_from_config(pool_name)
+    if isinstance(tier, list):
+        return min(MODEL_COST_UNITS.get(t, 2) for t in tier)
+    return MODEL_COST_UNITS.get(tier, 2)
+
+
+def _record_debate_to_pnl(
+    task_id: str,
+    agent_id: str,
+    tier: str,
+    status: str,
+    cost_units: int,
+    pool_name: str | None,
+    created_at: str,
+) -> None:
+    """Append a debate-call record to the office P&L ledger.
+
+    Mirrors the dispatcher's record_task_outcome() format so debate calls
+    appear in office_pnl.json alongside dispatcher tasks (source="debate").
+    Debate produces no verifiable outcome, so outcome_value=0 and
+    net_value=-cost_units (cost only).
+    """
+    ledger = _load_task_ledger()
+    ledger.append(
+        {
+            "task_id": task_id,
+            "agent_id": agent_id,
+            "autonomy_tier": tier,
+            "status": status,
+            "cost_units": cost_units,
+            "outcome_value": 0,
+            "net_value": -cost_units,
+            "created_at": created_at,
+            "source": "debate",
+            "pool": pool_name,
+        }
+    )
+    _save_task_ledger(ledger)
+
+
+def _check_pool_cooldowns() -> dict[str, int]:
+    """Read :8083/metrics and return {pool_name: cooldown_remaining_seconds}.
+
+    Used before debate calls so we know which pools the dispatcher is
+    cooling down (debate has its own orchestrator instance with separate
+    cooldown state). Callers can avoid cooled-down pools or log the risk.
+    """
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:8083/metrics", timeout=4) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        pools = data.get("provider_pools", {})
+        return {p: pinfo.get("cooldown_remaining", 0) for p, pinfo in pools.items()}
+    except Exception:
+        return {}
+
+
 def _agent_tiers() -> dict[str, str]:
     """Return {agent_id: tier} loaded from office.json agent_tiers."""
     tiers: dict[str, str] = {}
@@ -515,6 +616,17 @@ def dispatch_debate_to_fleet(prompt: str, agents: list[str] | None = None) -> di
     context = build_context()
     orchestrator = CloudModelOrchestrator()
 
+    # Cooldown pre-check: debate has its own orchestrator instance with
+    # separate cooldown state from the dispatcher. Log which pools are
+    # cooling down so we can avoid them / warn the user.
+    pool_cooldowns = _check_pool_cooldowns()
+    cooling = {p: c for p, c in pool_cooldowns.items() if c > 0}
+    if cooling:
+        print(
+            f"[debate] pools cooling down: "
+            + ", ".join(f"{p} ({c}s)" for p, c in cooling.items())
+        )
+
     task_ids: list[str] = []
     answers: list[dict] = []
 
@@ -576,6 +688,23 @@ def dispatch_debate_to_fleet(prompt: str, agents: list[str] | None = None) -> di
         try:
             HIVE_DIR.mkdir(parents=True, exist_ok=True)
             (HIVE_DIR / f"{task_id}.json").write_text(json.dumps(task, indent=2))
+        except Exception:
+            pass
+
+        # Cost accounting: record debate call in office_pnl.json (source="debate")
+        # so it isn't a blind spot vs dispatcher tasks.
+        status = "done" if answer_text else "error"
+        cost_units = _cost_units_for_pool(pool_used)
+        try:
+            _record_debate_to_pnl(
+                task_id=task_id,
+                agent_id=agent_id,
+                tier=tier,
+                status=status,
+                cost_units=cost_units,
+                pool_name=pool_used,
+                created_at=now,
+            )
         except Exception:
             pass
 
@@ -944,6 +1073,37 @@ def doctor() -> tuple:
     index_lock = COMPANY_DIR / ".git" / "index.lock"
     no_lock = not index_lock.exists()
     checks.append(("No .git/index.lock", no_lock, str(index_lock)))
+
+    # 8. Provider-health audit — honest read of which providers are actually
+    #    alive vs cooling down / quota-exhausted (from :8083/metrics).
+    pools_ok = True
+    pool_detail_parts = []
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:8083/metrics", timeout=4) as r:
+            metrics = json.loads(r.read().decode("utf-8"))
+        pools = metrics.get("provider_pools", {})
+        available = 0
+        total = len(pools)
+        for pname, pinfo in pools.items():
+            avail = pinfo.get("available", False)
+            cd = pinfo.get("cooldown_remaining", 0)
+            if avail and cd == 0:
+                available += 1
+                pool_detail_parts.append(f"{pname}:up")
+            elif cd > 0:
+                pools_ok = False
+                pool_detail_parts.append(f"{pname}:cooling({cd}s)")
+            else:
+                pools_ok = False
+                pool_detail_parts.append(f"{pname}:down")
+        if total == 0:
+            pools_ok = False
+            pool_detail_parts.append("no pools")
+        pool_detail = ", ".join(pool_detail_parts) if pool_detail_parts else "unknown"
+    except Exception as e:
+        pools_ok = False
+        pool_detail = f"metrics unreachable ({e})"
+    checks.append(("Provider pools healthy", pools_ok, pool_detail))
 
     # Build board
     all_pass = all(ok for _, ok, _ in checks)
