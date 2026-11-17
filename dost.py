@@ -52,6 +52,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Show what would be dispatched without writing")
     parser.add_argument("--batch", help="Batch dispatch: comma-separated prompts")
     parser.add_argument("--parent", help="Parent task ID to thread this dispatch under")
+    parser.add_argument("--review", help="Tier C review: comma-separated 'index:action' pairs (action: confirm/contest/skip/delete). Example: --review '3:confirm,7:contest,9:skip'")
     parser.add_argument("--memory", action="store_true")
     parser.add_argument("--context", action="store_true")
     parser.add_argument("--health", action="store_true", help="Check OpenAI component availability")
@@ -173,6 +174,29 @@ def main():
         print(f"Archived {n} pending findings older than 30 days.")
     elif args.weekly_digest:
         print(_dost_module.weekly_findings_digest())
+    elif args.review:
+        actions = []
+        for pair in args.review.split(","):
+            pair = pair.strip()
+            if not pair:
+                continue
+            if ":" not in pair:
+                print(f"Invalid review pair '{pair}' — use index:action (action: confirm/contest/skip/delete)")
+                sys.exit(1)
+            idx_str, act = pair.split(":", 1)
+            try:
+                idx = int(idx_str.strip())
+            except ValueError:
+                print(f"Invalid index '{idx_str}' — must be an integer")
+                sys.exit(1)
+            actions.append({"index": idx, "action": act.strip().lower()})
+        result = _dost_module.review_findings(actions)
+        print(f"Tier C review applied: {result['actions_applied']} action(s), {result['deleted']} deleted")
+        print(f"Verification after: {result['verification_after']}")
+        print(f"Total findings: {result['total_after']}")
+        for d in result["details"]:
+            err = f" — {d['error']}" if d.get("error") else ""
+            print(f"  [{d['index']}] {d['action']} → {d.get('status', d.get('agent', '?'))}{err}")
     elif args.memory:
         print(json.dumps(MEMORY.profile, indent=2))
     elif args.context:
@@ -184,7 +208,7 @@ def main():
     else:
         print(dost_greeting())
         print("\nI'm your dost. Tell me what you need: research, trading, code, writing, strategy.")
-        print("Commands: --briefing, --briefing-now, --push-telegram, --status, --dispatch, --dry-run, --batch, --debug, --parent, --results, --results-status, --results-agent, --history, --export, --synthesis, --auto-archive, --weekly-digest, --memory, --context, --health, --doctor, --department X")
+        print("Commands: --briefing, --briefing-now, --push-telegram, --status, --dispatch, --dry-run, --batch, --debug, --parent, --results, --results-status, --results-agent, --history, --history-regex, --export, --synthesis, --review, --auto-archive, --weekly-digest, --memory, --context, --health, --doctor, --department X")
 
 
 if __name__ == "__main__":

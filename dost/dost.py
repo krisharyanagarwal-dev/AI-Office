@@ -646,6 +646,73 @@ def clean_findings_store() -> dict:
     }
 
 
+# --- Tier C review completion ------------------------------------------------
+# Human-only verification of findings. Accepts confirm/contest/skip/delete
+# calls by finding index, updates verification_status, and re-runs synthesis.
+# This is the bottleneck that makes synthesis confidence meaningful.
+
+VALID_REVIEW_ACTIONS = {"confirm", "contest", "skip", "delete"}
+
+
+def review_findings(actions: list[dict]) -> dict:
+    """Apply Tier C review decisions to findings.
+
+    Each action is {"index": int, "action": "confirm"|"contest"|"skip"|"delete"}.
+    - confirm/contest/skip: set verification_status accordingly
+    - delete: remove the finding from the store entirely
+
+    Returns a summary of what changed and re-runs synthesis.
+    Human-only — this function does not make any decisions itself.
+    """
+    store = _load_findings_store()
+    findings = store.get("findings", [])
+    applied = []
+    deleted_indices = []
+
+    for action in actions:
+        idx = action.get("index")
+        act = action.get("action", "").lower()
+        if act not in VALID_REVIEW_ACTIONS:
+            applied.append({"index": idx, "action": act, "error": "invalid action"})
+            continue
+        if idx is None or not (0 <= idx < len(findings)):
+            applied.append({"index": idx, "action": act, "error": "index out of range"})
+            continue
+        f = findings[idx]
+        if act == "delete":
+            deleted_indices.append(idx)
+            applied.append({"index": idx, "action": "delete", "agent": f.get("agent", "?"),
+                            "claim": f.get("claim", "")[:80]})
+        else:
+            f["verification_status"] = act
+            f["reviewed_at"] = datetime.now(timezone.utc).isoformat()
+            applied.append({"index": idx, "action": act, "agent": f.get("agent", "?"),
+                            "claim": f.get("claim", "")[:80], "status": act})
+
+    # Remove deleted findings (highest index first to preserve positions)
+    for idx in sorted(deleted_indices, reverse=True):
+        del findings[idx]
+
+    _save_findings_store(store)
+
+    # Re-run synthesis after review
+    summary = {
+        "actions_applied": len(applied),
+        "deleted": len(deleted_indices),
+        "details": applied,
+    }
+
+    # Recompute verification counts
+    vs_counts = {}
+    for f in store.get("findings", []):
+        v = f.get("verification_status", "missing")
+        vs_counts[v] = vs_counts.get(v, 0) + 1
+    summary["verification_after"] = vs_counts
+    summary["total_after"] = len(store.get("findings", []))
+
+    return summary
+
+
 # --- Answer cache -----------------------------------------------------------
 # Repeat questions (fleet status, completion rate, error rate) return a cached
 # answer instead of burning a provider call. TTL 10 minutes.
