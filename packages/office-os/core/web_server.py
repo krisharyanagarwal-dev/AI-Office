@@ -104,6 +104,50 @@ def require_login(handler_method):
     return wrapper
 
 
+class RateLimiter:
+    """In-memory rate limiter tracking requests per API key per minute.
+
+    Each API key gets a fixed 60-second window. Requests are counted per key;
+    once the count exceeds the key's limit, further requests are rejected until
+    the window resets.
+    """
+
+    def __init__(self, default_limit: int = 60):
+        self.default_limit = default_limit
+        self._limits = {}   # api_key -> custom limit (int)
+        self._buckets = {}  # api_key -> {"count": int, "reset": float}
+
+    def set_limit(self, api_key: str, limit: int):
+        """Configure a custom per-minute limit for a specific API key."""
+        self._limits[api_key] = int(limit)
+
+    def check(self, api_key: str) -> dict:
+        """Return rate limit status for *api_key*.
+
+        Returns: {"limit", "remaining", "reset", "allowed", "retry_after"}.
+        """
+        now = time.time()
+        limit = self._limits.get(api_key, self.default_limit)
+        bucket = self._buckets.get(api_key)
+        if bucket is None or now >= bucket["reset"]:
+            bucket = {"count": 0, "reset": now + 60}
+            self._buckets[api_key] = bucket
+        bucket["count"] += 1
+        remaining = max(0, limit - bucket["count"])
+        allowed = bucket["count"] <= limit
+        retry_after = max(0, int(bucket["reset"] - now)) if not allowed else 0
+        return {
+            "limit": limit,
+            "remaining": remaining,
+            "reset": int(bucket["reset"]),
+            "allowed": allowed,
+            "retry_after": retry_after,
+        }
+
+
+RATE_LIMITER = RateLimiter()
+
+
 # Simple HTML template - CSS braces doubled to escape Python .format()
 LOGIN_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
@@ -537,6 +581,10 @@ class OfficeHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
 
+        # Rate limit API endpoints
+        if path.startswith("/api/") and not self._check_rate_limit():
+            return
+
         if path == "/login":
             self._serve_login()
         elif path == "/logout":
@@ -580,6 +628,11 @@ class OfficeHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
+
+        # Rate limit API endpoints
+        if parsed.path.startswith("/api/") and not self._check_rate_limit():
+            return
+
         if parsed.path == "/login":
             self._do_login()
         elif parsed.path == "/task":
@@ -661,6 +714,40 @@ class OfficeHandler(BaseHTTPRequestHandler):
             return False
         if email and not can_edit_workspace(workspace_id, email):
             self._send_json({"error": f"No edit access to workspace: {workspace_id}"}, status=403)
+            return False
+        return True
+
+    def _api_key(self) -> str:
+        """Identify the caller by API key: X-API-Key header, Bearer token, else 'anonymous'."""
+        key = self.headers.get("X-API-Key", "").strip()
+        if key:
+            return key
+        auth = self.headers.get("Authorization", "").strip()
+        if auth.lower().startswith("bearer "):
+            return auth[7:].strip()
+        return "anonymous"
+
+    def _check_rate_limit(self) -> bool:
+        """Enforce per-API-key rate limiting for API endpoints.
+
+        Returns True if the request may proceed. On limit exceeded, sends a
+        429 Too Many Requests with a Retry-After header and returns False.
+        """
+        status = RATE_LIMITER.check(self._api_key())
+        self._rate_limit_status = status
+        if not status["allowed"]:
+            self.send_response(429)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Retry-After", str(status["retry_after"]))
+            self.send_header("X-RateLimit-Limit", str(status["limit"]))
+            self.send_header("X-RateLimit-Remaining", "0")
+            self.send_header("X-RateLimit-Reset", str(status["reset"]))
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "error": "Too Many Requests",
+                "message": "Rate limit exceeded.",
+                "retry_after": status["retry_after"],
+            }).encode())
             return False
         return True
 
@@ -1723,6 +1810,11 @@ class OfficeHandler(BaseHTTPRequestHandler):
         """Send JSON response."""
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        rate = getattr(self, "_rate_limit_status", None)
+        if rate:
+            self.send_header("X-RateLimit-Limit", str(rate["limit"]))
+            self.send_header("X-RateLimit-Remaining", str(rate["remaining"]))
+            self.send_header("X-RateLimit-Reset", str(rate["reset"]))
         self.end_headers()
         self.wfile.write(json.dumps(data, indent=2).encode())
 
