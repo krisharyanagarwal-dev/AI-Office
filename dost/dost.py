@@ -16,7 +16,7 @@ import sys
 import time
 import glob
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 COMPANY_DIR = Path(__file__).resolve().parent.parent
@@ -1547,6 +1547,75 @@ def doctor() -> tuple:
         pools_ok = False
         pool_detail = f"metrics unreachable ({e})"
     checks.append(("Provider pools healthy", pools_ok, pool_detail))
+
+    # 9. Anomaly alerts — error rate > 5%, pool down > 10 min, findings pending > 30 days.
+    anomaly_ok = True
+    anomaly_parts = []
+    try:
+        st = _fetch_dispatcher_status()
+        if st:
+            er = st.get("error_rate_total", 0)
+            if er > 5.0:
+                anomaly_ok = False
+                anomaly_parts.append(f"error rate {er:.1f}% (>5%)")
+        # Re-fetch metrics for pool cooldown detail
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:8083/metrics", timeout=4) as r:
+                m2 = json.loads(r.read().decode("utf-8"))
+            p2 = m2.get("provider_pools", {})
+            for pname, pinfo in p2.items():
+                cd = pinfo.get("cooldown_remaining", 0)
+                if cd > 600:  # > 10 min
+                    anomaly_ok = False
+                    anomaly_parts.append(f"{pname} cooling {cd//60}min")
+        except Exception:
+            pass
+        # Findings pending > 30 days
+        store = _load_findings_store()
+        cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+        stale_pending = 0
+        for f in store.get("findings", []):
+            if f.get("verification_status") == "pending":
+                date_str = f.get("date", "")
+                if date_str:
+                    try:
+                        d = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+                        if d < cutoff:
+                            stale_pending += 1
+                    except Exception:
+                        pass
+        if stale_pending > 0:
+            anomaly_ok = False
+            anomaly_parts.append(f"{stale_pending} findings pending >30 days")
+    except Exception as e:
+        anomaly_ok = False
+        anomaly_parts.append(f"anomaly check failed ({e})")
+    anomaly_detail = "; ".join(anomaly_parts) if anomaly_parts else "all clear"
+    checks.append(("Anomaly alerts", anomaly_ok, anomaly_detail))
+
+    # 10. Quota burn projection — when will free-tier ceiling be hit?
+    quota_ok = True
+    quota_detail = "unknown"
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:8083/metrics", timeout=4) as r:
+            m3 = json.loads(r.read().decode("utf-8"))
+        fc = m3.get("free_ceiling", {})
+        ceiling = fc.get("calls_per_day_ceiling", 0)
+        calls_today = fc.get("calls_today", 0)
+        headroom_pct = fc.get("headroom_pct", 100)
+        if ceiling > 0:
+            burn_rate = calls_today / max(1, datetime.now().hour)  # calls per hour so far
+            hours_to_ceiling = (ceiling - calls_today) / max(burn_rate, 1)
+            quota_detail = f"{calls_today}/{ceiling} calls ({headroom_pct:.0f}% headroom), ~{hours_to_ceiling:.0f}h to ceiling at current burn"
+            if headroom_pct < 20:
+                quota_ok = False
+                quota_detail += " — LOW HEADROOM"
+        else:
+            quota_detail = "no ceiling data"
+    except Exception as e:
+        quota_ok = False
+        quota_detail = f"quota check failed ({e})"
+    checks.append(("Quota burn projection", quota_ok, quota_detail))
 
     # Build board
     all_pass = all(ok for _, ok, _ in checks)
