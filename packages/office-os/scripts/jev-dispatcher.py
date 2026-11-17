@@ -1608,11 +1608,27 @@ def finalize_user_task(task_file_path: str, worker_result: dict) -> dict:
 
     # Success — update with result
     task["status"] = "done"
+    task_id = task.get("id", "")
+
+    # Read full exec text from RESULT_DIR result file if available,
+    # else fall back to the worker result.
+    exec_text = worker_result.get("exec_text") or ""
+    result_file = os.path.join(RESULT_DIR, f"{task_id}.result")
+    if os.path.exists(result_file):
+        try:
+            with open(result_file) as rf:
+                result_data = json.load(rf)
+                exec_text = result_data.get("response", exec_text)
+        except Exception:
+            pass
+
     task["result"] = {
         "source": "dost",
-        "preview": (worker_result.get("exec_text") or "")[:200],
+        "preview": exec_text[:200],
+        "text": exec_text,
         "model": worker_result.get("exec_model", "?"),
         "pool": worker_result.get("exec_pool", "?"),
+        "tool": worker_result.get("exec_tool", "?"),
     }
     task["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
@@ -1838,6 +1854,14 @@ def collect_user_submitted_tasks() -> list[tuple[dict, str | None, str, str]]:
 
         agent_id = task.get("agent_id", "strategy-advisor")
         tier = "pro"  # dost-submitted tasks use pro tier
+
+        # Route dost-submitted tasks through general-assistant so plain
+        # questions get plain answers (not research framing). Keep a
+        # fallback: if "general-assistant" is not in the agent registry,
+        # keep the task's stated agent_id.
+        agent_registry = {a["agent_id"] for a in get_all_agents(load_office_config())}
+        if "general-assistant" in agent_registry:
+            agent_id = "general-assistant"
 
         # Build agent_info for the worker
         agent_info = {"agent_id": agent_id, "tier": tier}

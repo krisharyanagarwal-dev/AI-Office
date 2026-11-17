@@ -36,6 +36,7 @@ def main():
     parser.add_argument("--push-telegram", action="store_true", help="Push daily briefing to Telegram")
     parser.add_argument("--status", action="store_true", help="Show live fleet status from dispatcher metrics")
     parser.add_argument("--dispatch", nargs="?", const="", help="Submit a prompt to the fleet orchestrator")
+    parser.add_argument("--results", action="store_true", help="List recent dost-submitted tasks from the fleet hive")
     parser.add_argument("--memory", action="store_true")
     parser.add_argument("--context", action="store_true")
     parser.add_argument("--health", action="store_true", help="Check OpenAI component availability")
@@ -55,6 +56,18 @@ def main():
         prompt = args.dispatch if args.dispatch else input("Prompt to send to fleet: ")
         result = _dost_module.dispatch_prompt_to_fleet(prompt)
         print(json.dumps(result, indent=2))
+    elif args.results:
+        tasks = _dost_module.list_recent_dost_tasks()
+        if not tasks:
+            print("No dost-submitted tasks found.")
+        else:
+            for t in tasks:
+                print(
+                    f"{t['task_id']} | {t['status']} | {t['agent_id']} | "
+                    f"{t['model']} | {t['pool']} | {t['updated_at']}"
+                )
+                if t["preview"]:
+                    print(f"    preview: {t['preview']}")
     elif args.memory:
         print(json.dumps(MEMORY.profile, indent=2))
     elif args.context:

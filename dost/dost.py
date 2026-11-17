@@ -10,9 +10,11 @@ Paper only. Kill switch locked. No live orders ever.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
+import glob
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -427,6 +429,46 @@ def dispatcher_status_line() -> str:
     )
 
 
+def list_recent_dost_tasks(limit: int = 20) -> list[dict]:
+    """List recent dost-submitted tasks (source == "dost") sorted by updated_at.
+
+    Returns a list of dicts with task_id, status, result preview (first 200
+    chars), model, pool, agent_id.
+    """
+    HIVE_DIR = Path("/Users/aryanagarwal/AI-Office/packages/office-os/tasks")
+    tasks = []
+    if not HIVE_DIR.exists():
+        return tasks
+    for hive_file in glob.glob(os.path.join(HIVE_DIR, "*.json")):
+        try:
+            with open(hive_file) as f:
+                task = json.load(f)
+        except Exception:
+            continue
+        if (task.get("metadata") or {}).get("source") != "dost":
+            continue
+        result = task.get("result") or {}
+        preview = ""
+        if isinstance(result, dict):
+            preview = result.get("preview", "") or result.get("text", "") or ""
+        elif isinstance(result, str):
+            preview = result
+        preview = str(preview)[:200]
+        tasks.append(
+            {
+                "task_id": task.get("id", ""),
+                "status": task.get("status", ""),
+                "preview": preview,
+                "model": result.get("model", "?") if isinstance(result, dict) else "?",
+                "pool": result.get("pool", "?") if isinstance(result, dict) else "?",
+                "agent_id": task.get("agent_id", ""),
+                "updated_at": task.get("updated_at", ""),
+            }
+        )
+    tasks.sort(key=lambda t: t["updated_at"] or "", reverse=True)
+    return tasks[:limit]
+
+
 AUDIT_SYSTEM = """You are Dost, talking to a close friend about the health of their computer systems.
 Below is a read-only survey that just ran. Each line is one system: ok or not, and its problems.
 
@@ -606,6 +648,8 @@ def main():
                         help="Generate daily briefing and push to Telegram")
     parser.add_argument("--status", action="store_true",
                         help="Show live fleet status from dispatcher metrics")
+    parser.add_argument("--results", action="store_true",
+                        help="List recent dost-submitted tasks from the fleet hive")
     parser.add_argument("--dispatch", nargs="?", const="",
                         help="Submit a prompt to the fleet orchestrator (optional prompt text)")
     parser.add_argument("--memory", action="store_true")
@@ -623,6 +667,18 @@ def main():
             print(json.dumps(st, indent=2))
         else:
             print("Fleet status: unreachable (dispatcher may be down).")
+    elif args.results:
+        tasks = list_recent_dost_tasks()
+        if not tasks:
+            print("No dost-submitted tasks found.")
+        else:
+            for t in tasks:
+                print(
+                    f"{t['task_id']} | {t['status']} | {t['agent_id']} | "
+                    f"{t['model']} | {t['pool']} | {t['updated_at']}"
+                )
+                if t["preview"]:
+                    print(f"    preview: {t['preview']}")
     elif args.dispatch is not None:
         prompt = args.dispatch if args.dispatch else input("Prompt to send to fleet: ")
         result = dispatch_prompt_to_fleet(prompt)
