@@ -15,6 +15,7 @@ import json
 import multiprocessing
 import os
 import re
+import shutil
 import signal
 import sys
 import time
@@ -39,6 +40,15 @@ RESULT_DIR = "/Users/aryanagarwal/.openclaw/autonomous-qwen/results"
 MAX_WORKERS = 20  # Threads per process for I/O concurrency
 WORKER_PROCESSES = os.cpu_count() or 4  # True multi-core parallelism
 SKIP_DONE_MIN = 15  # Don't re-plan agents done within this many minutes
+
+# --- Task archive rotation ---
+# Once per cycle (cheap check after Phase 3), scan HIVE_DIR for dost-submitted
+# tasks (metadata.source == "dost") with status in (done, error) whose
+# updated_at is older than ARCHIVE_MAX_AGE_DAYS, and move them to
+# HIVE_DIR/archive/. Pending tasks are never touched, so
+# collect_user_submitted_tasks() keeps picking up only pending work.
+ARCHIVE_DIR = os.path.join(HIVE_DIR, "archive")
+ARCHIVE_MAX_AGE_DAYS = 7
 
 os.makedirs(HIVE_DIR, exist_ok=True)
 os.makedirs(RESULT_DIR, exist_ok=True)
@@ -1846,6 +1856,51 @@ def collect_user_submitted_tasks() -> list[tuple[dict, str | None, str, str]]:
     return user_tasks
 
 
+def archive_old_user_submitted_tasks():
+    """Rotate old dost-submitted tasks out of the live Hive.
+
+    Scans HIVE_DIR for dost-submitted tasks (metadata.source == "dost")
+    with status in (done, error) whose updated_at is older than
+    ARCHIVE_MAX_AGE_DAYS and moves them to HIVE_DIR/archive/. Creates the
+    archive directory if missing. Only done/error tasks are considered, so
+    pending tasks are never archived and collect_user_submitted_tasks()
+    (which filters by status) continues to pick up only pending work.
+    """
+    os.makedirs(ARCHIVE_DIR, exist_ok=True)
+    now = time.time()
+    cutoff = now - ARCHIVE_MAX_AGE_DAYS * 86400
+    archived = 0
+    for hive_file in glob.glob(os.path.join(HIVE_DIR, "*.json")):
+        try:
+            with open(hive_file) as f:
+                task = json.load(f)
+        except Exception:
+            continue
+        if (task.get("metadata") or {}).get("source") != "dost":
+            continue
+        if task.get("status") not in ("done", "error"):
+            continue
+        ts = task.get("updated_at") or task.get("created_at")
+        if not ts:
+            continue
+        try:
+            mtime = time.mktime(time.strptime(ts, "%Y-%m-%dT%H:%M:%SZ"))
+        except ValueError:
+            continue
+        if mtime >= cutoff:
+            continue
+        try:
+            shutil.move(
+                hive_file, os.path.join(ARCHIVE_DIR, os.path.basename(hive_file))
+            )
+            archived += 1
+        except OSError:
+            pass
+    if archived:
+        log(f"Archived {archived} old dost tasks to {ARCHIVE_DIR}")
+    return archived
+
+
 def synthesize_cycle():
     """Fan-in all findings into a consolidated fleet-level verdict.
 
@@ -2073,6 +2128,15 @@ def main():
         log(
             f"JEV cycle complete: {done_count} done, {error_count} error, {skipped_count} skipped."
         )
+
+        # --- Task archive rotation: cheap check after Phase 3 ---
+        # Moves old done/error dost tasks to HIVE_DIR/archive/ once per cycle.
+        try:
+            archived = archive_old_user_submitted_tasks()
+            if archived:
+                log(f"  Task archive rotation: {archived} task(s) archived")
+        except Exception as e:
+            log(f"  Task archive rotation failed: {e}")
 
         # --- Synthesis: fan-in all findings into a consolidated report ---
         # Like tradedesk's synthesis agent: reads every finding from the
