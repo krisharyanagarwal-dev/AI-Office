@@ -10,7 +10,7 @@ import sys
 import uuid
 import time
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
@@ -32,8 +32,11 @@ from workspace import (
     create_workspace,
     DEFAULT_WORKSPACE_ID,
 )
-from billing.meter import get_usage_summary, get_current_month_cost
+from billing.meter import get_usage_summary, get_current_month_cost, workspace_pnl_dir
 from billing.plans import get_plan, calculate_monthly_cost
+
+sys.path.insert(0, "/Users/aryanagarwal/AI-Office/dost")
+from activity_feed import get_activity_feed
 
 OFFICE_ROOT = Path("/Users/aryanagarwal/AI-Office/packages/office-os")
 CONFIG_DIR = OFFICE_ROOT / "config"
@@ -242,6 +245,18 @@ DASHBOARD_TEMPLATE = """<!DOCTYPE html>
         .status-in_progress {{ background: #f59e0b; color: white; }}
         .status-pending {{ background: #64748b; color: white; }}
         .status-assigned {{ background: #3b82f6; color: white; }}
+        .status-up {{ background: #10b981; color: white; }}
+        .status-cooling {{ background: #f59e0b; color: white; }}
+        .status-down {{ background: #ef4444; color: white; }}
+        .sparkline {{ display: flex; align-items: flex-end; gap: 4px; height: 40px; margin-top: 0.5rem; }}
+        .spark-bar {{ width: 6px; border-radius: 2px; }}
+        .spark-bar-up {{ background: #10b981; }}
+        .spark-bar-down {{ background: #ef4444; }}
+        .spark-bar-idle {{ background: #2a2a2a; }}
+        .spark-bar-cooling {{ background: #f59e0b; }}
+        .spark-label {{ font-size: 0.65rem; color: #94a3b8; text-align: center; margin-top: 0.25rem; }}
+        .spark-value {{ font-size: 0.7rem; font-family: monospace; color: #e0e0e0; }}
+        .cooldown-timer {{ font-size: 0.7rem; color: #f59e0b; font-family: monospace; }}
         .result-card {{ background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px; padding: 1rem; margin-top: 1rem; }}
         .result-card pre {{ background: #000; padding: 1rem; border-radius: 4px; overflow-x: auto; font-size: 0.8rem; font-family: monospace; white-space: pre-wrap; }}
         .form-group {{ margin-bottom: 1rem; }}
@@ -260,6 +275,14 @@ DASHBOARD_TEMPLATE = """<!DOCTYPE html>
         .qwen-form {{ display: flex; gap: 0.5rem; margin-top: 0.75rem; }}
         .qwen-form input[type="text"] {{ flex: 1; background: #0f0f0f; border: 1px solid #2a2a2a; border-radius: 4px; padding: 0.5rem; color: #e0e0e0; font-family: inherit; }}
         .qwen-result {{ background: #000; padding: 1rem; border-radius: 4px; overflow-x: auto; font-size: 0.8rem; font-family: monospace; white-space: pre-wrap; margin-top: 0.75rem; }}
+        .dispatch-form {{ display: flex; flex-direction: column; gap: 0.5rem; }}
+        .dispatch-row {{ display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: flex-end; }}
+        .dispatch-btn {{ background: #10b981; color: white; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 0.85rem; }}
+        .dispatch-btn:hover {{ background: #059669; }}
+        .dispatch-btn.secondary {{ background: #2a2a2a; }}
+        .dispatch-btn.secondary:hover {{ background: #3a3a3a; }}
+        .dispatch-result {{ font-size: 0.75rem; margin-top: 0.5rem; min-height: 1.2rem; }}
+        .quick-dispatch {{ display: flex; gap: 0.4rem; flex-wrap: wrap; margin-top: 0.5rem; }}
     </style>
 </head>
 <body>
@@ -300,11 +323,43 @@ DASHBOARD_TEMPLATE = """<!DOCTYPE html>
             <h3>Your Tasks</h3>
             {task_html}
         </div>
+        <div class="card">
+            <h3>⚡ Dispatch Task</h3>
+            <form id="dispatch-form" class="dispatch-form">
+                <label style="font-size:0.75rem;color:#94a3b8">Prompt</label>
+                <input type="text" id="dispatch-prompt" placeholder="e.g. What is the fleet completion rate?" required />
+                <div class="dispatch-row">
+                    <select id="dispatch-agent">
+                        <option value="strategy-advisor">Strategy Advisor</option>
+                        <option value="cost-analyst">Cost Analyst</option>
+                        <option value="risk-manager">Risk Manager</option>
+                        <option value="general-assistant">General Assistant</option>
+                    </select>
+                    <select id="dispatch-priority">
+                        <option value="normal">Normal</option>
+                        <option value="high">High</option>
+                        <option value="low">Low</option>
+                    </select>
+                    <button type="submit" class="dispatch-btn">Dispatch</button>
+                </div>
+                <div class="quick-dispatch">
+                    <button type="button" class="dispatch-btn secondary" onclick="quickDispatch('What is the fleet completion rate?')">Fleet Completion</button>
+                    <button type="button" class="dispatch-btn secondary" onclick="quickDispatch('Show me pending findings')">Pending Findings</button>
+                    <button type="button" class="dispatch-btn secondary" onclick="quickDispatch('What is the cost summary?')">Cost Summary</button>
+                </div>
+                <div id="dispatch-result" class="dispatch-result"></div>
+            </form>
+        </div>
     </div>
 
     <div class="card">
         <h3>Organisation</h3>
         {org_html}
+    </div>
+
+    <div class="card">
+        <h3>🏥 Provider Health</h3>
+        {provider_health_html}
     </div>
 
     <div class="card">
@@ -315,6 +370,40 @@ DASHBOARD_TEMPLATE = """<!DOCTYPE html>
     <p style="margin-top: 1rem; color: #64748b; font-size: 0.8rem;">
         Office OS — Zero Claude Tokens — Free Models Only — http://localhost:8083
     </p>
+    <script>
+        function quickDispatch(prompt) {{
+            document.getElementById('dispatch-prompt').value = prompt;
+            document.getElementById('dispatch-form').dispatchEvent(new Event('submit'));
+        }}
+        document.getElementById('dispatch-form').addEventListener('submit', async (e) => {{
+            e.preventDefault();
+            const prompt = document.getElementById('dispatch-prompt').value;
+            const agent = document.getElementById('dispatch-agent').value;
+            const priority = document.getElementById('dispatch-priority').value;
+            if (!prompt) return;
+            const resultDiv = document.getElementById('dispatch-result');
+            resultDiv.textContent = 'Dispatching...';
+            resultDiv.style.color = '#f59e0b';
+            try {{
+                const resp = await fetch('/api/task', {{
+                    method: 'POST',
+                    headers: {{ 'Content-Type': 'application/x-www-form-urlencoded' }},
+                    body: 'prompt=' + encodeURIComponent(prompt) + '&agent_id=' + encodeURIComponent(agent) + '&priority=' + encodeURIComponent(priority)
+                }});
+                const data = await resp.json();
+                if (data.ok) {{
+                    resultDiv.textContent = 'Dispatched: ' + data.task_id;
+                    resultDiv.style.color = '#10b981';
+                }} else {{
+                    resultDiv.textContent = 'Error: ' + (data.error || 'unknown');
+                    resultDiv.style.color = '#ef4444';
+                }}
+            }} catch (err) {{
+                resultDiv.textContent = 'Error: ' + err.message;
+                resultDiv.style.color = '#ef4444';
+            }}
+        }});
+    </script>
 </body>
 </html>"""
 
@@ -393,6 +482,53 @@ DASHBOARD_PUBLIC_TEMPLATE = """<!DOCTYPE html>
         .source-voice {{ color: #10b981; }}
         .source-debate {{ color: #f59e0b; }}
         .source-dost {{ color: #3b82f6; }}
+        /* Activity feed panel */
+        .activity-feed {{ display: grid; gap: 0.5rem; }}
+        .activity-item {{ display: flex; justify-content: space-between; align-items: baseline; padding: 0.5rem 0.75rem; border: 1px solid #2a2a2a; border-radius: 6px; background: #151515; font-size: 0.85rem; }}
+        .activity-item:hover {{ border-color: #3b82f6; }}
+        .activity-item .act-time {{ color: #64748b; font-size: 0.75rem; font-family: monospace; }}
+        .activity-item .act-actor {{ color: #cbd5e1; font-size: 0.8rem; }}
+        .activity-item .act-action {{ color: #e0e0e0; font-weight: 600; }}
+        .activity-item .act-target {{ color: #94a3b8; font-size: 0.8rem; }}
+        .activity-item .act-type {{ font-size: 0.7rem; padding: 0.1rem 0.45rem; border-radius: 4px; font-weight: 700; text-transform: uppercase; }}
+        .activity-type-dispatch {{ background: #3b82f6; color: white; }}
+        .activity-type-debate {{ background: #f59e0b; color: white; }}
+        .activity-type-finding {{ background: #10b981; color: white; }}
+        .activity-type-cost-alert {{ background: #ef4444; color: white; }}
+        .activity-type-system {{ background: #8b5cf6; color: white; }}
+        .activity-legend {{ display: flex; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.5rem; font-size: 0.75rem; color: #94a3b8; }}
+        .activity-legend .leg {{ display: flex; align-items: center; gap: 0.3rem; }}
+        .activity-breakdown {{ display: flex; gap: 0.75rem; flex-wrap: wrap; margin-top: 0.5rem; }}
+        .activity-breakdown .stat {{ background: #151515; border: 1px solid #2a2a2a; border-radius: 6px; padding: 0.6rem 0.9rem; text-align: center; }}
+        .activity-breakdown .stat .num {{ font-size: 1.3rem; font-family: monospace; font-weight: 700; }}
+        .activity-breakdown .stat .lbl {{ font-size: 0.68rem; color: #94a3b8; text-transform: uppercase; }}
+        .activity-empty {{ color: #64748b; font-style: italic; text-align: center; padding: 1rem; }}
+        .findings-panel {{ margin-top: 0.75rem; }}
+        .finding-status {{ display: inline-block; font-size: 0.7rem; padding: 0.1rem 0.4rem; border-radius: 4px; font-weight: 600; text-transform: uppercase; }}
+        .finding-confirmed {{ background: #10b981; color: white; }}
+        .finding-contested {{ background: #f59e0b; color: white; }}
+        .finding-pending {{ background: #64748b; color: white; }}
+        .finding-skipped {{ background: #94a3b8; color: white; }}
+        .findings-panel .finding-item {{ display: flex; justify-content: space-between; padding: 0.45rem 0; border-bottom: 1px solid #2a2a2a; font-size: 0.85rem; }}
+        .findings-panel .finding-item:last-child {{ border-bottom: none; }}
+        .findings-panel .finding-claim {{ font-family: monospace; font-size: 0.8rem; color: #cbd5e1; max-width: 420px; }}
+        .findings-panel .finding-agent {{ color: #94a3b8; font-size: 0.75rem; }}
+        .findings-panel .finding-date {{ color: #64748b; font-size: 0.75rem; font-family: monospace; }}
+        .findings-panel .agent-breakdown {{ display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.5rem; }}
+        .findings-panel .agent-chip {{ background: #151515; border: 1px solid #2a2a2a; border-radius: 4px; padding: 0.3rem 0.6rem; font-size: 0.75rem; color: #cbd5e1; }}
+        .findings-panel .tier-c-review {{ border: 1px solid #ef4444; background: #2a0a0a; border-radius: 6px; padding: 0.75rem; margin-top: 0.75rem; }}
+        .findings-panel .tier-c-title {{ color: #ef4444; font-weight: 700; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.5rem; }}
+        .findings-panel .tier-c-item {{ display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid #3a1a1a; font-size: 0.85rem; }}
+        .findings-panel .tier-c-item:last-child {{ border-bottom: none; }}
+        .cost-panel {{ background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px; padding: 1rem; }}
+        .cost-per-agent {{ width: 100%; border-collapse: collapse; font-size: 0.85rem; }}
+        .cost-per-agent th, .cost-per-agent td {{ padding: 0.4rem 0.6rem; text-align: left; border-bottom: 1px solid #2a2a2a; }}
+        .cost-per-agent th {{ color: #94a3b8; font-size: 0.7rem; text-transform: uppercase; }}
+        .cost-per-agent tr:last-child td {{ border-bottom: none; }}
+        .cost-trend {{ display: flex; gap: 1rem; }}
+        .cost-trend .stat {{ background: #151515; border: 1px solid #2a2a2a; border-radius: 6px; padding: 0.75rem; flex: 1; }}
+        .cost-trend .stat .num {{ font-size: 1.25rem; font-family: monospace; font-weight: 700; }}
+        .cost-trend .stat .lbl {{ font-size: 0.7rem; color: #94a3b8; text-transform: uppercase; }}
     </style>
 </head>
 <body>
@@ -434,22 +570,49 @@ DASHBOARD_PUBLIC_TEMPLATE = """<!DOCTYPE html>
             <div class="kv"><span class="label">Provider pools available</span><span class="value mono ok">{pools_available}/{pools_total}</span></div>
             <div class="kv"><span class="label">Free-tier headroom</span><span class="value mono">{headroom_pct}%</span></div>
         </div>
-        <div class="card">
+        <div class="card cost-panel">
             <h3>💰 Cost (Today)</h3>
-            <div class="kv"><span class="label">Cost units used</span><span class="value mono cost-badge {cost_class}">{cost_units_today}</span></div>
-            <div class="kv"><span class="label">Net value</span><span class="value mono">{net_value_today}</span></div>
-            <div class="kv"><span class="label">Tasks completed</span><span class="value mono">{tasks_completed_today}</span></div>
-            <div class="kv"><span class="label">Debate calls</span><span class="value mono">{debate_calls_today}</span></div>
-            <div class="kv"><span class="label">Voice dispatches</span><span class="value mono">{voice_dispatches_today}</span></div>
+            <div class="cost-section">
+                <h4 style="margin:0 0 0.5rem 0;font-size:0.8rem;color:#94a3b8;text-transform:uppercase;">Per Agent</h4>
+                <table class="cost-per-agent">
+                    <thead><tr><th>Agent</th><th>Cost units</th></tr></thead>
+                    <tbody>{cost_per_agent_rows}</tbody>
+                </table>
+            </div>
+            <div class="cost-section">
+                <h4 style="margin:0 0 0.5rem 0;font-size:0.8rem;color:#94a3b8;text-transform:uppercase;">Per Task Type</h4>
+                <table class="cost-per-agent">
+                    <thead><tr><th>Type</th><th>Cost units</th></tr></thead>
+                    <tbody>{cost_per_type_rows}</tbody>
+                </table>
+            </div>
+            <div class="cost-trend">
+                {trend_html}
+                <div class="kv"><span class="label">Headroom remaining</span><span class="value mono">{cost_headroom_pct}%</span></div>
+            </div>
         </div>
         <div class="card">
             <h3>🧩 Findings</h3>
             <div class="findings-grid">
                 <div class="finding-stat"><div class="num">{findings_confirmed}</div><div class="lbl">Confirmed</div></div>
                 <div class="finding-stat"><div class="num">{findings_contested}</div><div class="lbl">Contested</div></div>
-                <div class class="finding-stat"><div class="num">{findings_pending}</div><div class="lbl">Pending</div></div>
-                <div class="finding-stat"><div class="num">{findings_needs_review}</div><div class="lbl">Needs Review</div></div>
+                <div class="finding-stat"><div class="num">{findings_pending}</div><div class="lbl">Pending</div></div>
+                <div class="finding-stat"><div class="num">{findings_skipped}</div><div class="lbl">Skipped</div></div>
                 <div class="finding-stat"><div class="num">{findings_total}</div><div class="lbl">Total</div></div>
+            </div>
+            <div class="findings-panel">
+                <div style="margin-bottom:0.5rem;">
+                    <strong style="color:#94a3b8;font-size:0.75rem;text-transform:uppercase">Recent findings (last 10)</strong>
+                    {findings_recent_html}
+                </div>
+                <div style="margin-top:0.75rem;margin-bottom:0.5rem;">
+                    <strong style="color:#94a3b8;font-size:0.75rem;text-transform:uppercase">By agent</strong>
+                    <div class="agent-breakdown">{findings_agent_html}</div>
+                </div>
+                <div class="tier-c-review">
+                    <div class="tier-c-title">⚠ Pending — needs Tier C review</div>
+                    {findings_tier_c_html}
+                </div>
             </div>
         </div>
         <div class="card">
@@ -479,8 +642,8 @@ DASHBOARD_PUBLIC_TEMPLATE = """<!DOCTYPE html>
     </div>
 
     <div class="card">
-        <h3>📡 Activity Feed (last 10)</h3>
-        {activity_rows}
+        <h3>📡 Activity Feed</h3>
+        {activity_panel}
     </div>
 
     <div class="card">
@@ -775,6 +938,61 @@ class OfficeHandler(BaseHTTPRequestHandler):
             </div>
             """
 
+        # Provider health: sparkline + status badge + model names + cooldown timers
+        provider_health_html = ""
+        for name, s in provider_status.items():
+            available = s.get("available", False)
+            cd = s.get("cooldown_remaining", 0)
+            tier = s.get("tier", "?")
+            models = s.get("models", [])
+            model_short = ", ".join(m.split("/")[-1] for m in models[:2]) if models else "?"
+
+            if available and cd == 0:
+                status_text = "UP"
+                status_class = "status-up"
+                bar_class = "spark-bar-up"
+                bar_title = "UP"
+            elif cd > 0:
+                status_text = f"COOLING {cd:.0f}s"
+                status_class = "status-cooling"
+                bar_class = "spark-bar-cooling"
+                bar_title = f"COOLING {cd:.0f}s"
+            else:
+                status_text = "DOWN"
+                status_class = "status-down"
+                bar_class = "spark-bar-idle"
+                bar_title = "DOWN"
+
+            # Simple 8-point sparkline history: current + 7 recent samples (all current status)
+            history = [1 if (available and cd == 0) else (0.5 if cd > 0 else 0)] * 8
+            max_h = max(history) if max(history) > 0 else 1
+            bars = ""
+            for val in history:
+                h = int(40 * val / max_h)
+                if val >= 1:
+                    bcls = "spark-bar-up"
+                elif val > 0:
+                    bcls = "spark-bar-cooling"
+                else:
+                    bcls = "spark-bar-idle"
+                bars += f'<div class="spark-bar {bcls}" style="height:{h}px;" title="{bar_title}"></div>'
+
+            cd_html = f'<div class="cooldown-timer">{cd:.0f}s remaining</div>' if cd > 0 else ""
+
+            provider_health_html += f"""
+            <div class="provider" style="padding:0.5rem 0;">
+                <div style="font-size:0.8rem;color:#94a3b8">{escape(name.split('_')[-1])}</div>
+                <div>{bars}</div>
+                <div class="spark-label">{model_short[:14]}</div>
+                <span class="status-badge {status_class}">{status_text}</span>
+                <span style="font-size:0.8rem;color:#64748b">{escape(models[0].split('/')[-1] if models else '?')}</span>
+                {cd_html}
+            </div>
+            """
+
+        if not provider_health_html:
+            provider_health_html = '<div class="empty">No provider data.</div>'
+
         hive = Hive()
         task_rows = ""
         statuses = ["pending", "assigned", "in_progress", "done", "failed"]
@@ -827,6 +1045,7 @@ class OfficeHandler(BaseHTTPRequestHandler):
             task_html=task_rows,
             result_html=result_rows,
             org_html=_org_rows(),
+            provider_health_html=provider_health_html,
             user_name=escape(user_name),
             user_role=escape(user_role),
         )
@@ -1296,6 +1515,116 @@ class OfficeHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(payload).encode())
 
+    def build_activity_panel_html(self, workspace_id: str = "default") -> str:
+        """Build the activity feed panel HTML from workspace activity JSONL logs.
+
+        Shows: recent activity (last 10), activity by type breakdown, and recent
+        user actions. Reads from ~/.openclaw/workspaces/{workspace_id}/activity/.
+        """
+        try:
+            activities = get_activity_feed(workspace_id, limit=50) or []
+        except Exception:
+            activities = []
+
+        # Classify each activity into a type badge.
+        def classify(a):
+            action = (a.get("action") or "").lower()
+            target_type = (a.get("target_type") or "").lower()
+            if "dispatch" in action or target_type == "dispatch":
+                return "dispatch"
+            if "debate" in action or target_type == "debate":
+                return "debate"
+            if "finding" in action or target_type == "finding":
+                return "finding"
+            if "cost" in action or "alert" in action or "spike" in action:
+                return "cost-alert"
+            return "system"
+
+        # Recent activity (last 10)
+        recent = activities[:10]
+        recent_rows = ""
+        if recent:
+            for a in recent:
+                atype = classify(a)
+                ts = a.get("timestamp", "")
+                time_str = ts[11:16] if len(ts) >= 16 else ts
+                actor = escape(a.get("actor_email", "?"))
+                action = escape(a.get("action", "?"))
+                target = escape(f'{a.get("target_type", "?")}:{a.get("target_id", "?")}')
+                recent_rows += f"""
+                <div class="activity-item">
+                    <div class="act-time">{escape(time_str)}</div>
+                    <div>
+                        <span class="act-actor">{actor}</span>
+                        <span class="act-action">{action}</span>
+                        <span class="act-target">{target}</span>
+                    </div>
+                    <span class="act-type activity-type-{atype}">{atype}</span>
+                </div>
+                """
+        else:
+            recent_rows = '<div class="activity-empty">No recent activity.</div>'
+
+        # Activity by type breakdown
+        type_counts = {}
+        for a in activities:
+            atype = classify(a)
+            type_counts[atype] = type_counts.get(atype, 0) + 1
+        type_order = ["dispatch", "debate", "finding", "cost-alert", "system"]
+        type_labels = {
+            "dispatch": "Dispatch",
+            "debate": "Debate",
+            "finding": "Finding",
+            "cost-alert": "Cost Alert",
+            "system": "System",
+        }
+        breakdown_rows = ""
+        for atype in type_order:
+            count = type_counts.get(atype, 0)
+            breakdown_rows += f"""
+            <div class="stat">
+                <div class="num">{count}</div>
+                <div class="lbl">{type_labels[atype]}</div>
+            </div>
+            """
+
+        # Recent user actions (who did what, when) - last 10
+        user_rows = ""
+        if recent:
+            for a in recent:
+                ts = a.get("timestamp", "")
+                time_str = ts[11:16] if len(ts) >= 16 else ts
+                actor = escape(a.get("actor_email", "?"))
+                action = escape(a.get("action", "?"))
+                target = escape(f'{a.get("target_type", "?")}:{a.get("target_id", "?")}')
+                user_rows += f"""
+                <div class="activity-item">
+                    <div class="act-time">{escape(time_str)}</div>
+                    <div>
+                        <span class="act-actor">{actor}</span>
+                        <span class="act-action">{action}</span>
+                        <span class="act-target">{target}</span>
+                    </div>
+                    <span class="act-type activity-type-{classify(a)}">{classify(a)}</span>
+                </div>
+                """
+        else:
+            user_rows = '<div class="activity-empty">No user actions yet.</div>'
+
+        panel = f"""
+        <div class="activity-feed">
+            <div class="activity-legend">
+                {''.join(f'<span class="leg"><span class="act-type activity-type-{t}">{t}</span> {type_labels[t]}</span>' for t in type_order)}
+            </div>
+            <div class="activity-breakdown">{breakdown_rows}</div>
+            <h4 style="margin:0.5rem 0 0.25rem 0;font-size:0.8rem;color:#94a3b8;text-transform:uppercase">Recent Activity (last 10)</h4>
+            {recent_rows}
+            <h4 style="margin:1rem 0 0.25rem 0;font-size:0.8rem;color:#94a3b8;text-transform:uppercase">Recent User Actions</h4>
+            {user_rows}
+        </div>
+        """
+        return panel
+
     def _serve_dashboard_public(self):
         """Public HTML dashboard (no login): fleet status, autonomy tiers, kill switch, dost tasks, synthesis."""
         payload = self._build_metrics_payload()
@@ -1318,7 +1647,7 @@ class OfficeHandler(BaseHTTPRequestHandler):
         # Autonomy tiers (from dispatcher knowledge)
         tier_a, tier_b, tier_c = 13, 12, 7
 
-        # --- Cost panel: today's cost_units from office_pnl.json ---
+        # --- Cost panel: per-agent, per-type, trend, headroom from workspace pnl ---
         cost_units_today = 0
         net_value_today = 0
         tasks_completed_today = 0
@@ -1326,43 +1655,122 @@ class OfficeHandler(BaseHTTPRequestHandler):
         voice_dispatches_today = 0
         cost_class = "cost-ok"
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        yesterday_str = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+
+        cost_per_agent = {}   # agent_id -> cost_units today
+        cost_per_type = {}    # metric_type -> cost_units today
+        cost_yesterday = 0
         try:
-            pnl_path = Path("/Users/aryanagarwal/.openclaw/office_pnl.json")
-            if pnl_path.exists():
-                pnl = json.loads(pnl_path.read_text())
-                if isinstance(pnl, list):
-                    for t in pnl:
-                        created = t.get("created_at", "")
-                        if not created.startswith(today_str):
-                            continue
-                        cost = t.get("cost_units", 0)
-                        cost_units_today += cost
-                        net_value_today += t.get("net_value", 0)
-                        if t.get("status") == "done":
-                            tasks_completed_today += 1
-                        if t.get("source") == "debate":
-                            debate_calls_today += 1
-                        md = t.get("metadata", {}) or {}
-                        if md.get("voice_dispatch"):
-                            voice_dispatches_today += 1
-                    if cost_units_today > 100:
-                        cost_class = "cost-bad"
-                    elif cost_units_today > 50:
-                        cost_class = "cost-warn"
+            pnl_dir = workspace_pnl_dir("default")
+            if pnl_dir.exists():
+                for f in sorted(pnl_dir.iterdir()):
+                    if f.suffix != ".json":
+                        continue
+                    try:
+                        raw = json.loads(f.read_text())
+                        entries = raw if isinstance(raw, list) else [raw]
+                        for t in entries:
+                            if not isinstance(t, dict):
+                                continue
+                            created = t.get("created_at", "")
+                            day = created[:10] if created else ""
+                            cost = int(t.get("cost_units", 0) or 0)
+                            agent = t.get("agent_id", "unknown")
+                            mtype = t.get("metric_type", "task")
+                            if day == today_str:
+                                cost_units_today += cost
+                                net_value_today += int(t.get("net_value", 0) or 0)
+                                cost_per_agent[agent] = cost_per_agent.get(agent, 0) + cost
+                                cost_per_type[mtype] = cost_per_type.get(mtype, 0) + cost
+                                if t.get("status") == "done":
+                                    tasks_completed_today += 1
+                                if t.get("source") == "debate":
+                                    debate_calls_today += 1
+                                md = t.get("metadata", {}) or {}
+                                if md.get("voice_dispatch"):
+                                    voice_dispatches_today += 1
+                            elif day == yesterday_str:
+                                cost_yesterday += cost
+                    except Exception:
+                        continue
         except Exception:
             pass
 
-        # --- Findings panel: counts from findings.json ---
+        # Cost per agent rows
+        cost_per_agent_rows = ""
+        for agent, cost in sorted(cost_per_agent.items(), key=lambda x: -x[1]):
+            cost_per_agent_rows += f"""
+                <tr><td>{escape(agent)}</td><td class="mono">{cost}</td></tr>
+            """
+        if not cost_per_agent_rows:
+            cost_per_agent_rows = '<tr><td colspan="2" class="empty">No agent costs today.</td></tr>'
+
+        # Cost per task type rows (dispatch, debate, voice, history first, then any others)
+        type_order = ["dispatch", "debate", "voice", "history"]
+        cost_per_type_rows = ""
+        for mtype in type_order:
+            if mtype in cost_per_type:
+                cost_per_type_rows += f"""
+                    <tr><td>{escape(mtype)}</td><td class="mono">{cost_per_type[mtype]}</td></tr>
+                """
+        for mtype in sorted(cost_per_type.keys()):
+            if mtype not in type_order:
+                cost_per_type_rows += f"""
+                    <tr><td>{escape(mtype)}</td><td class="mono">{cost_per_type[mtype]}</td></tr>
+                """
+        if not cost_per_type_rows:
+            cost_per_type_rows = '<tr><td colspan="2" class="empty">No task-type costs today.</td></tr>'
+
+        # Trend today vs yesterday
+        if cost_yesterday > 0:
+            trend_pct = round((cost_units_today - cost_yesterday) / cost_yesterday * 100, 1)
+            trend_dir = "up" if cost_units_today >= cost_yesterday else "down"
+            trend_arrow = "▲" if cost_units_today >= cost_yesterday else "▼"
+            trend_html = f"""
+                <div class="kv"><span class="label">Today</span><span class="value mono">{cost_units_today}</span></div>
+                <div class="kv"><span class="label">Yesterday</span><span class="value mono">{cost_yesterday}</span></div>
+                <div class="kv"><span class="label">Change</span><span class="value mono {trend_dir}">{trend_arrow} {abs(trend_pct)}%</span></div>
+            """
+        else:
+            trend_html = f"""
+                <div class="kv"><span class="label">Today</span><span class="value mono">{cost_units_today}</span></div>
+                <div class="kv"><span class="label">Yesterday</span><span class="value mono">0</span></div>
+                <div class="kv"><span class="label">Change</span><span class="value mono">—</span></div>
+            """
+
+        # Headroom percentage remaining (cost-based, from workspace plan)
+        cost_headroom_pct = 100
+        try:
+            mc = get_current_month_cost("default")
+            month_cost = int(mc.get("cost_units", 0) or 0)
+            plan = get_plan("default")
+            plan_limit = int(plan.get("plan", {}).get("monthly_cost_units", 500))
+            if plan_limit > 0:
+                cost_headroom_pct = round(max(plan_limit - month_cost, 0) / plan_limit * 100, 1)
+        except Exception:
+            pass
+
+        if cost_units_today > 100:
+            cost_class = "cost-bad"
+        elif cost_units_today > 50:
+            cost_class = "cost-warn"
+
+        # --- Findings panel: counts from workspace findings store ---
         findings_confirmed = 0
         findings_contested = 0
         findings_pending = 0
-        findings_needs_review = 0
+        findings_skipped = 0
         findings_total = 0
+        findings_list = []
         try:
-            findings_path = Path("/Users/aryanagarwal/Documents/polymarket/research/findings.json")
-            if findings_path.exists():
-                findings_data = json.loads(findings_path.read_text())
-                findings_list = findings_data.get("findings", [])
+            findings_dir = workspace_findings_dir(DEFAULT_WORKSPACE_ID)
+            if findings_dir.exists():
+                for f in sorted(findings_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+                    if f.suffix == ".json":
+                        try:
+                            findings_list.append(json.loads(f.read_text()))
+                        except Exception:
+                            continue
                 findings_total = len(findings_list)
                 for f in findings_list:
                     vs = f.get("verification_status", "missing")
@@ -1372,57 +1780,78 @@ class OfficeHandler(BaseHTTPRequestHandler):
                         findings_contested += 1
                     elif vs == "pending":
                         findings_pending += 1
-                    elif vs == "needs-review":
-                        findings_needs_review += 1
+                    elif vs == "skipped":
+                        findings_skipped += 1
         except Exception:
             pass
 
-        # --- Activity feed: last 10 dost tasks with source type ---
-        activity_rows = ""
+        # Recent findings (last 10): agent, claim preview, date, verification status
+        findings_recent_html = ""
         try:
-            activity_tasks = []
-            for hive_file in glob.glob(os.path.join(HIVE_DIR, "*.json")):
-                try:
-                    with open(hive_file) as f:
-                        t = json.load(f)
-                    if t.get("metadata", {}).get("source") == "dost":
-                        activity_tasks.append(t)
-                except Exception:
-                    pass
-            activity_tasks.sort(key=lambda x: x.get("updated_at", "") or x.get("created_at", ""), reverse=True)
-            for t in activity_tasks[:10]:
-                md = t.get("metadata", {}) or {}
-                if md.get("voice_dispatch"):
-                    source_class = "source-voice"
-                    source_label = "voice"
-                    source_icon = "🎤"
-                elif md.get("debate"):
-                    source_class = "source-debate"
-                    source_label = "debate"
-                    source_icon = "🗣️"
-                else:
-                    source_class = "source-dost"
-                    source_label = "dost"
-                    source_icon = "📋"
-                ts = t.get("updated_at", "") or t.get("created_at", "")
-                time_str = ts[11:16] if len(ts) >= 16 else ts
-                activity_rows += f"""
-                <div class="activity-item">
-                    <div>
-                        <span class="activity-source {source_class}">{source_icon} {source_label}</span>
-                        <span class="task-agent">{escape(t.get('agent_id', '?'))}</span><br>
-                        <span class="task-title">{escape(t.get('title', '?'))[:80]}</span>
+            recent = sorted(findings_list, key=lambda x: x.get("date", ""), reverse=True)[:10]
+            if recent:
+                for f in recent:
+                    agent = escape(f.get("agent", "?"))
+                    claim = escape(str(f.get("claim", ""))[:90])
+                    date = f.get("date", "")
+                    date_str = date[11:16] if len(date) >= 16 else date
+                    vs = f.get("verification_status", "missing")
+                    vs_class = f"finding-{vs}" if vs in ("confirmed", "contested", "pending", "skipped") else "finding-status"
+                    findings_recent_html += f"""
+                    <div class="finding-item">
+                        <div>
+                            <div class="finding-claim">{claim}</div>
+                            <div><span class="finding-agent">{agent}</span> <span class="finding-date">{escape(date_str)}</span></div>
+                        </div>
+                        <span class="finding-status {vs_class}">{escape(vs)}</span>
                     </div>
-                    <div>
-                        <span class="activity-time">{escape(time_str)}</span><br>
-                        <span class="status-badge status-{t.get('status', 'pending')}">{escape(t.get('status', 'pending'))}</span>
-                    </div>
-                </div>
-                """
-            if not activity_rows:
-                activity_rows = '<div class="empty">No activity yet.</div>'
+                    """
+            else:
+                findings_recent_html = '<div class="empty">No recent findings.</div>'
         except Exception as e:
-            activity_rows = f'<div class="empty">Error reading activity: {escape(str(e))}</div>'
+            findings_recent_html = f'<div class="empty">Error reading findings: {escape(str(e))}</div>'
+
+        # Findings by agent breakdown
+        findings_agent_html = ""
+        try:
+            agent_counts = {}
+            for f in findings_list:
+                a = f.get("agent", "unknown")
+                agent_counts[a] = agent_counts.get(a, 0) + 1
+            if agent_counts:
+                for a, c in sorted(agent_counts.items(), key=lambda x: -x[1]):
+                    findings_agent_html += f'<span class="agent-chip">{escape(a)}: {c}</span>'
+            else:
+                findings_agent_html = '<div class="empty">No agents.</div>'
+        except Exception as e:
+            findings_agent_html = f'<div class="empty">Error: {escape(str(e))}</div>'
+
+        # Pending findings needing Tier C review (highlighted in red)
+        findings_tier_c_html = ""
+        try:
+            tier_c = [f for f in findings_list if f.get("verification_status") == "pending"]
+            if tier_c:
+                for f in tier_c[:10]:
+                    agent = escape(f.get("agent", "?"))
+                    claim = escape(str(f.get("claim", ""))[:90])
+                    date = f.get("date", "")
+                    date_str = date[11:16] if len(date) >= 16 else date
+                    findings_tier_c_html += f"""
+                    <div class="tier-c-item">
+                        <div>
+                            <div class="finding-claim">{claim}</div>
+                            <div><span class="finding-agent">{agent}</span> <span class="finding-date">{escape(date_str)}</span></div>
+                        </div>
+                        <span class="finding-status finding-pending">Pending</span>
+                    </div>
+                    """
+            else:
+                findings_tier_c_html = '<div class="empty">No pending findings awaiting Tier C review.</div>'
+        except Exception as e:
+            findings_tier_c_html = f'<div class="empty">Error: {escape(str(e))}</div>'
+
+        # --- Activity feed panel: recent activity, type breakdown, user actions ---
+        activity_panel = self.build_activity_panel_html(workspace_id="default")
 
         # --- Provider health sparkline: up/down per pool ---
         sparkline_html = ""
@@ -1524,14 +1953,21 @@ class OfficeHandler(BaseHTTPRequestHandler):
             debate_calls_today=debate_calls_today,
             voice_dispatches_today=voice_dispatches_today,
             cost_class=cost_class,
+            cost_per_agent_rows=cost_per_agent_rows,
+            cost_per_type_rows=cost_per_type_rows,
+            trend_html=trend_html,
+            cost_headroom_pct=cost_headroom_pct,
             # Findings panel
             findings_confirmed=findings_confirmed,
             findings_contested=findings_contested,
             findings_pending=findings_pending,
-            findings_needs_review=findings_needs_review,
+            findings_skipped=findings_skipped,
             findings_total=findings_total,
-            # Activity feed
-            activity_rows=activity_rows,
+            findings_recent_html=findings_recent_html,
+            findings_agent_html=findings_agent_html,
+            findings_tier_c_html=findings_tier_c_html,
+            # Activity feed panel
+            activity_panel=activity_panel,
             # Provider health sparkline
             sparkline_html=sparkline_html,
             dost_rows=dost_rows,
