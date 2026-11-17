@@ -24,8 +24,21 @@ DOST_DIR = Path(__file__).resolve().parent
 DOST_MEMORY = DOST_DIR / "memory.json"
 DOST_HISTORY = DOST_DIR / "history.jsonl"
 DOST_BRIEFINGS = DOST_DIR / "briefings"
+DOST_TEMPLATES = DOST_DIR / "templates"
 DOST_DIR.mkdir(parents=True, exist_ok=True)
 DOST_BRIEFINGS.mkdir(parents=True, exist_ok=True)
+DOST_TEMPLATES.mkdir(parents=True, exist_ok=True)
+
+# Alert webhook URL — optional, read from env or config file.
+ALERT_WEBHOOK_URL = None
+_webhook_path = Path.home() / ".openclaw" / "alert_webhook.json"
+if _webhook_path.exists():
+    try:
+        ALERT_WEBHOOK_URL = json.loads(_webhook_path.read_text()).get("url")
+    except Exception:
+        pass
+if not ALERT_WEBHOOK_URL:
+    ALERT_WEBHOOK_URL = os.environ.get("ALERT_WEBHOOK_URL")
 
 sys.path.insert(0, str(COMPANY_DIR))
 sys.path.insert(0, str(DOST_DIR))
@@ -1799,6 +1812,126 @@ def doctor() -> tuple:
         cost_cap_detail = f"cost cap check failed ({e})"
     checks.append(("Daily cost cap", cost_cap_ok, cost_cap_detail))
 
+    # 12. Alert webhook — POST anomalies to configured webhook URL.
+    webhook_ok = True
+    webhook_detail = "no URL configured"
+    try:
+        if ALERT_WEBHOOK_URL:
+            # Fire and forget — don't block the health check.
+            import threading
+
+            def _post_webhook():
+                try:
+                    payload = json.dumps(
+                        {
+                            "check": "dost-doctor",
+                            "status": "fail" if not all_pass else "pass",
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "checks": [
+                                {"name": name, "ok": ok, "detail": detail}
+                                for name, ok, detail in checks
+                                if not ok
+                            ],
+                        }
+                    ).encode()
+                    req = urllib.request.Request(
+                        ALERT_WEBHOOK_URL,
+                        data=payload,
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        if resp.status >= 400:
+                            webhook_ok = False
+                            webhook_detail = f"webhook returned {resp.status}"
+                except Exception as e:
+                    webhook_ok = False
+                    webhook_detail = f"webhook failed ({e})"
+
+            threading.Thread(target=_post_webhook, daemon=True).start()
+            webhook_detail = "configured, firing async"
+        else:
+            webhook_detail = "no ALERT_WEBHOOK_URL set"
+    except Exception as e:
+        webhook_ok = False
+        webhook_detail = f"webhook setup failed ({e})"
+    checks.append(("Alert webhook", webhook_ok, webhook_detail))
+
+    # 13. Cost anomaly detection — today's cost vs 7-day average.
+    cost_anomaly_ok = True
+    cost_anomaly_detail = "unknown"
+    try:
+        pnl_path = Path("/Users/aryanagarwal/.openclaw/office_pnl.json")
+        if pnl_path.exists():
+            pnl = json.loads(pnl_path.read_text())
+            if isinstance(pnl, list) and len(pnl) > 1:
+                today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                today_cost = sum(
+                    t.get("cost_units", 0)
+                    for t in pnl
+                    if t.get("created_at", "").startswith(today)
+                )
+                # 7-day average excluding today
+                past_costs = []
+                for i in range(2, 8):
+                    day = (datetime.now(timezone.utc) - timedelta(days=i)).strftime(
+                        "%Y-%m-%d"
+                    )
+                    day_cost = sum(
+                        t.get("cost_units", 0)
+                        for t in pnl
+                        if t.get("created_at", "").startswith(day)
+                    )
+                    past_costs.append(day_cost)
+                avg_cost = sum(past_costs) / max(1, len(past_costs))
+                cost_anomaly_detail = f"Today: {today_cost}, 7-day avg: {avg_cost:.1f}"
+                if today_cost > avg_cost * 1.5 and today_cost > 20:
+                    cost_anomaly_ok = False
+                    cost_anomaly_detail += " — SPIKE DETECTED"
+                elif today_cost > avg_cost * 1.2 and today_cost > 20:
+                    cost_anomaly_detail += " — elevated"
+                else:
+                    cost_anomaly_detail += " — normal"
+            else:
+                cost_anomaly_detail = "insufficient history"
+        else:
+            cost_anomaly_detail = "no P&L file"
+    except Exception as e:
+        cost_anomaly_ok = False
+        cost_anomaly_detail = f"cost anomaly check failed ({e})"
+    checks.append(("Cost anomaly", cost_anomaly_ok, cost_anomaly_detail))
+
+    # 14. Finding expiry reminder — pending findings > 7 days.
+    finding_expiry_ok = True
+    finding_expiry_detail = "unknown"
+    try:
+        store = _load_findings_store()
+        cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+        stale = []
+        for f in store.get("findings", []):
+            if f.get("verification_status") == "pending":
+                date_str = f.get("date", "")
+                if date_str:
+                    try:
+                        d = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+                        if d < cutoff:
+                            stale.append(
+                                f"{f.get('agent', '?')}: {f.get('claim', '')[:50]}"
+                            )
+                    except Exception:
+                        pass
+        if stale:
+            finding_expiry_ok = False
+            finding_expiry_detail = f"{len(stale)} stale: " + "; ".join(stale[:3])
+            if len(stale) > 3:
+                finding_expiry_detail += f" (+{len(stale) - 3} more)"
+        else:
+            finding_expiry_detail = "none stale"
+    except Exception as e:
+        finding_expiry_ok = False
+        finding_expiry_detail = f"finding expiry check failed ({e})"
+    checks.append(("Finding expiry", finding_expiry_ok, finding_expiry_detail))
+
     # Build board
     all_pass = all(ok for _, ok, _ in checks)
     lines = [
@@ -2011,6 +2144,28 @@ def weekly_findings_digest() -> str:
     return "\n".join(lines)
 
 
+def load_template(name: str) -> dict | None:
+    """Load a task template from dost/templates/<name>.json.
+
+    Template format:
+    {
+        "prompt": "What is the fleet completion rate?",
+        "agent_id": "strategy-advisor",
+        "priority": "normal"
+    }
+    """
+    template_path = DOST_TEMPLATES / f"{name}.json"
+    if not template_path.exists():
+        # Also try without .json extension
+        template_path = DOST_TEMPLATES / name
+        if not template_path.exists():
+            return None
+    try:
+        return json.loads(template_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="THE CLAUDE COMPANY — Dost")
@@ -2029,6 +2184,8 @@ def main():
                         help="Submit a prompt to the fleet orchestrator (optional prompt text)")
     parser.add_argument("--debate", nargs="?", const="",
                         help="Debate mode: fan a question to multiple pro agents and synthesize")
+    parser.add_argument("--template", nargs="?", const="",
+                        help="Task template: load saved prompt from dost/templates/<name>.json")
     parser.add_argument("--memory", action="store_true")
     parser.add_argument("--context", action="store_true")
     parser.add_argument("--health", action="store_true", help="Check OpenAI component availability")
@@ -2084,6 +2241,17 @@ def main():
         prompt = args.debate if args.debate else input("Debate question: ")
         result = dispatch_debate_to_fleet(prompt)
         print(json.dumps(result, indent=2))
+    elif args.template is not None:
+        template_name = args.template if args.template else input("Template name: ")
+        template = load_template(template_name)
+        if not template:
+            print(f"No template found: {template_name}")
+        else:
+            prompt = template.get("prompt", "")
+            agent_id = template.get("agent_id")
+            priority = template.get("priority", "normal")
+            result = dispatch_prompt_to_fleet(prompt, agent_id=agent_id, priority=priority)
+            print(json.dumps(result, indent=2))
     elif args.memory:
         print(json.dumps(MEMORY.profile, indent=2))
     elif args.context:

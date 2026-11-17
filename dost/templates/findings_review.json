@@ -1,0 +1,5 @@
+{
+    "prompt": "Show me all findings that need Tier C review (pending, contested, needs-review).",
+    "agent_id": "risk-control-verifier",
+    "priority": "normal"
+}
