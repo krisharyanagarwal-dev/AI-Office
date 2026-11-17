@@ -22,11 +22,14 @@ SORRY="Sorry, I'm having trouble reaching Dost right now. Please try again later
 
 # Clean Dost output for speech:
 #   1. Drop ANSI escape codes
-#   2. Strip emoji symbols (e.g. 📊 🤖) so "say" doesn't read their names
+#   2. Strip emoji symbols (📊 🤖 etc.) so "say" doesn't read their names.
+#      Explicit Unicode ranges are used instead of \p{Emoji} because this
+#      Perl's \p{Emoji} wrongly matches ASCII digits — numbers must stay
+#      verbatim (Dost principle). Digits, ₹ and ≥ are preserved.
 #   3. Trim whitespace and drop blank lines
 clean_text() {
     sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' \
-        | perl -CSD -pe 's/\p{Emoji}//g' \
+        | perl -CSD -pe 's/[\x{1F300}-\x{1F9FF}\x{2600}-\x{27BF}\x{FE0F}\x{200D}]//g' \
         | sed 's/[[:space:]]*$//' \
         | sed -e '/^[[:space:]]*$/d' -e 's/^[[:space:]]*//'
 }
