@@ -10,6 +10,7 @@ import sys
 import uuid
 import time
 import urllib.request
+from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
@@ -313,6 +314,26 @@ DASHBOARD_PUBLIC_TEMPLATE = """<!DOCTYPE html>
         .mono {{ font-family: monospace; font-size: 0.85rem; }}
         .small {{ font-size: 0.8rem; color: #94a3b8; }}
         .ok {{ color: #10b981; }}
+        .cost-badge {{ display: inline-block; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.75rem; font-weight: 700; }}
+        .cost-ok {{ background: #10b981; color: white; }}
+        .cost-warn {{ background: #f59e0b; color: white; }}
+        .cost-bad {{ background: #ef4444; color: white; }}
+        .sparkline {{ display: flex; align-items: flex-end; gap: 2px; height: 40px; margin-top: 0.5rem; }}
+        .spark-bar {{ width: 6px; background: #3b82f6; border-radius: 2px; }}
+        .spark-bar.up {{ background: #10b981; }}
+        .spark-bar.down {{ background: #ef4444; }}
+        .spark-bar.idle {{ background: #2a2a2a; }}
+        .findings-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 0.5rem; }}
+        .finding-stat {{ background: #151515; border: 1px solid #2a2a2a; border-radius: 6px; padding: 0.75rem; text-align: center; }}
+        .finding-stat .num {{ font-size: 1.5rem; font-family: monospace; font-weight: 700; }}
+        .finding-stat .lbl {{ font-size: 0.7rem; color: #94a3b8; text-transform: uppercase; }}
+        .activity-item {{ display: flex; justify-content: space-between; padding: 0.45rem 0; border-bottom: 1px solid #2a2a2a; font-size: 0.85rem; }}
+        .activity-item:last-child {{ border-bottom: none; }}
+        .activity-time {{ color: #64748b; font-size: 0.75rem; }}
+        .activity-source {{ font-family: monospace; font-size: 0.75rem; }}
+        .source-voice {{ color: #10b981; }}
+        .source-debate {{ color: #f59e0b; }}
+        .source-dost {{ color: #3b82f6; }}
     </style>
 </head>
 <body>
@@ -326,7 +347,7 @@ DASHBOARD_PUBLIC_TEMPLATE = """<!DOCTYPE html>
     </header>
     <div class="refresh">
         <button class="btn" onclick="location.reload()">Refresh</button>
-        <span class="small">Auto-refresh every 30s · Fleet status · Kill switch · Dost tasks · Synthesis</span>
+        <span class="small">Auto-refresh every 30s · Fleet status · Kill switch · Dost tasks · Synthesis · Cost · Findings · Activity</span>
     </div>
 
     <div class="card">
@@ -354,11 +375,40 @@ DASHBOARD_PUBLIC_TEMPLATE = """<!DOCTYPE html>
             <div class="kv"><span class="label">Provider pools available</span><span class="value mono ok">{pools_available}/{pools_total}</span></div>
             <div class="kv"><span class="label">Free-tier headroom</span><span class="value mono">{headroom_pct}%</span></div>
         </div>
+        <div class="card">
+            <h3>💰 Cost (Today)</h3>
+            <div class="kv"><span class="label">Cost units used</span><span class="value mono cost-badge {cost_class}">{cost_units_today}</span></div>
+            <div class="kv"><span class="label">Net value</span><span class="value mono">{net_value_today}</span></div>
+            <div class="kv"><span class="label">Tasks completed</span><span class="value mono">{tasks_completed_today}</span></div>
+            <div class="kv"><span class="label">Debate calls</span><span class="value mono">{debate_calls_today}</span></div>
+            <div class="kv"><span class="label">Voice dispatches</span><span class="value mono">{voice_dispatches_today}</span></div>
+        </div>
+        <div class="card">
+            <h3>🧩 Findings</h3>
+            <div class="findings-grid">
+                <div class="finding-stat"><div class="num">{findings_confirmed}</div><div class="lbl">Confirmed</div></div>
+                <div class="finding-stat"><div class="num">{findings_contested}</div><div class="lbl">Contested</div></div>
+                <div class="finding-stat"><div class="num">{findings_pending}</div><div class="lbl">Pending</div></div>
+                <div class="finding-stat"><div class="num">{findings_needs_review}</div><div class="lbl">Needs Review</div></div>
+                <div class="finding-stat"><div class="num">{findings_total}</div><div class="lbl">Total</div></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <h3>🏥 Provider Health</h3>
+        <div class="sparkline">{sparkline_html}</div>
+        <div class="small">Green = up · Red = down/cooling · Dim = idle</div>
     </div>
 
     <div class="card">
         <h3>🧩 Recent Dost Tasks (last 10)</h3>
         {dost_rows}
+    </div>
+
+    <div class="card">
+        <h3>📡 Activity Feed (last 10)</h3>
+        {activity_rows}
     </div>
 
     <div class="card">
@@ -1013,6 +1063,143 @@ class OfficeHandler(BaseHTTPRequestHandler):
         # Autonomy tiers (from dispatcher knowledge)
         tier_a, tier_b, tier_c = 13, 12, 7
 
+        # --- Cost panel: today's cost_units from office_pnl.json ---
+        cost_units_today = 0
+        net_value_today = 0
+        tasks_completed_today = 0
+        debate_calls_today = 0
+        voice_dispatches_today = 0
+        cost_class = "cost-ok"
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        try:
+            pnl_path = Path("/Users/aryanagarwal/.openclaw/office_pnl.json")
+            if pnl_path.exists():
+                pnl = json.loads(pnl_path.read_text())
+                if isinstance(pnl, list):
+                    for t in pnl:
+                        created = t.get("created_at", "")
+                        if not created.startswith(today_str):
+                            continue
+                        cost = t.get("cost_units", 0)
+                        cost_units_today += cost
+                        net_value_today += t.get("net_value", 0)
+                        if t.get("status") == "done":
+                            tasks_completed_today += 1
+                        if t.get("source") == "debate":
+                            debate_calls_today += 1
+                        md = t.get("metadata", {}) or {}
+                        if md.get("voice_dispatch"):
+                            voice_dispatches_today += 1
+                    if cost_units_today > 100:
+                        cost_class = "cost-bad"
+                    elif cost_units_today > 50:
+                        cost_class = "cost-warn"
+        except Exception:
+            pass
+
+        # --- Findings panel: counts from findings.json ---
+        findings_confirmed = 0
+        findings_contested = 0
+        findings_pending = 0
+        findings_needs_review = 0
+        findings_total = 0
+        try:
+            findings_path = Path("/Users/aryanagarwal/Documents/polymarket/research/findings.json")
+            if findings_path.exists():
+                findings_data = json.loads(findings_path.read_text())
+                findings_list = findings_data.get("findings", [])
+                findings_total = len(findings_list)
+                for f in findings_list:
+                    vs = f.get("verification_status", "missing")
+                    if vs == "confirmed":
+                        findings_confirmed += 1
+                    elif vs == "contested":
+                        findings_contested += 1
+                    elif vs == "pending":
+                        findings_pending += 1
+                    elif vs == "needs-review":
+                        findings_needs_review += 1
+        except Exception:
+            pass
+
+        # --- Activity feed: last 10 dost tasks with source type ---
+        activity_rows = ""
+        try:
+            activity_tasks = []
+            for hive_file in glob.glob(os.path.join(HIVE_DIR, "*.json")):
+                try:
+                    with open(hive_file) as f:
+                        t = json.load(f)
+                    if t.get("metadata", {}).get("source") == "dost":
+                        activity_tasks.append(t)
+                except Exception:
+                    pass
+            activity_tasks.sort(key=lambda x: x.get("updated_at", "") or x.get("created_at", ""), reverse=True)
+            for t in activity_tasks[:10]:
+                md = t.get("metadata", {}) or {}
+                if md.get("voice_dispatch"):
+                    source_class = "source-voice"
+                    source_label = "voice"
+                    source_icon = "🎤"
+                elif md.get("debate"):
+                    source_class = "source-debate"
+                    source_label = "debate"
+                    source_icon = "🗣️"
+                else:
+                    source_class = "source-dost"
+                    source_label = "dost"
+                    source_icon = "📋"
+                ts = t.get("updated_at", "") or t.get("created_at", "")
+                time_str = ts[11:16] if len(ts) >= 16 else ts
+                activity_rows += f"""
+                <div class="activity-item">
+                    <div>
+                        <span class="activity-source {source_class}">{source_icon} {source_label}</span>
+                        <span class="task-agent">{escape(t.get('agent_id', '?'))}</span><br>
+                        <span class="task-title">{escape(t.get('title', '?'))[:80]}</span>
+                    </div>
+                    <div>
+                        <span class="activity-time">{escape(time_str)}</span><br>
+                        <span class="status-badge status-{t.get('status', 'pending')}">{escape(t.get('status', 'pending'))}</span>
+                    </div>
+                </div>
+                """
+            if not activity_rows:
+                activity_rows = '<div class="empty">No activity yet.</div>'
+        except Exception as e:
+            activity_rows = f'<div class="empty">Error reading activity: {escape(str(e))}</div>'
+
+        # --- Provider health sparkline: up/down per pool ---
+        sparkline_html = ""
+        try:
+            for pname, pinfo in pools.items():
+                avail = pinfo.get("available", False)
+                cd = pinfo.get("cooldown_remaining", 0)
+                tier = pinfo.get("tier", "?")
+                models = pinfo.get("models", [])
+                model_short = models[0].split("/")[-1] if models else "?"
+                if avail and cd == 0:
+                    bar_class = "spark-bar up"
+                    bar_title = "UP"
+                elif cd > 0:
+                    bar_class = "spark-bar down"
+                    bar_title = f"COOLING {cd:.0f}s"
+                else:
+                    bar_class = "spark-bar idle"
+                    bar_title = "IDLE"
+                height = 30 if (avail and cd == 0) else (15 if cd > 0 else 8)
+                sparkline_html += f"""
+                <div style="display:flex;flex-direction:column;align-items:center;gap:4px;width:70px;">
+                    <div class="spark-bar {bar_class}" style="height:{height}px;" title="{pname} ({tier}): {bar_title}"></div>
+                    <div class="activity-time" style="font-size:0.65rem">{escape(pname.split('_')[-1])}</div>
+                    <div class="activity-time" style="font-size:0.6rem">{model_short[:12]}</div>
+                </div>
+                """
+            if not sparkline_html:
+                sparkline_html = '<div class="empty">No provider data.</div>'
+        except Exception:
+            sparkline_html = '<div class="empty">Provider data unavailable.</div>'
+
         # Recent dost tasks (last 10, source=="dost") with status and result preview
         dost_rows = ""
         try:
@@ -1075,6 +1262,23 @@ class OfficeHandler(BaseHTTPRequestHandler):
             pools_available=pools_available,
             pools_total=pools_total,
             headroom_pct=free.get("headroom_pct", 0),
+            # Cost panel
+            cost_units_today=cost_units_today,
+            net_value_today=net_value_today,
+            tasks_completed_today=tasks_completed_today,
+            debate_calls_today=debate_calls_today,
+            voice_dispatches_today=voice_dispatches_today,
+            cost_class=cost_class,
+            # Findings panel
+            findings_confirmed=findings_confirmed,
+            findings_contested=findings_contested,
+            findings_pending=findings_pending,
+            findings_needs_review=findings_needs_review,
+            findings_total=findings_total,
+            # Activity feed
+            activity_rows=activity_rows,
+            # Provider health sparkline
+            sparkline_html=sparkline_html,
             dost_rows=dost_rows,
             synthesis=escape(synthesis),
         )
