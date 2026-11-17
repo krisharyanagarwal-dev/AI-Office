@@ -388,10 +388,23 @@ DASHBOARD_PUBLIC_TEMPLATE = """<!DOCTYPE html>
             <div class="findings-grid">
                 <div class="finding-stat"><div class="num">{findings_confirmed}</div><div class="lbl">Confirmed</div></div>
                 <div class="finding-stat"><div class="num">{findings_contested}</div><div class="lbl">Contested</div></div>
-                <div class="finding-stat"><div class="num">{findings_pending}</div><div class="lbl">Pending</div></div>
+                <div class class="finding-stat"><div class="num">{findings_pending}</div><div class="lbl">Pending</div></div>
                 <div class="finding-stat"><div class="num">{findings_needs_review}</div><div class="lbl">Needs Review</div></div>
                 <div class="finding-stat"><div class="num">{findings_total}</div><div class="lbl">Total</div></div>
             </div>
+        </div>
+        <div class="card">
+            <h3>⚡ Dispatch Task</h3>
+            <form id="dispatch-form" style="display:flex;flex-direction:column;gap:0.5rem;">
+                <label style="font-size:0.75rem;color:#94a3b8">Send a prompt to the fleet:</label>
+                <input type="text" id="dispatch-prompt" placeholder="e.g. What is the fleet status?" style="background:#0f0f0f;border:1px solid #2a2a2a;border-radius:4px;padding:0.5rem;color:#e0e0e0;font-family:inherit;font-size:0.85rem;" />
+                <div style="display:flex;gap:0.5rem;">
+                    <button type="submit" class="btn" style="padding:0.5rem 1rem;font-size:0.85rem;">Dispatch</button>
+                    <button type="button" class="btn secondary" onclick="quickDispatch('What is the current fleet completion rate and error rate?')" style="padding:0.5rem 1rem;font-size:0.75rem;">Fleet Status</button>
+                    <button type="button" class="btn secondary" onclick="quickDispatch('Show me pending findings needing review')" style="padding:0.5rem 1rem;font-size:0.75rem;">Findings Review</button>
+                </div>
+                <div id="dispatch-result" style="font-size:0.75rem;color:#10b981;margin-top:0.5rem;"></div>
+            </form>
         </div>
     </div>
 
@@ -420,6 +433,38 @@ DASHBOARD_PUBLIC_TEMPLATE = """<!DOCTYPE html>
     <p style="margin-top: 1rem; color: #64748b; font-size: 0.8rem;">
         JEV Dispatcher — Paper-only · Kill switch LOCKED · Free tiers only · http://localhost:8083/dashboard
     </p>
+    <script>
+        function quickDispatch(prompt) {
+            document.getElementById('dispatch-prompt').value = prompt;
+            document.getElementById('dispatch-form').dispatchEvent(new Event('submit'));
+        }
+        document.getElementById('dispatch-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const prompt = document.getElementById('dispatch-prompt').value;
+            if (!prompt) return;
+            const resultDiv = document.getElementById('dispatch-result');
+            resultDiv.textContent = 'Dispatching...';
+            resultDiv.style.color = '#f59e0b';
+            try {
+                const resp = await fetch('/api/task', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: 'prompt=' + encodeURIComponent(prompt) + '&agent_id=strategy-advisor&priority=normal'
+                });
+                const data = await resp.json();
+                if (data.ok) {
+                    resultDiv.textContent = 'Dispatched: ' + data.task_id;
+                    resultDiv.style.color = '#10b981';
+                } else {
+                    resultDiv.textContent = 'Error: ' + (data.error || 'unknown');
+                    resultDiv.style.color = '#ef4444';
+                }
+            } catch (err) {
+                resultDiv.textContent = 'Error: ' + err.message;
+                resultDiv.style.color = '#ef4444';
+            }
+        });
+    </script>
 </body>
 </html>"""
 
@@ -497,6 +542,12 @@ class OfficeHandler(BaseHTTPRequestHandler):
             self._serve_metrics()
         elif path == "/dashboard":
             self._serve_dashboard_public()
+        elif path == "/api/findings":
+            self._serve_api_findings()
+        elif path == "/api/synthesis":
+            self._serve_api_synthesis()
+        elif path == "/api/tasks":
+            self._serve_api_tasks()
         else:
             self.send_error(404)
 
@@ -508,6 +559,8 @@ class OfficeHandler(BaseHTTPRequestHandler):
             self._create_task()
         elif parsed.path == "/qwen/task":
             self._create_qwen_task()
+        elif parsed.path == "/api/task":
+            self._serve_dashboard_task()
         else:
             self.send_error(404)
 
@@ -687,6 +740,59 @@ class OfficeHandler(BaseHTTPRequestHandler):
         self.send_response(302)
         self.send_header("Location", "/")
         self.end_headers()
+
+    @require_login
+    def _serve_dashboard_task(self):
+        """Dashboard task trigger — writes a dost task file from a button click."""
+        content_length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(content_length).decode("utf-8")
+        params = parse_qs(body)
+
+        prompt = params.get("prompt", [""])[0]
+        agent_id = params.get("agent_id", ["strategy-advisor"])[0]
+        priority = params.get("priority", ["normal"])[0]
+
+        if not prompt:
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "No prompt provided"}).encode())
+            return
+
+        import uuid
+        task_id = f"jev-{uuid.uuid4().hex[:8]}"
+        task = {
+            "id": task_id,
+            "title": f"Dashboard: {prompt[:60]}",
+            "description": prompt,
+            "status": "pending",
+            "agent_id": agent_id,
+            "priority": priority,
+            "user_id": self.current_user,
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "metadata": {
+                "tier": "pro",
+                "source": "dost",
+                "web_dispatch": True,
+                "qwen_task_id": f"jev-exec-dost-{task_id[:8]}",
+            },
+            "result": None,
+            "error": None,
+        }
+        try:
+            HIVE_DIR.mkdir(parents=True, exist_ok=True)
+            task_path = HIVE_DIR / f"{task_id}.json"
+            task_path.write_text(json.dumps(task, indent=2))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"ok": True, "task_id": task_id, "message": "Task submitted to fleet"}).encode())
+        except Exception as e:
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": str(e)}).encode())
 
     @require_login
     def _serve_qwen_page(self):
@@ -1287,6 +1393,57 @@ class OfficeHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.end_headers()
         self.wfile.write(html.encode("utf-8"))
+
+    def _serve_api_findings(self):
+        """API endpoint: return all findings with verification status."""
+        try:
+            findings_path = Path("/Users/aryanagarwal/Documents/polymarket/research/findings.json")
+            if findings_path.exists():
+                data = json.loads(findings_path.read_text())
+                findings = data.get("findings", [])
+            else:
+                findings = []
+        except Exception:
+            findings = []
+        self._send_json({"findings": findings, "total": len(findings)})
+
+    def _serve_api_synthesis(self):
+        """API endpoint: return synthesis detail."""
+        try:
+            sys.path.insert(0, "/Users/aryanagarwal/AI-Office/packages/office-os")
+            sys.path.insert(0, "/Users/aryanagarwal/AI-Office/dost")
+            from dost import synthesis_detail
+            text = synthesis_detail()
+        except Exception as e:
+            text = f"Error generating synthesis: {e}"
+        self._send_json({"synthesis": text})
+
+    def _serve_api_tasks(self):
+        """API endpoint: return recent dost tasks."""
+        try:
+            HIVE_DIR = Path("/Users/aryanagarwal/AI-Office/packages/office-os/tasks")
+            tasks = []
+            if HIVE_DIR.exists():
+                for hive_file in glob.glob(os.path.join(HIVE_DIR, "*.json")):
+                    try:
+                        with open(hive_file) as f:
+                            task = json.load(f)
+                        if (task.get("metadata") or {}).get("source") == "dost":
+                            tasks.append(task)
+                    except Exception:
+                        continue
+                tasks.sort(key=lambda x: x.get("updated_at", "") or x.get("created_at", ""), reverse=True)
+                tasks = tasks[:20]
+        except Exception:
+            tasks = []
+        self._send_json({"tasks": tasks, "total": len(tasks)})
+
+    def _send_json(self, data: dict):
+        """Send JSON response."""
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(data, indent=2).encode())
 
     def log_message(self, format, *args):
         pass
