@@ -20,6 +20,21 @@ from core.hive import Hive
 from core.router import ProviderRouter
 from agents.god_agent import GodAgent
 
+sys.path.insert(0, "/Users/aryanagarwal/AI-Office/dost")
+from workspace import (
+    workspace_exists,
+    get_workspace,
+    can_access_workspace,
+    can_edit_workspace,
+    list_workspaces,
+    workspace_tasks_dir,
+    workspace_findings_dir,
+    create_workspace,
+    DEFAULT_WORKSPACE_ID,
+)
+from billing.meter import get_usage_summary, get_current_month_cost
+from billing.plans import get_plan, calculate_monthly_cost
+
 OFFICE_ROOT = Path("/Users/aryanagarwal/AI-Office/packages/office-os")
 CONFIG_DIR = OFFICE_ROOT / "config"
 
@@ -548,6 +563,12 @@ class OfficeHandler(BaseHTTPRequestHandler):
             self._serve_api_synthesis()
         elif path == "/api/tasks":
             self._serve_api_tasks()
+        elif path == "/api/metrics":
+            self._serve_api_metrics()
+        elif path == "/api/workspaces":
+            self._serve_api_workspaces()
+        elif path.startswith("/api/workspaces/"):
+            self._serve_api_workspace_detail()
         elif path == "/doctor":
             self._serve_doctor_page()
         elif path == "/review":
@@ -567,6 +588,8 @@ class OfficeHandler(BaseHTTPRequestHandler):
             self._create_qwen_task()
         elif parsed.path == "/api/task":
             self._serve_dashboard_task()
+        elif parsed.path == "/api/workspaces":
+            self._create_api_workspace()
         else:
             self.send_error(404)
 
@@ -607,6 +630,39 @@ class OfficeHandler(BaseHTTPRequestHandler):
         self.send_response(302)
         self.send_header("Location", "/login")
         self.end_headers()
+
+    # ---------- workspace auth context ----------
+    def _workspace_context(self):
+        """Extract workspace context from X-Workspace-ID and X-User-Email headers."""
+        workspace_id = self.headers.get("X-Workspace-ID", "").strip() or None
+        email = self.headers.get("X-User-Email", "").strip() or None
+        return workspace_id, email
+
+    def _validate_workspace_access(self, workspace_id, email):
+        """Verify workspace exists and user has access. Returns (workspace_dict, error_response_bool)."""
+        if not workspace_id:
+            return None, False  # no workspace context -> allowed (default workspace)
+        if not workspace_exists(workspace_id):
+            self._send_json({"error": f"Workspace not found: {workspace_id}"}, status=404)
+            return None, True
+        if email and not can_access_workspace(workspace_id, email):
+            self._send_json({"error": f"No access to workspace: {workspace_id}"}, status=403)
+            return None, True
+        ws = get_workspace(workspace_id)
+        return ws, False
+
+    def _require_workspace_edit(self, workspace_id, email):
+        """Verify workspace exists and user can edit. Returns True if OK, sends error otherwise."""
+        if not workspace_id:
+            self._send_json({"error": "X-Workspace-ID header required"}, status=400)
+            return False
+        if not workspace_exists(workspace_id):
+            self._send_json({"error": f"Workspace not found: {workspace_id}"}, status=404)
+            return False
+        if email and not can_edit_workspace(workspace_id, email):
+            self._send_json({"error": f"No edit access to workspace: {workspace_id}"}, status=403)
+            return False
+        return True
 
     # ---------- dashboard ----------
     @require_login
@@ -1401,7 +1457,29 @@ class OfficeHandler(BaseHTTPRequestHandler):
         self.wfile.write(html.encode("utf-8"))
 
     def _serve_api_findings(self):
-        """API endpoint: return all findings with verification status."""
+        """API endpoint: return all findings with optional workspace_id filter."""
+        parsed = urlparse(self.path)
+        qs = parse_qs(parsed.query)
+        workspace_id = qs.get("workspace_id", [None])[0]
+        user_id, _ = get_current_user(self.headers.get("Cookie", ""))
+        email = self.headers.get("X-User-Email", "").strip() or user_id
+
+        if workspace_id:
+            ws, errored = self._validate_workspace_access(workspace_id, email)
+            if errored:
+                return
+            findings_dir = workspace_findings_dir(workspace_id)
+            findings = []
+            if findings_dir.exists():
+                for f in sorted(findings_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+                    if f.suffix == ".json":
+                        try:
+                            findings.append(json.loads(f.read_text()))
+                        except Exception:
+                            continue
+            self._send_json({"workspace_id": workspace_id, "findings": findings, "total": len(findings)})
+            return
+
         try:
             findings_path = Path("/Users/aryanagarwal/Documents/polymarket/research/findings.json")
             if findings_path.exists():
@@ -1425,7 +1503,29 @@ class OfficeHandler(BaseHTTPRequestHandler):
         self._send_json({"synthesis": text})
 
     def _serve_api_tasks(self):
-        """API endpoint: return recent dost tasks."""
+        """API endpoint: return recent dost tasks with optional workspace_id filter."""
+        parsed = urlparse(self.path)
+        qs = parse_qs(parsed.query)
+        workspace_id = qs.get("workspace_id", [None])[0]
+        user_id, _ = get_current_user(self.headers.get("Cookie", ""))
+        email = self.headers.get("X-User-Email", "").strip() or user_id
+
+        if workspace_id:
+            ws, errored = self._validate_workspace_access(workspace_id, email)
+            if errored:
+                return
+            tasks_dir = workspace_tasks_dir(workspace_id)
+            tasks = []
+            if tasks_dir.exists():
+                for f in sorted(tasks_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+                    if f.suffix == ".json":
+                        try:
+                            tasks.append(json.loads(f.read_text()))
+                        except Exception:
+                            continue
+            self._send_json({"workspace_id": workspace_id, "tasks": tasks, "total": len(tasks)})
+            return
+
         try:
             HIVE_DIR = Path("/Users/aryanagarwal/AI-Office/packages/office-os/tasks")
             tasks = []
@@ -1444,9 +1544,184 @@ class OfficeHandler(BaseHTTPRequestHandler):
             tasks = []
         self._send_json({"tasks": tasks, "total": len(tasks)})
 
-    def _send_json(self, data: dict):
+    # ---------- workspace API endpoints ----------
+
+    def _serve_api_workspaces(self):
+        """GET /api/workspaces - list all workspaces (requires auth)."""
+        user_id, _ = get_current_user(self.headers.get("Cookie", ""))
+        if not user_id:
+            self._send_json({"error": "Authentication required"}, status=401)
+            return
+        workspaces = list_workspaces()
+        self._send_json({"workspaces": workspaces, "total": len(workspaces)})
+
+    def _serve_api_workspace_detail(self):
+        """GET /api/workspaces/{workspace_id} and sub-routes (/tasks, /findings, /metrics)."""
+        user_id, _ = get_current_user(self.headers.get("Cookie", ""))
+        if not user_id:
+            self._send_json({"error": "Authentication required"}, status=401)
+            return
+
+        workspace_id, email = self._workspace_context()
+        # Prefer path segment, fall back to header
+        path = urlparse(self.path).path
+        prefix = "/api/workspaces/"
+        remainder = path[len(prefix):]
+        parts = [p for p in remainder.split("/") if p]
+        path_workspace_id = parts[0] if parts else None
+        sub_route = parts[1] if len(parts) > 1 else None
+
+        ws_id = path_workspace_id or workspace_id
+        if not ws_id:
+            self._send_json({"error": "Workspace ID required"}, status=400)
+            return
+
+        ws, errored = self._validate_workspace_access(ws_id, email or user_id)
+        if errored:
+            return
+
+        if sub_route == "tasks":
+            self._serve_workspace_tasks(ws_id, email or user_id)
+        elif sub_route == "findings":
+            self._serve_workspace_findings(ws_id, email or user_id)
+        elif sub_route == "metrics":
+            self._serve_workspace_metrics(ws_id, email or user_id)
+        elif sub_route == "usage":
+            self._serve_workspace_usage(ws_id, email or user_id)
+        elif sub_route == "cost":
+            self._serve_workspace_cost(ws_id, email or user_id)
+        elif sub_route == "plan":
+            self._serve_workspace_plan(ws_id, email or user_id)
+        else:
+            self._send_json({"workspace": ws})
+
+    def _serve_workspace_tasks(self, workspace_id, email):
+        """List tasks for a workspace."""
+        tasks_dir = workspace_tasks_dir(workspace_id)
+        tasks = []
+        if tasks_dir.exists():
+            for f in sorted(tasks_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+                if f.suffix == ".json":
+                    try:
+                        tasks.append(json.loads(f.read_text()))
+                    except Exception:
+                        continue
+        self._send_json({"workspace_id": workspace_id, "tasks": tasks, "total": len(tasks)})
+
+    def _serve_workspace_findings(self, workspace_id, email):
+        """List findings for a workspace."""
+        findings_dir = workspace_findings_dir(workspace_id)
+        findings = []
+        if findings_dir.exists():
+            for f in sorted(findings_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+                if f.suffix == ".json":
+                    try:
+                        findings.append(json.loads(f.read_text()))
+                    except Exception:
+                        continue
+        self._send_json({"workspace_id": workspace_id, "findings": findings, "total": len(findings)})
+
+    def _serve_workspace_metrics(self, workspace_id, email):
+        """Get metrics for a workspace."""
+        tasks_dir = workspace_tasks_dir(workspace_id)
+        findings_dir = workspace_findings_dir(workspace_id)
+        task_count = 0
+        finding_count = 0
+        if tasks_dir.exists():
+            task_count = len([f for f in tasks_dir.iterdir() if f.suffix == ".json"])
+        if findings_dir.exists():
+            finding_count = len([f for f in findings_dir.iterdir() if f.suffix == ".json"])
+        self._send_json({
+            "workspace_id": workspace_id,
+            "task_count": task_count,
+            "finding_count": finding_count,
+        })
+
+    def _serve_workspace_usage(self, workspace_id, email):
+        """GET /api/workspaces/{workspace_id}/usage - usage summary.
+
+        Query params: metric_type (optional), start_date (optional), end_date (optional)
+        Returns: {"workspace_id", "period", "total_cost_units", "by_type", "by_day"}
+        """
+        parsed = urlparse(self.path)
+        qs = parse_qs(parsed.query)
+        metric_type = qs.get("metric_type", [None])[0]
+        start_date = qs.get("start_date", [None])[0]
+        end_date = qs.get("end_date", [None])[0]
+        summary = get_usage_summary(
+            workspace_id,
+            metric_type=metric_type,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        self._send_json(summary)
+
+    def _serve_workspace_cost(self, workspace_id, email):
+        """GET /api/workspaces/{workspace_id}/cost - current month cost and projection.
+
+        Returns: {"workspace_id", "current_month_cost", "plan", "headroom", "projected_monthly"}
+        """
+        cost = calculate_monthly_cost(workspace_id)
+        self._send_json(cost)
+
+    def _serve_workspace_plan(self, workspace_id, email):
+        """GET /api/workspaces/{workspace_id}/plan - plan details.
+
+        Returns: {"workspace_id", "plan": {...}, "features": [...]}
+        """
+        plan = get_plan(workspace_id)
+        self._send_json(plan)
+
+    def _create_api_workspace(self):
+        """POST /api/workspaces - create a new workspace."""
+        user_id, _ = get_current_user(self.headers.get("Cookie", ""))
+        if not user_id:
+            self._send_json({"error": "Authentication required"}, status=401)
+            return
+
+        workspace_id, email = self._workspace_context()
+        if not email:
+            self._send_json({"error": "X-User-Email header required"}, status=400)
+            return
+
+        content_length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(content_length).decode("utf-8")
+        try:
+            data = json.loads(body) if body.strip() else {}
+        except json.JSONDecodeError:
+            data = {}
+        name = data.get("name", f"Workspace for {email}")
+        plan = data.get("plan", "starter")
+
+        if not self._require_workspace_edit(None, email):
+            return
+
+        ws = create_workspace(name=name, owner_email=email, plan=plan)
+        self._send_json({"workspace": ws}, status=201)
+
+    def _serve_api_metrics(self):
+        """GET /api/metrics - system metrics with optional workspace_id filter."""
+        workspace_id, email = self._workspace_context()
+        if workspace_id:
+            ws, errored = self._validate_workspace_access(workspace_id, email)
+            if errored:
+                return
+        payload = self._build_metrics_payload()
+        if workspace_id:
+            payload["workspace_id"] = workspace_id
+            # Include cost information for the workspace
+            try:
+                current_month = get_current_month_cost(workspace_id)
+                payload["current_month_cost"] = current_month["cost_units"]
+                payload["cost_by_type"] = current_month.get("by_type", {})
+            except Exception:
+                payload["current_month_cost"] = 0
+                payload["cost_by_type"] = {}
+        self._send_json(payload)
+
+    def _send_json(self, data: dict, status: int = 200):
         """Send JSON response."""
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps(data, indent=2).encode())

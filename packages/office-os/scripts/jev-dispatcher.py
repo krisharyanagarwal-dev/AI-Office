@@ -31,7 +31,11 @@ except ImportError:  # pragma: no cover
     argparse = None
 
 sys.path.insert(0, "/Users/aryanagarwal/AI-Office/packages/office-os")
+sys.path.insert(0, "/Users/aryanagarwal/AI-Office/dost")
 from core.subs.cloud_orchestrator import CloudModelOrchestrator
+
+from billing.meter import workspace_pnl_dir, get_usage_summary  # noqa: E402
+import billing.meter as _billing_meter  # noqa: E402
 
 OFFICE_CONFIG = "/Users/aryanagarwal/AI-Office/packages/office-os/config/office.json"
 HIVE_DIR = "/Users/aryanagarwal/AI-Office/packages/office-os/tasks"
@@ -775,8 +779,8 @@ def save_task_ledger(ledger: list[dict]) -> None:
         pass
 
 
-def record_task_cost(task: dict) -> None:
-    """Record a completed task's cost and outcome value into the ledger."""
+def record_task_cost_ledger(task: dict) -> None:
+    """Record a completed task's cost and outcome value into the office P&L ledger."""
     metadata = task.get("metadata", {}) or {}
     agent_id = task.get("agent_id", "")
     tier_letter = agent_autonomy_tier(agent_id)
@@ -867,6 +871,85 @@ def office_pnl() -> dict:
         "by_tier": by_tier,
         "by_agent": by_agent,
     }
+
+
+def pool_cost_units(pool_name: str) -> int:
+    """Return cost units for a provider pool name.
+
+    Tier mapping (from exec_model / provider pool tier): pro=3, general=2, lite=1.
+    Falls back to 2 (general) when the pool/tier is unknown.
+    """
+    try:
+        config = load_office_config()
+        pools = config.get("provider_pools", {})
+        tier = pools.get(pool_name, {}).get("tier", 2)
+    except Exception:
+        tier = 2
+    return provider_cost_units(tier)
+
+
+def record_task_cost(task_id: str, workspace_id: str, cost_units: int, pool_name: str) -> None:
+    """Record per-task billing cost into the workspace pnl ledger.
+
+    Writes a JSON ledger entry to
+    ~/.openclaw/workspaces/<workspace_id>/pnl/<task_id>.json so that
+    billing.meter (get_usage / get_usage_summary / get_current_month_cost)
+    can aggregate it for per-workspace usage and invoicing.
+    """
+    try:
+        pnl_dir = workspace_pnl_dir(workspace_id)
+        pnl_dir.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "task_id": task_id,
+            "workspace_id": workspace_id,
+            "cost_units": int(cost_units),
+            "pool_name": pool_name,
+            "metric_type": "task",
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        entry_path = pnl_dir / f"{task_id}.json"
+        tmp = str(entry_path) + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(entry, f, indent=2)
+        os.replace(tmp, entry_path)
+    except OSError:  # noqa: BLE001
+        pass
+
+
+def get_task_cost(task_id: str) -> int:
+    """Return the cost_units recorded for a specific task, searching all workspaces.
+
+    Returns 0 if no ledger entry is found for the task_id.
+    """
+    try:
+        base = _billing_meter.WORKSPACE_DIR
+        if not base.exists():
+            return 0
+        for ws_dir in base.iterdir():
+            if not ws_dir.is_dir():
+                continue
+            pnl_dir = ws_dir / "pnl"
+            if not pnl_dir.exists():
+                continue
+            entry_path = pnl_dir / f"{task_id}.json"
+            if entry_path.exists():
+                try:
+                    data = json.loads(entry_path.read_text())
+                    return int(data.get("cost_units", 0) or 0)
+                except Exception:
+                    continue
+    except OSError:  # noqa: BLE001
+        pass
+    return 0
+
+
+def get_workspace_cost(workspace_id: str) -> int:
+    """Return the total cost_units incurred by a workspace (all time)."""
+    try:
+        summary = get_usage_summary(workspace_id)
+        return int(summary.get("total_cost_units", 0) or 0)
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 def tier_enforcement_check(agent_id: str) -> tuple[bool, str]:
@@ -1688,6 +1771,13 @@ def finalize_user_task(task_file_path: str, worker_result: dict) -> dict:
     except OSError:
         pass
 
+    # Record per-task billing cost on successful completion.
+    _task_meta = task.get("metadata", {}) or {}
+    _workspace_id = _task_meta.get("workspace_id", "")
+    _pool_name = worker_result.get("exec_pool", "?")
+    _cost_units = pool_cost_units(_pool_name)
+    record_task_cost(task.get("id", ""), _workspace_id, _cost_units, _pool_name)
+
     # Auto-dispatch chained follow-up task if chain metadata is set.
     chain_result = _dispatch_chain_task(task, task_file_path)
     if chain_result and not chain_result.get("ok"):
@@ -1742,6 +1832,12 @@ def _dispatch_chain_task(task: dict, task_file_path: str) -> dict | None:
         "result": None,
         "error": None,
     }
+
+    # Inherit the parent task's workspace so the chained task stays within
+    # the same tenant (multi-tenancy).
+    parent_workspace_id = (task.get("metadata") or {}).get("workspace_id")
+    if parent_workspace_id:
+        chain_task["metadata"]["workspace_id"] = parent_workspace_id
 
     try:
         os.makedirs(HIVE_DIR, exist_ok=True)
@@ -1893,7 +1989,7 @@ def finalize_agent_result(agent_info, state_bundle, tier, worker_result):
         with open(task_path, "w") as f:
             json.dump(task, f, indent=2)
         # O2.4: record cost for errored task
-        record_task_cost(task)
+        record_task_cost_ledger(task)
         return {"agent_id": agent_id, "status": "error", "error": worker_result["error"]}
 
     exec_text = worker_result["exec_text"]
@@ -1932,7 +2028,7 @@ def finalize_agent_result(agent_info, state_bundle, tier, worker_result):
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "metadata": wf_metadata,
         }
-        record_task_cost(verify_task)
+        record_task_cost_ledger(verify_task)
         stampede_release(agent_id)
         return {"agent_id": agent_id, "status": "done", "task_id": task_id}
 
@@ -2043,15 +2139,25 @@ def finalize_agent_result(agent_info, state_bundle, tier, worker_result):
     # Save execution result file for dashboard
     save_result(qwen_task_id, exec_text, exec_model_used, exec_pool_used, "cloud")
 
-    # O2.4: record cost for completed task
-    record_task_cost(task)
+    # O2.4: record cost for completed task (workspace billing)
+    _task_meta = task.get("metadata", {}) or {}
+    _workspace_id = _task_meta.get("workspace_id", "")
+    _pool_name = _task_meta.get("exec_pool", "unknown")
+    _cost_units = pool_cost_units(_pool_name)
+    record_task_cost(task["id"], _workspace_id, _cost_units, _pool_name)
+    # Also keep the office P&L ledger in sync for aggregate P&L dashboards.
+    record_task_cost_ledger(task)
 
     stampede_release(agent_id)
     return {"agent_id": agent_id, "status": "done", "task_id": task_id}
 
 
-def collect_user_submitted_tasks() -> list[tuple[dict, str | None, str, str]]:
+def collect_user_submitted_tasks(workspace_id: str | None = None) -> list[tuple[dict, str | None, str, str]]:
     """Scan HIVE_DIR for pending tasks submitted by the dost (source == "dost").
+
+    If workspace_id is given, only tasks whose metadata.workspace_id matches
+    are returned (multi-tenancy). If None, all pending dost tasks are
+    returned (backward compatible).
 
     Returns list of (agent_info, state_bundle, tier, task_file_path) tuples
     ready for the worker pool. Marks each task as in_progress so it isn't
@@ -2070,6 +2176,11 @@ def collect_user_submitted_tasks() -> list[tuple[dict, str | None, str, str]]:
             continue
         if (task.get("metadata") or {}).get("source") != "dost":
             continue
+
+        # Multi-tenancy: only return tasks belonging to the given workspace
+        if workspace_id is not None:
+            if (task.get("metadata") or {}).get("workspace_id") != workspace_id:
+                continue
 
         agent_id = task.get("agent_id", "strategy-advisor")
         tier = "pro"  # dost-submitted tasks use pro tier
@@ -2097,6 +2208,42 @@ def collect_user_submitted_tasks() -> list[tuple[dict, str | None, str, str]]:
         user_tasks.append((agent_info, None, tier, hive_file))
 
     return user_tasks
+
+
+def get_workspace_for_task(task_file_path: str) -> str | None:
+    """Read a task file and return its workspace_id from metadata.
+
+    Returns the workspace_id string, or None if the task has no
+    workspace_id (legacy / pre-multi-tenancy task) or the file cannot
+    be read.
+    """
+    try:
+        with open(task_file_path) as f:
+            task = json.load(f)
+    except Exception:
+        return None
+    return (task.get("metadata") or {}).get("workspace_id")
+
+
+def get_all_workspace_tasks(workspace_id: str) -> list[dict]:
+    """Return all tasks (pending, done, error) for a given workspace.
+
+    Scans HIVE_DIR and selects task files whose metadata.workspace_id
+    matches. Legacy tasks without a workspace_id are excluded.
+    """
+    tasks = []
+    if not os.path.isdir(HIVE_DIR):
+        return tasks
+    for hive_file in glob.glob(os.path.join(HIVE_DIR, "*.json")):
+        try:
+            with open(hive_file) as f:
+                task = json.load(f)
+        except Exception:
+            continue
+        if (task.get("metadata") or {}).get("workspace_id") != workspace_id:
+            continue
+        tasks.append(task)
+    return tasks
 
 
 def archive_old_user_submitted_tasks():
