@@ -37,6 +37,7 @@ def main():
     parser.add_argument("--push-telegram", action="store_true", help="Push daily briefing to Telegram")
     parser.add_argument("--status", action="store_true", help="Show live fleet status from dispatcher metrics")
     parser.add_argument("--dispatch", nargs="?", const="", help="Submit a prompt to the fleet orchestrator")
+    parser.add_argument("--debate", nargs="?", const="", help="Debate mode: fan a question to multiple pro agents and synthesize")
     parser.add_argument("--results", action="store_true", help="List recent dost-submitted tasks from the fleet hive")
     parser.add_argument("--memory", action="store_true")
     parser.add_argument("--context", action="store_true")
@@ -62,6 +63,10 @@ def main():
     elif args.dispatch is not None:
         prompt = args.dispatch if args.dispatch else input("Prompt to send to fleet: ")
         result = _dost_module.dispatch_prompt_to_fleet(prompt)
+        print(json.dumps(result, indent=2))
+    elif args.debate is not None:
+        prompt = args.debate if args.debate else input("Debate question: ")
+        result = _dost_module.dispatch_debate_to_fleet(prompt)
         print(json.dumps(result, indent=2))
     elif args.results:
         tasks = _dost_module.list_recent_dost_tasks()

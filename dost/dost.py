@@ -33,6 +33,13 @@ from company_dispatcher import dispatch, route_department  # noqa: E402
 from openai_components import chat_completion, provider_health  # noqa: E402
 from context_builder import build_context  # noqa: E402
 
+# Cloud model orchestrator (same orchestration the dispatcher uses) for direct
+# debate calls that bypass the dispatcher's general-assistant override.
+OFFICE_OS = Path("/Users/aryanagarwal/AI-Office/packages/office-os")
+if str(OFFICE_OS) not in sys.path:
+    sys.path.insert(0, str(OFFICE_OS))
+from core.subs.cloud_orchestrator import CloudModelOrchestrator  # noqa: E402
+
 RESEARCH_DIR = Path("/Users/aryanagarwal/Documents/indian-paper-trading")
 O3_RUNNER = RESEARCH_DIR / "o3_runner.py"
 
@@ -331,6 +338,26 @@ for anything not covered):
 
 DISPATCHER_METRICS_URL = "http://127.0.0.1:8083/metrics"
 HIVE_DIR = Path("/Users/aryanagarwal/AI-Office/packages/office-os/tasks")
+OFFICE_CONFIG_PATH = Path("/Users/aryanagarwal/AI-Office/packages/office-os/config/office.json")
+
+# Default pro-tier agents for general debate questions (all exist in office.json
+# agent_tiers under "pro"). data-analyst suggested in the spec does not exist,
+# so we fall back to available pro-tier agents.
+DEBATE_DEFAULT_AGENTS = ["strategy-advisor", "cost-analyst", "risk-manager"]
+
+
+def _agent_tiers() -> dict[str, str]:
+    """Return {agent_id: tier} loaded from office.json agent_tiers."""
+    tiers: dict[str, str] = {}
+    try:
+        config = json.loads(OFFICE_CONFIG_PATH.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return tiers
+    for tier, tier_agents in (config.get("agent_tiers") or {}).items():
+        if isinstance(tier_agents, list):
+            for agent_id in tier_agents:
+                tiers[agent_id] = tier
+    return tiers
 
 
 def wants_audit(task: str) -> bool:
@@ -414,6 +441,169 @@ def dispatch_prompt_to_fleet(prompt: str, agent_id: str | None = None) -> dict:
         }
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+DEBATE_SYNTHESIS_SYSTEM = """You are the dost from THE CLAUDE COMPANY synthesizing a fleet debate.
+
+Several agents answered the SAME question independently. Read their answers below and produce a short plain-language summary:
+
+- Open with a count line: "X of Y agree on ..." or "X of Y agree, Z disagree".
+- If any agent disagrees, say why: "Z disagree because ...".
+- Keep it to 2-4 sentences. No bullet lists, no internal IDs, no model names, no technical plumbing.
+- Be honest: if answers are mixed or some agents errored, say so plainly.
+
+Answers:
+{answers_block}"""
+
+
+def _synthesize_debate(prompt: str, answers: list[dict]) -> str:
+    """Ask the LLM to synthesize agent answers into an agree/disagree summary."""
+    lines = []
+    for a in answers:
+        if a.get("error"):
+            lines.append(f"- {a['agent_id']} ({a['tier']}): ERROR — {a['error']}")
+        else:
+            answer = (a.get("answer") or "").strip()
+            lines.append(f"- {a['agent_id']} ({a['tier']}): {answer}")
+    answers_block = "\n".join(lines) if lines else "(no answers received)"
+
+    result = chat_completion(
+        [
+            {"role": "system", "content": DEBATE_SYNTHESIS_SYSTEM.format(answers_block=answers_block)},
+            {"role": "user", "content": f"Question: {prompt}"},
+        ],
+        temperature=0.3,
+        max_tokens=400,
+    )
+    text = (result.get("text") or "").strip()
+    if text:
+        return text
+    # Deterministic fallback when no LLM provider is available
+    ok = [a for a in answers if not a.get("error") and a.get("answer")]
+    if not ok:
+        return f"0 of {len(answers)} agents returned an answer (all errored)."
+    return (
+        f"{len(ok)} of {len(answers)} agents answered. "
+        f"Responding agents: {', '.join(a['agent_id'] for a in ok)}. "
+        "No clear agreement/disagreement breakdown available without an LLM provider."
+    )
+
+
+def dispatch_debate_to_fleet(prompt: str, agents: list[str] | None = None) -> dict:
+    """Fan one question out to multiple pro agents, each answering independently.
+
+    Writes ONE task file per agent to HIVE_DIR (metadata.source="dost",
+    metadata.debate_id=<shared UUID>, metadata.debate=true, agent_id=<agent>)
+    AND calls the CloudModelOrchestrator directly for each agent so answers come
+    from different perspectives (the dispatcher would otherwise override every
+    dost task to general-assistant).
+
+    Returns {"debate_id", "task_ids", "agents", "answers", "synthesis"}.
+    Read-only: paper-only, no live orders, no dispatcher writes.
+    """
+    import uuid
+
+    agent_tiers = _agent_tiers()
+    if agents is None:
+        agents = list(DEBATE_DEFAULT_AGENTS)
+    # Preserve order, dedupe, keep only agents registered in office.json.
+    known = [a for a in dict.fromkeys(agents) if a in agent_tiers]
+    if not known:
+        known = [a for a in agents if a in agent_tiers] or list(DEBATE_DEFAULT_AGENTS)
+
+    debate_id = f"debate-{uuid.uuid4().hex[:8]}"
+    context = build_context()
+    orchestrator = CloudModelOrchestrator()
+
+    task_ids: list[str] = []
+    answers: list[dict] = []
+
+    for agent_id in known:
+        tier = agent_tiers.get(agent_id, "pro")
+        agent_info = {"agent_id": agent_id, "tier": tier}
+        task_id = f"jev-{uuid.uuid4().hex[:8]}"
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Direct CloudModelOrchestrator call (decide_model -> call_model),
+        # same orchestration the dispatcher uses, task_type="exec".
+        full_prompt = (
+            f"{context}\n\n"
+            f"You are the fleet agent '{agent_id}' ({tier} tier). "
+            f"Answer the question independently from your own perspective. "
+            f"Be direct, concise, and plain-spoken.\n\n"
+            f"QUESTION: {prompt}"
+        )
+        answer_text = None
+        model_used = None
+        pool_used = None
+        error = None
+        try:
+            model, pool_name, _ = orchestrator.decide_model(agent_info, task_type="exec")
+            response_text, model_used, pool_used = orchestrator.call_model(
+                model, pool_name, full_prompt,
+                task_id=f"debate-{debate_id}-{agent_id}",
+                priority="normal",
+            )
+            answer_text = response_text
+        except Exception as e:
+            error = str(e)
+
+        # Write one task file per agent to HIVE_DIR for the record.
+        task = {
+            "id": task_id,
+            "title": f"Debate: {prompt[:60]}",
+            "description": prompt,
+            "status": "done" if answer_text else "error",
+            "agent_id": agent_id,
+            "priority": "normal",
+            "user_id": "dost",
+            "created_at": now,
+            "updated_at": now,
+            "metadata": {
+                "tier": tier,
+                "source": "dost",
+                "debate": True,
+                "debate_id": debate_id,
+                "qwen_task_id": f"jev-exec-dost-{task_id[:8]}",
+            },
+            "result": (
+                {"text": answer_text, "model": model_used, "pool": pool_used, "source": "cloud"}
+                if answer_text
+                else None
+            ),
+            "error": error,
+        }
+        try:
+            HIVE_DIR.mkdir(parents=True, exist_ok=True)
+            (HIVE_DIR / f"{task_id}.json").write_text(json.dumps(task, indent=2))
+        except Exception:
+            pass
+
+        task_ids.append(task_id)
+        answers.append(
+            {
+                "agent_id": agent_id,
+                "tier": tier,
+                "model": model_used,
+                "pool": pool_used,
+                "answer": answer_text,
+                "error": error,
+            }
+        )
+
+    synthesis = _synthesize_debate(prompt, answers)
+
+    MEMORY.add_interaction(
+        prompt, "debate", f"Debate {debate_id}: {len(answers)} agents ({', '.join(known)})"
+    )
+
+    return {
+        "debate_id": debate_id,
+        "task_ids": task_ids,
+        "agents": known,
+        "answers": answers,
+        "synthesis": synthesis,
+    }
 
 
 def dispatcher_status_line() -> str:
@@ -790,6 +980,8 @@ def main():
                         help="List recent dost-submitted tasks from the fleet hive")
     parser.add_argument("--dispatch", nargs="?", const="",
                         help="Submit a prompt to the fleet orchestrator (optional prompt text)")
+    parser.add_argument("--debate", nargs="?", const="",
+                        help="Debate mode: fan a question to multiple pro agents and synthesize")
     parser.add_argument("--memory", action="store_true")
     parser.add_argument("--context", action="store_true")
     parser.add_argument("--health", action="store_true", help="Check OpenAI component availability")
@@ -826,6 +1018,10 @@ def main():
     elif args.dispatch is not None:
         prompt = args.dispatch if args.dispatch else input("Prompt to send to fleet: ")
         result = dispatch_prompt_to_fleet(prompt)
+        print(json.dumps(result, indent=2))
+    elif args.debate is not None:
+        prompt = args.debate if args.debate else input("Debate question: ")
+        result = dispatch_debate_to_fleet(prompt)
         print(json.dumps(result, indent=2))
     elif args.memory:
         print(json.dumps(MEMORY.profile, indent=2))
