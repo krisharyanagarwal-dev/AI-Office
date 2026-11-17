@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dost Fleet</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header>
+    <h1>Dost Fleet</h1>
+    <div id="last-updated" class="muted">--</div>
+  </header>
+
+  <section class="card metrics">
+    <h2>Fleet Status</h2>
+    <div class="metric-row">
+      <div class="metric">
+        <span class="metric-value" id="fleet-status">--</span>
+        <span class="metric-label">Status</span>
+      </div>
+      <div class="metric">
+        <span class="metric-value" id="completion-rate">--</span>
+        <span class="metric-label">Completion Rate</span>
+      </div>
+      <div class="metric">
+        <span class="metric-value" id="error-rate">--</span>
+        <span class="metric-label">Error Rate</span>
+      </div>
+    </div>
+    <p id="metrics-error" class="error"></p>
+  </section>
+
+  <section class="card dispatch">
+    <h2>Dispatch</h2>
+    <form id="dispatch-form">
+      <label for="prompt">Prompt</label>
+      <input type="text" id="prompt" name="prompt" placeholder="e.g. Check printer on floor 3" required />
+      <button type="submit" id="dispatch-btn">Dispatch</button>
+    </form>
+    <p id="dispatch-status" class="muted"></p>
+    <p id="dispatch-error" class="error"></p>
+  </section>
+
+  <section class="card tasks">
+    <h2>Recent Tasks</h2>
+    <ul id="task-list" class="task-list">
+      <li class="empty">No recent tasks.</li>
+    </ul>
+  </section>
+
+  <script src="popup.js"></script>
+</body>
+</html>

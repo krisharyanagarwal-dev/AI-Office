@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Dost Fleet",
+  "version": "1.0.0",
+  "description": "Access the office fleet from your browser",
+  "permissions": ["storage"],
+  "host_permissions": ["http://localhost:8083/*"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Dost Fleet",
+    "default_icon": {
+      "16": "icons/icon-16.svg",
+      "48": "icons/icon-48.svg",
+      "128": "icons/icon-128.svg"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
