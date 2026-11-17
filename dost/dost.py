@@ -838,6 +838,7 @@ def dispatch_prompt_to_fleet(
     agent_id: str | None = None,
     priority: str = "normal",
     dry_run: bool = False,
+    parent_task_id: str | None = None,
 ) -> dict:
     """Submit a prompt to the fleet orchestrator by writing a task file.
 
@@ -846,6 +847,8 @@ def dispatch_prompt_to_fleet(
     Read-only data write — no live orders, no trading execution.
 
     If dry_run is True, shows what would be dispatched without writing.
+    If parent_task_id is given, this task is threaded under that parent
+    (task threading / multi-turn follow-up).
     """
     import uuid
 
@@ -868,6 +871,9 @@ def dispatch_prompt_to_fleet(
         "result": None,
         "error": None,
     }
+    if parent_task_id:
+        task["metadata"]["parent_task_id"] = parent_task_id
+        task["title"] = f"Follow-up to {parent_task_id[:8]}: {prompt[:50]}"
     if dry_run:
         return {
             "ok": True,
@@ -1197,18 +1203,19 @@ def list_recent_dost_tasks(limit: int = 20, status_filter: str | None = None, ag
     return tasks[:limit]
 
 
-def search_history(query: str, limit: int = 10) -> list[dict]:
-    """Search dost-submitted tasks by keyword.
+def search_history(query: str | None = None, limit: int = 10) -> list[dict]:
+    """Search dost-submitted tasks by keyword, or list recent if no query.
 
     Matches against task title, description, and result text. Returns a list
     of dicts with task_id, status, preview, model, pool, agent_id, updated_at.
-    Case-insensitive substring match.
+    Case-insensitive substring match. If query is None/empty, returns the most
+    recent dost tasks (history paging).
     """
     HIVE_DIR = Path("/Users/aryanagarwal/AI-Office/packages/office-os/tasks")
     results = []
     if not HIVE_DIR.exists():
         return results
-    q = query.lower()
+    q = query.lower() if query else None
     for hive_file in glob.glob(os.path.join(HIVE_DIR, "*.json")):
         try:
             with open(hive_file) as f:
@@ -1229,7 +1236,7 @@ def search_history(query: str, limit: int = 10) -> list[dict]:
         elif isinstance(result, str):
             haystack_parts.append(result)
         haystack = " ".join(haystack_parts).lower()
-        if q in haystack:
+        if q is None or q in haystack:
             preview = ""
             if isinstance(result, dict):
                 preview = result.get("preview", "") or result.get("text", "") or ""
@@ -1246,6 +1253,7 @@ def search_history(query: str, limit: int = 10) -> list[dict]:
                     "agent_id": task.get("agent_id", ""),
                     "updated_at": task.get("updated_at", ""),
                     "title": task.get("title", "") or "",
+                    "parent_task_id": (task.get("metadata") or {}).get("parent_task_id", ""),
                 }
             )
     results.sort(key=lambda t: t["updated_at"] or "", reverse=True)
@@ -1637,6 +1645,35 @@ def doctor() -> tuple:
         quota_ok = False
         quota_detail = f"quota check failed ({e})"
     checks.append(("Quota burn projection", quota_ok, quota_detail))
+
+    # 11. Cost cap alert — stop if daily cost_units exceeds threshold.
+    cost_cap_ok = True
+    cost_cap_detail = "unknown"
+    try:
+        pnl_path = Path("/Users/aryanagarwal/.openclaw/office_pnl.json")
+        if pnl_path.exists():
+            pnl = json.loads(pnl_path.read_text())
+            if isinstance(pnl, list):
+                today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                today_cost = sum(
+                    t.get("cost_units", 0)
+                    for t in pnl
+                    if t.get("created_at", "").startswith(today)
+                )
+                cost_cap_detail = f"Today's cost: {today_cost} units"
+                if today_cost > 100:
+                    cost_cap_ok = False
+                    cost_cap_detail += " — COST CAP EXCEEDED (100 units)"
+                elif today_cost > 50:
+                    cost_cap_detail += " — approaching cap"
+            else:
+                cost_cap_detail = "no P&L data"
+        else:
+            cost_cap_detail = "no P&L file"
+    except Exception as e:
+        cost_cap_ok = False
+        cost_cap_detail = f"cost cap check failed ({e})"
+    checks.append(("Daily cost cap", cost_cap_ok, cost_cap_detail))
 
     # Build board
     all_pass = all(ok for _, ok, _ in checks)

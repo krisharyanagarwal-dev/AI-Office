@@ -229,6 +229,13 @@ def run_dispatch_turn(duration: int):
         error = None
         # Cooldown-aware selection + auto-retry on provider failure.
         pool_cooldowns = _check_pool_cooldowns()
+        cooling = {p: c for p, c in pool_cooldowns.items() if c > 0}
+        if cooling and len(cooling) == len(pool_cooldowns):
+            print(
+                f"[voice-dispatch] ⚠️  All pools cooling down: "
+                + ", ".join(f"{p} ({c}s)" for p, c in cooling.items())
+                + ". Try again shortly."
+            )
         agent_info = {"agent_id": "general-assistant", "tier": "general"}
         answer_text, model_used, pool_used, error = _call_with_retry(
             orchestrator,

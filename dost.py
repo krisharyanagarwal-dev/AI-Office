@@ -50,6 +50,7 @@ def main():
     parser.add_argument("--debug", action="store_true", help="Verbose provider calls, model selection, pool routing")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be dispatched without writing")
     parser.add_argument("--batch", help="Batch dispatch: comma-separated prompts")
+    parser.add_argument("--parent", help="Parent task ID to thread this dispatch under")
     parser.add_argument("--memory", action="store_true")
     parser.add_argument("--context", action="store_true")
     parser.add_argument("--health", action="store_true", help="Check OpenAI component availability")
@@ -77,10 +78,11 @@ def main():
             prompt,
             priority=args.results_status or "normal",
             dry_run=args.dry_run,
+            parent_task_id=args.parent,
         )
         print(json.dumps(result, indent=2))
         if args.debug:
-            print(f"\n🔧 Debug: dispatch_prompt_to_fleet called with priority={args.results_status or 'normal'}, dry_run={args.dry_run}")
+            print(f"\n🔧 Debug: dispatch_prompt_to_fleet called with priority={args.results_status or 'normal'}, dry_run={args.dry_run}, parent={args.parent or 'none'}")
     elif args.batch:
         prompts = [p.strip() for p in args.batch.split(",") if p.strip()]
         print(f"Batch dispatch: {len(prompts)} prompts")
@@ -90,10 +92,11 @@ def main():
                 prompt,
                 priority="normal",
                 dry_run=args.dry_run,
+                parent_task_id=args.parent,
             )
             print(json.dumps(result, indent=2))
             if args.debug:
-                print(f"  [debug] priority=normal, dry_run={args.dry_run}, task_id={result.get('task_id', '?')}")
+                print(f"  [debug] priority=normal, dry_run={args.dry_run}, parent={args.parent or 'none'}, task_id={result.get('task_id', '?')}")
     elif args.debate is not None:
         prompt = args.debate if args.debate else input("Debate question: ")
         result = _dost_module.dispatch_debate_to_fleet(prompt)
@@ -120,16 +123,23 @@ def main():
     elif args.briefing_now:
         print(_dost_module.generate_daily_briefing())
     elif args.history is not None:
-        query = args.history if args.history else input("Search history for: ")
+        query = args.history if args.history else None
         results = _dost_module.search_history(query)
         if not results:
-            print(f"No dost tasks matching '{query}'.")
+            if query:
+                print(f"No dost tasks matching '{query}'.")
+            else:
+                print("No dost tasks found.")
         else:
-            print(f"Found {len(results)} dost task(s) matching '{query}':")
-            for t in results:
+            if query:
+                print(f"Found {len(results)} dost task(s) matching '{query}':")
+            else:
+                print(f"Recent dost tasks ({len(results)}):")
+            for i, t in enumerate(results, 1):
+                parent = f" ← {t['parent_task_id'][:8]}" if t.get("parent_task_id") else ""
                 print(
-                    f"{t['task_id']} | {t['status']} | {t['agent_id']} | "
-                    f"{t['model']} | {t['pool']} | {t['updated_at']}"
+                    f"{i}. {t['task_id']} | {t['status']} | {t['agent_id']} | "
+                    f"{t['pool']} | {t['updated_at']}{parent}"
                 )
                 if t["preview"]:
                     print(f"    preview: {t['preview']}")
@@ -153,7 +163,7 @@ def main():
     else:
         print(dost_greeting())
         print("\nI'm your dost. Tell me what you need: research, trading, code, writing, strategy.")
-        print("Commands: --briefing, --briefing-now, --push-telegram, --status, --dispatch, --dry-run, --batch, --debug, --results, --results-status, --results-agent, --history, --export, --synthesis, --auto-archive, --weekly-digest, --memory, --context, --health, --doctor, --department X")
+        print("Commands: --briefing, --briefing-now, --push-telegram, --status, --dispatch, --dry-run, --batch, --debug, --parent, --results, --results-status, --results-agent, --history, --export, --synthesis, --auto-archive, --weekly-digest, --memory, --context, --health, --doctor, --department X")
 
 
 if __name__ == "__main__":
