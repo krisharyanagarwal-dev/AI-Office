@@ -48,3 +48,7 @@ Documents/
 Movies/
 Music/
 Pictures/
+
+# Dost (Wave 1-B) — runtime/regenerated data, not source
+dost/history.jsonl
+dost/briefings/
