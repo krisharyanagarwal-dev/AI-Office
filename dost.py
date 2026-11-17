@@ -47,6 +47,9 @@ def main():
     parser.add_argument("--synthesis", action="store_true", help="Show detailed synthesis report over all findings")
     parser.add_argument("--auto-archive", action="store_true", help="Auto-archive pending findings older than 30 days")
     parser.add_argument("--weekly-digest", action="store_true", help="Show weekly findings digest")
+    parser.add_argument("--debug", action="store_true", help="Verbose provider calls, model selection, pool routing")
+    parser.add_argument("--dry-run", action="store_true", help="Show what would be dispatched without writing")
+    parser.add_argument("--batch", help="Batch dispatch: comma-separated prompts")
     parser.add_argument("--memory", action="store_true")
     parser.add_argument("--context", action="store_true")
     parser.add_argument("--health", action="store_true", help="Check OpenAI component availability")
@@ -70,8 +73,27 @@ def main():
             print("Fleet status: unreachable (dispatcher may be down).")
     elif args.dispatch is not None:
         prompt = args.dispatch if args.dispatch else input("Prompt to send to fleet: ")
-        result = _dost_module.dispatch_prompt_to_fleet(prompt)
+        result = _dost_module.dispatch_prompt_to_fleet(
+            prompt,
+            priority=args.results_status or "normal",
+            dry_run=args.dry_run,
+        )
         print(json.dumps(result, indent=2))
+        if args.debug:
+            print(f"\n🔧 Debug: dispatch_prompt_to_fleet called with priority={args.results_status or 'normal'}, dry_run={args.dry_run}")
+    elif args.batch:
+        prompts = [p.strip() for p in args.batch.split(",") if p.strip()]
+        print(f"Batch dispatch: {len(prompts)} prompts")
+        for i, prompt in enumerate(prompts, 1):
+            print(f"\n[{i}/{len(prompts)}] {prompt[:80]}")
+            result = _dost_module.dispatch_prompt_to_fleet(
+                prompt,
+                priority="normal",
+                dry_run=args.dry_run,
+            )
+            print(json.dumps(result, indent=2))
+            if args.debug:
+                print(f"  [debug] priority=normal, dry_run={args.dry_run}, task_id={result.get('task_id', '?')}")
     elif args.debate is not None:
         prompt = args.debate if args.debate else input("Debate question: ")
         result = _dost_module.dispatch_debate_to_fleet(prompt)
@@ -131,7 +153,7 @@ def main():
     else:
         print(dost_greeting())
         print("\nI'm your dost. Tell me what you need: research, trading, code, writing, strategy.")
-        print("Commands: --briefing, --briefing-now, --push-telegram, --status, --dispatch, --results, --results-status, --results-agent, --history, --export, --synthesis, --auto-archive, --weekly-digest, --memory, --context, --health, --doctor, --department X")
+        print("Commands: --briefing, --briefing-now, --push-telegram, --status, --dispatch, --dry-run, --batch, --debug, --results, --results-status, --results-agent, --history, --export, --synthesis, --auto-archive, --weekly-digest, --memory, --context, --health, --doctor, --department X")
 
 
 if __name__ == "__main__":

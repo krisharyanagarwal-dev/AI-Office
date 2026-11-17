@@ -833,12 +833,19 @@ def _fetch_dispatcher_status() -> dict | None:
         return None
 
 
-def dispatch_prompt_to_fleet(prompt: str, agent_id: str | None = None) -> dict:
+def dispatch_prompt_to_fleet(
+    prompt: str,
+    agent_id: str | None = None,
+    priority: str = "normal",
+    dry_run: bool = False,
+) -> dict:
     """Submit a prompt to the fleet orchestrator by writing a task file.
 
     The dispatcher picks up pending task files from HIVE_DIR on each cycle
     and executes them through the cloud orchestrator. Returns the task info.
     Read-only data write — no live orders, no trading execution.
+
+    If dry_run is True, shows what would be dispatched without writing.
     """
     import uuid
 
@@ -849,7 +856,7 @@ def dispatch_prompt_to_fleet(prompt: str, agent_id: str | None = None) -> dict:
         "description": prompt,
         "status": "pending",
         "agent_id": agent_id or "strategy-advisor",
-        "priority": "normal",
+        "priority": priority,
         "user_id": "dost",
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -861,6 +868,16 @@ def dispatch_prompt_to_fleet(prompt: str, agent_id: str | None = None) -> dict:
         "result": None,
         "error": None,
     }
+    if dry_run:
+        return {
+            "ok": True,
+            "task_id": task_id,
+            "agent_id": task["agent_id"],
+            "priority": priority,
+            "dry_run": True,
+            "message": f"[DRY RUN] Would submit prompt to fleet as task {task_id} with priority {priority}.",
+            "task_preview": task,
+        }
     try:
         HIVE_DIR.mkdir(parents=True, exist_ok=True)
         task_path = HIVE_DIR / f"{task_id}.json"
