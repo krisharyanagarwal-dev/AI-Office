@@ -32,6 +32,10 @@ os.makedirs(QWEN_RESULT_DIR, exist_ok=True)
 # Hive tasks directory (Office OS)
 HIVE_DIR = str(OFFICE_ROOT / "tasks")
 
+# JEV dispatcher log & kill switch (used by the public /dashboard route)
+JEV_LOG = "/Users/aryanagarwal/.openclaw/jev-dispatcher.log"
+KILL_SWITCH_PATH = "/Users/aryanagarwal/AI-Office/packages/_archive/openalice-fleet/state/trader_killswitch_status.json"
+
 # Load users
 with open(CONFIG_DIR / "users.json") as f:
     USERS_CONFIG = json.load(f)
@@ -255,6 +259,120 @@ DASHBOARD_TEMPLATE = """<!DOCTYPE html>
 </html>"""
 
 
+# Public dashboard template (no login required) for the /dashboard route.
+# CSS braces are doubled to escape Python .format().
+DASHBOARD_PUBLIC_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="refresh" content="30">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JEV Dispatcher Dashboard — Office OS</title>
+    <style>
+        * {{ box-sizing: border-box; }}
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #0f0f0f; color: #e0e0e0; }}
+        header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }}
+        h1 {{ font-size: 1.5rem; margin: 0; display: flex; align-items: center; gap: 0.5rem; }}
+        h1 .dot {{ width: 8px; height: 8px; background: #10b981; border-radius: 50%; animation: pulse 2s infinite; }}
+        @keyframes pulse {{ 0%, 100% {{ opacity: 1; }} 50% {{ opacity: 0.5; }} }}
+        .user-bar {{ background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 4px; padding: 0.5rem 1rem; font-size: 0.85rem; color: #94a3b8; }}
+        .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; margin-bottom: 1rem; }}
+        .card {{ background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px; padding: 1rem; }}
+        .card h3 {{ margin-top: 0; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; margin-bottom: 0.75rem; }}
+        .kv {{ display: flex; justify-content: space-between; padding: 0.45rem 0; border-bottom: 1px solid #2a2a2a; font-size: 0.9rem; }}
+        .kv:last-child {{ border-bottom: none; }}
+        .kv .label {{ color: #94a3b8; }}
+        .kv .value {{ font-family: monospace; color: #e0e0e0; }}
+        .status-locked {{ color: #10b981; font-weight: 700; }}
+        .status-off {{ color: #ef4444; font-weight: 700; }}
+        .tier {{ display: flex; justify-content: space-between; padding: 0.45rem 0; border-bottom: 1px solid #2a2a2a; font-size: 0.9rem; }}
+        .tier:last-child {{ border-bottom: none; }}
+        .tier-a {{ color: #10b981; font-weight: 700; }}
+        .tier-b {{ color: #f59e0b; font-weight: 700; }}
+        .tier-c {{ color: #ef4444; font-weight: 700; }}
+        .task {{ display: flex; justify-content: space-between; padding: 0.5rem 0; border-bottom: 1px solid #2a2a2a; }}
+        .task:last-child {{ border-bottom: none; }}
+        .task-id {{ font-family: monospace; font-size: 0.8rem; color: #64748b; }}
+        .task-agent {{ font-size: 0.85rem; color: #cbd5e1; }}
+        .task-title {{ font-size: 0.9rem; }}
+        .status-badge {{ font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 4px; font-weight: 600; }}
+        .status-done {{ background: #10b981; color: white; }}
+        .status-in_progress {{ background: #f59e0b; color: white; }}
+        .status-pending {{ background: #64748b; color: white; }}
+        .status-failed {{ background: #ef4444; color: white; }}
+        .status-error {{ background: #ef4444; color: white; }}
+        .result-card {{ background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px; padding: 1rem; margin-top: 1rem; }}
+        .result-card pre {{ background: #000; padding: 1rem; border-radius: 4px; overflow-x: auto; font-size: 0.8rem; font-family: monospace; white-space: pre-wrap; }}
+        .refresh {{ margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem; }}
+        .btn {{ background: #3b82f6; color: white; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; font-weight: 600; text-decoration: none; }}
+        .btn:hover {{ background: #2563eb; }}
+        .btn.secondary {{ background: #2a2a2a; }}
+        .empty {{ color: #64748b; font-style: italic; }}
+        .logout {{ color: #94a3b8; text-decoration: none; font-size: 0.85rem; }}
+        .logout:hover {{ color: #e0e0e0; }}
+        .mono {{ font-family: monospace; font-size: 0.85rem; }}
+        .small {{ font-size: 0.8rem; color: #94a3b8; }}
+        .ok {{ color: #10b981; }}
+    </style>
+</head>
+<body>
+    <header>
+        <h1><span class="dot"></span> JEV Dispatcher Dashboard</h1>
+        <div>
+            <a href="/metrics" class="btn secondary">/metrics (JSON)</a>
+            <span class="user-bar">http://localhost:8083/dashboard</span>
+            <a href="/logout" class="logout">Sign out</a>
+        </div>
+    </header>
+    <div class="refresh">
+        <button class="btn" onclick="location.reload()">Refresh</button>
+        <span class="small">Auto-refresh every 30s · Fleet status · Kill switch · Dost tasks · Synthesis</span>
+    </div>
+
+    <div class="card">
+        <h3>🔒 Kill Switch</h3>
+        <div class="kv"><span class="label">Verdict</span><span class="value status-locked">{kill_verdict}</span></div>
+        <div class="kv"><span class="label">Live orders allowed</span><span class="value status-off">{kill_live}</span></div>
+        <div class="kv"><span class="label">Mode</span><span class="value">Paper-only · Tier C human-only · No live orders</span></div>
+    </div>
+
+    <div class="grid">
+        <div class="card">
+            <h3>📊 Fleet Status (JEV)</h3>
+            <div class="kv"><span class="label">Tasks created (cycle)</span><span class="value mono">{jev_created}</span></div>
+            <div class="kv"><span class="label">Tasks done (cycle)</span><span class="value mono">{jev_done}</span></div>
+            <div class="kv"><span class="label">Completion rate</span><span class="value mono">{completion_rate}%</span></div>
+            <div class="kv"><span class="label">Error rate</span><span class="value mono">{error_rate}%</span></div>
+            <div class="kv"><span class="label">Calls today</span><span class="value mono">{calls_today}</span></div>
+            <div class="kv"><span class="label">Tasks per min</span><span class="value mono">{tasks_per_min}</span></div>
+        </div>
+        <div class="card">
+            <h3>🎯 Autonomy Tiers</h3>
+            <div class="tier"><span class="label">Tier A — autonomous</span><span class="value tier-a">{tier_a}</span></div>
+            <div class="tier"><span class="label">Tier B — gated</span><span class="value tier-b">{tier_b}</span></div>
+            <div class="tier"><span class="label">Tier C — human-only</span><span class="value tier-c">{tier_c}</span></div>
+            <div class="kv"><span class="label">Provider pools available</span><span class="value mono ok">{pools_available}/{pools_total}</span></div>
+            <div class="kv"><span class="label">Free-tier headroom</span><span class="value mono">{headroom_pct}%</span></div>
+        </div>
+    </div>
+
+    <div class="card">
+        <h3>🧩 Recent Dost Tasks (last 10)</h3>
+        {dost_rows}
+    </div>
+
+    <div class="card">
+        <h3>🧠 Synthesis Panel</h3>
+        <div class="result-card"><pre>{synthesis}</pre></div>
+        <p class="small">Last synthesis line from jev-dispatcher.log.</p>
+    </div>
+
+    <p style="margin-top: 1rem; color: #64748b; font-size: 0.8rem;">
+        JEV Dispatcher — Paper-only · Kill switch LOCKED · Free tiers only · http://localhost:8083/dashboard
+    </p>
+</body>
+</html>"""
+
 TASK_RESULT_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -327,6 +445,8 @@ class OfficeHandler(BaseHTTPRequestHandler):
             self._qwen_status()
         elif path == "/metrics":
             self._serve_metrics()
+        elif path == "/dashboard":
+            self._serve_dashboard_public()
         else:
             self.send_error(404)
 
@@ -734,8 +854,8 @@ class OfficeHandler(BaseHTTPRequestHandler):
             "worker_running": True
         }).encode())
 
-    def _serve_metrics(self):
-        """System metrics endpoint - aggregates Qwen, JEV, and Ollama health."""
+    def _build_metrics_payload(self):
+        """Aggregate Qwen, JEV, and Ollama health into a metrics dict (shared by /metrics and /dashboard)."""
         # Qwen API metrics
         qwen_metrics = {"pending_tasks": 0, "completed_tasks": 0, "ollama_available": False}
         try:
@@ -773,11 +893,19 @@ class OfficeHandler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
-        # JEV throughput metrics: tasks/min, calls today, error rate
+        # JEV throughput metrics: per-cycle (last 24h) counts, tasks/min, error rate
         now = time.time()
+        CYCLE_WINDOW_SEC = 24 * 60 * 60  # per-cycle = last 24 hours
+        MIN_WINDOW_SEC = 60
+
+        jev_created_total = 0
+        jev_done_total = 0
+        jev_errors_total = 0
+        jev_created_cycle = 0
+        jev_done_cycle = 0
+        jev_errors_cycle = 0
         jev_tasks_per_min = 0
-        jev_errors = 0
-        jev_calls_today = jev_created  # all created tasks count as calls
+
         try:
             for hive_file in glob.glob(os.path.join(HIVE_DIR, "*.json")):
                 try:
@@ -785,20 +913,36 @@ class OfficeHandler(BaseHTTPRequestHandler):
                         t = json.load(f)
                     if t.get("metadata", {}).get("source") != "jev-cloud-orchestrator":
                         continue
+
+                    # Lifetime counts
+                    jev_created_total += 1
+                    if t.get("status") == "done":
+                        jev_done_total += 1
+                    if t.get("status") == "error":
+                        jev_errors_total += 1
+
+                    # Per-cycle counts (last 24h)
                     ts = t.get("updated_at") or t.get("created_at")
                     if ts:
                         try:
                             task_time = time.mktime(time.strptime(ts, "%Y-%m-%dT%H:%M:%SZ"))
-                            if now - task_time <= 60:
+                            age_sec = now - task_time
+                            if age_sec <= CYCLE_WINDOW_SEC:
+                                jev_created_cycle += 1
+                                if t.get("status") == "done":
+                                    jev_done_cycle += 1
+                                if t.get("status") == "error":
+                                    jev_errors_cycle += 1
+                            if age_sec <= MIN_WINDOW_SEC:
                                 jev_tasks_per_min += 1
                         except ValueError:
                             pass
-                    if t.get("status") == "error":
-                        jev_errors += 1
                 except Exception:
                     pass
         except Exception:
             pass
+
+        jev_calls_today = jev_created_cycle  # per-cycle calls
 
         # Provider pool status from router
         pool_status = {}
@@ -810,20 +954,22 @@ class OfficeHandler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(json.dumps({
+        return {
             "service": "office-web-metrics",
             "status": "ok",
             "qwen": qwen_metrics,
             "jev": {
-                "tasks_created": jev_created,
-                "tasks_done": jev_done,
-                "completion_rate": round(jev_done / jev_created * 100, 1) if jev_created > 0 else 0,
+                # Per-cycle (last 24h) metrics — primary
+                "tasks_created": jev_created_cycle,
+                "tasks_done": jev_done_cycle,
+                "completion_rate": round(jev_done_cycle / jev_created_cycle * 100, 1) if jev_created_cycle > 0 else 0,
                 "tasks_per_min": round(jev_tasks_per_min, 1),
                 "calls_today": jev_calls_today,
-                "error_rate": round(jev_errors / jev_created * 100, 1) if jev_created > 0 else 0,
+                "error_rate": round(jev_errors_cycle / jev_created_cycle * 100, 1) if jev_created_cycle > 0 else 0,
+                # Lifetime totals — supplementary
+                "tasks_created_total": jev_created_total,
+                "tasks_done_total": jev_done_total,
+                "error_rate_total": round(jev_errors_total / jev_created_total * 100, 1) if jev_created_total > 0 else 0,
             },
             "ollama": {
                 "available": ollama_ok,
@@ -835,7 +981,108 @@ class OfficeHandler(BaseHTTPRequestHandler):
                 "calls_today": jev_calls_today,
                 "headroom_pct": round((1 - jev_calls_today / 288000) * 100, 1) if jev_calls_today < 288000 else 0,
             },
-        }).encode())
+        }
+
+    def _serve_metrics(self):
+        """System metrics endpoint - aggregates Qwen, JEV, and Ollama health."""
+        payload = self._build_metrics_payload()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(payload).encode())
+
+    def _serve_dashboard_public(self):
+        """Public HTML dashboard (no login): fleet status, autonomy tiers, kill switch, dost tasks, synthesis."""
+        payload = self._build_metrics_payload()
+        jev = payload.get("jev", {})
+        pools = payload.get("provider_pools", {})
+        free = payload.get("free_ceiling", {})
+
+        pools_available = sum(1 for p in pools.values() if p.get("available"))
+        pools_total = len(pools)
+
+        # Kill switch: LOCKED, live_orders_allowed: false
+        kill_verdict = "UNKNOWN"
+        try:
+            with open(KILL_SWITCH_PATH) as f:
+                ks = json.load(f)
+            kill_verdict = ks.get("verdict", "UNKNOWN")
+        except Exception:
+            pass
+
+        # Autonomy tiers (from dispatcher knowledge)
+        tier_a, tier_b, tier_c = 13, 12, 7
+
+        # Recent dost tasks (last 10, source=="dost") with status and result preview
+        dost_rows = ""
+        try:
+            dost_tasks = []
+            for hive_file in glob.glob(os.path.join(HIVE_DIR, "*.json")):
+                try:
+                    with open(hive_file) as f:
+                        t = json.load(f)
+                    if t.get("metadata", {}).get("source") == "dost":
+                        dost_tasks.append(t)
+                except Exception:
+                    pass
+            dost_tasks.sort(key=lambda x: x.get("updated_at", "") or x.get("created_at", ""), reverse=True)
+            for t in dost_tasks[:10]:
+                result = t.get("result")
+                if not isinstance(result, str):
+                    result = str(result) if result else ""
+                preview = result.replace("\n", " ")[:120] if result else "(no result yet)"
+                status = t.get("status", "pending")
+                dost_rows += f"""
+                <div class="task">
+                    <span class="task-id">{escape(t.get('id', '?'))}</span>
+                    <div>
+                        <span class="status-badge status-{status}">{escape(status)}</span>
+                        <span class="task-agent">{escape(t.get('agent_id', '?'))}</span><br>
+                        <span class="task-title">{escape(t.get('title', '?'))}</span>
+                    </div>
+                    <span style="font-size:0.8rem;color:#64748b">{escape(preview)}</span>
+                </div>
+                """
+            if not dost_rows:
+                dost_rows = '<div class="empty">No dost tasks found.</div>'
+        except Exception as e:
+            dost_rows = f'<div class="empty">Error reading dost tasks: {escape(str(e))}</div>'
+
+        # Synthesis panel: last synthesis output from jev-dispatcher.log
+        synthesis = "No synthesis output found in log."
+        try:
+            with open(JEV_LOG) as f:
+                log_lines = f.readlines()
+            for line in reversed(log_lines):
+                if "Synthesis:" in line:
+                    synthesis = line.strip()
+                    break
+        except Exception:
+            pass
+
+        html = DASHBOARD_PUBLIC_TEMPLATE.format(
+            kill_verdict=escape(kill_verdict),
+            kill_live="false",
+            tier_a=tier_a,
+            tier_b=tier_b,
+            tier_c=tier_c,
+            jev_created=jev.get("tasks_created", 0),
+            jev_done=jev.get("tasks_done", 0),
+            completion_rate=jev.get("completion_rate", 0),
+            error_rate=jev.get("error_rate", 0),
+            calls_today=jev.get("calls_today", 0),
+            tasks_per_min=jev.get("tasks_per_min", 0),
+            pools_available=pools_available,
+            pools_total=pools_total,
+            headroom_pct=free.get("headroom_pct", 0),
+            dost_rows=dost_rows,
+            synthesis=escape(synthesis),
+        )
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(html.encode("utf-8"))
 
     def log_message(self, format, *args):
         pass
