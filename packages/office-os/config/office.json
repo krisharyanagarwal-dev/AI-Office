@@ -91,6 +91,9 @@
     }
   },
   "agent_tiers": {
+    "general": [
+      "general-assistant"
+    ],
     "pro": [
       "quant-research-manager",
       "quant-researcher",

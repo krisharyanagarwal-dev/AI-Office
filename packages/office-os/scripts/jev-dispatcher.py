@@ -20,6 +20,7 @@ import signal
 import sys
 import time
 import uuid
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -2093,10 +2094,10 @@ def main():
             tasks.append((agent_info, state_bundle, tier))
 
         # --- Pick up user-submitted tasks from the dost ---
+        # Executed directly in Phase 3 (not via multiprocessing pool)
         user_tasks = collect_user_submitted_tasks()
         user_task_meta = {}  # task_file_path -> (agent_info, tier) for finalization
         for agent_info, state_bundle, tier, task_file_path in user_tasks:
-            tasks.append((agent_info, state_bundle, tier))
             user_task_meta[task_file_path] = (agent_info, tier)
             log(f"  User task queued for {agent_info['agent_id']}")
 
@@ -2111,39 +2112,95 @@ def main():
         # to avoid concurrent writes across processes.
         results = list(skip_results)  # start with pre-computed skips
 
-        # Separate user-submitted tasks (state_bundle is None) from agent tasks
+        # Process regular agent tasks via multiprocessing results
         for (agent_info, state_bundle, tier), worker_result in zip(tasks, worker_results):
             agent_id = agent_info["agent_id"]
             try:
-                if state_bundle is None:
-                    # User-submitted task — update existing task file, no findings
-                    task_file_path = None
-                    for path, (info, t) in user_task_meta.items():
-                        if info["agent_id"] == agent_id:
-                            task_file_path = path
-                            break
-                    if task_file_path:
-                        r = finalize_user_task(task_file_path, worker_result)
-                    else:
-                        r = {"agent_id": agent_id, "status": "error", "error": "task file not found"}
-                    results.append(r)
-                    if r.get("status") == "done":
-                        log(f"  Done (user task) {agent_id} -> {r.get('task_id','')}")
-                    else:
-                        log(f"  Error (user task) {agent_id} - {r.get('error','unknown')}")
+                r = finalize_agent_result(agent_info, state_bundle, tier, worker_result)
+                results.append(r)
+                if r.get("skipped"):
+                    log(f"  Skipped {agent_id} ({tier}) - {r['skipped']}")
+                elif r.get("status") == "done":
+                    log(f"  Done {agent_id} ({tier}) -> {r['task_id']}")
                 else:
-                    r = finalize_agent_result(agent_info, state_bundle, tier, worker_result)
-                    results.append(r)
-                    if r.get("skipped"):
-                        log(f"  Skipped {agent_id} ({tier}) - {r['skipped']}")
-                    elif r.get("status") == "done":
-                        log(f"  Done {agent_id} ({tier}) -> {r['task_id']}")
-                    else:
-                        log(f"  Error {agent_id} ({tier}) - {r.get('error', 'unknown')}")
+                    log(f"  Error {agent_id} ({tier}) - {r.get('error', 'unknown')}")
             except Exception as e:
                 agent_id = agent_info["agent_id"]
                 stampede_release(agent_id)
                 log(f"  Exception {agent_id}: {e}")
+                results.append({"agent_id": agent_id, "status": "error", "error": str(e)})
+
+        # --- Execute user-submitted dost tasks directly in main process ---
+        for task_file_path, (agent_info, tier) in user_task_meta.items():
+            agent_id = agent_info["agent_id"]
+            try:
+                # Read the task file to get the user's prompt
+                with open(task_file_path) as f:
+                    task = json.load(f)
+                user_prompt = task.get("description", task.get("title", ""))
+
+                # Fetch live fleet metrics to inject into the prompt so the
+                # model can answer with real numbers, not generic filler.
+                metrics_summary = ""
+                try:
+                    with urllib.request.urlopen("http://127.0.0.1:8083/metrics", timeout=4) as r:
+                        m = json.loads(r.read().decode("utf-8"))
+                    jev = m.get("jev", {})
+                    pools = m.get("provider_pools", {})
+                    avail = sum(1 for p in pools.values() if p.get("available"))
+                    metrics_summary = (
+                        f"LIVE FLEET METRICS: {jev.get('tasks_done',0)}/{jev.get('tasks_created',0)} tasks done "
+                        f"({jev.get('completion_rate',0):.0f}% complete), error rate {jev.get('error_rate_total',0):.1f}%, "
+                        f"{jev.get('calls_today',0)} calls today, {avail}/{len(pools)} provider pools available, "
+                        f"{m.get('free_ceiling',{}).get('headroom_pct',0):.0f}% free-tier headroom.\n\n"
+                    )
+                except Exception:
+                    metrics_summary = "(live metrics unavailable)\n\n"
+
+                # Prepend dost fleet context so any model answers about OUR
+                # fleet, not commercial logistics. Dost-submitted tasks are
+                # always routed as general-assistant regardless of keywords.
+                contextualized_prompt = (
+                    "You are answering as Dost, the AI chief of staff for "
+                    "THE CLAUDE COMPANY's research fleet. "
+                    + metrics_summary +
+                    "Answer the following question about the fleet directly and accurately, "
+                    "using the live metrics above where relevant:\n\n"
+                    + user_prompt
+                )
+
+                # Execute directly: general-assistant routing for dost prompts.
+                # qwen_local (ollama) is often unavailable; fall back to the
+                # orchestrator failover chain (nvidia_key3 → nvidia_key4 → google → openrouter).
+                orchestrator = CloudModelOrchestrator()
+                try:
+                    exec_text = route_through_local(contextualized_prompt)
+                    exec_model_used = "hauhaucs/qwen3.5-9b-uncensored-aggressive"
+                    exec_pool_used = "qwen_local"
+                except Exception:
+                    model_name, pool_name, _ = orchestrator.decide_model(
+                        agent_info, task_type="exec"
+                    )
+                    exec_text, exec_model_used, exec_pool_used = orchestrator.call_model(
+                        model_name, pool_name, contextualized_prompt,
+                        task_id=f"jev-exec-{agent_id}",
+                        priority="normal",
+                    )
+
+                worker_result = {
+                    "status": "done",
+                    "exec_text": exec_text,
+                    "exec_model": exec_model_used,
+                    "exec_pool": exec_pool_used,
+                }
+                r = finalize_user_task(task_file_path, worker_result)
+                results.append(r)
+                if r.get("status") == "done":
+                    log(f"  Done (user task) {agent_id} -> {r.get('task_id','')}")
+                else:
+                    log(f"  Error (user task) {agent_id} - {r.get('error','unknown')}")
+            except Exception as e:
+                log(f"  Exception (user task) {agent_id}: {e}")
                 results.append({"agent_id": agent_id, "status": "error", "error": str(e)})
 
         done_count = sum(1 for r in results if r.get("status") == "done")
