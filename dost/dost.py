@@ -638,6 +638,144 @@ def _push_telegram_briefing() -> None:
         print(f"Telegram push failed (non-JSON): {proc.stdout[:300]}")
 
 
+LAUNCHCTL_LABELS = {
+    "dispatcher": "dev.krisharyanagarwal.jev-dispatcher",
+    "memory learner": "dev.krisharyanagarwal.dost-memory-learner",
+    "morning digest": "dev.krisharyanagarwal.dost-morning-digest",
+}
+
+
+def _plists_loaded() -> tuple:
+    """Return (ok, detail) for whether the dost launchd plists are loaded."""
+    try:
+        out = subprocess.run(
+            ["launchctl", "list"], capture_output=True, text=True, timeout=10
+        ).stdout
+        loaded = {line.split()[-1] for line in out.splitlines() if line.strip()}
+        missing = [name for name, label in LAUNCHCTL_LABELS.items() if label not in loaded]
+        if missing:
+            return False, "not loaded: " + ", ".join(missing)
+        return True, "all loaded"
+    except Exception as e:
+        return False, f"launchctl check failed ({e})"
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
+def doctor() -> tuple:
+    """One-command system health check.
+
+    Returns (board_text, exit_code). Exit code 0 if all checks pass, 1 if any
+    fail. Read-only — changes nothing.
+    """
+    checks = []
+
+    # 1. Dispatcher reachable + PID alive
+    st = _fetch_dispatcher_status()
+    reachable = st is not None
+    pid_text = "unknown"
+    pid_ok = False
+    try:
+        pid_text = Path("/Users/aryanagarwal/.openclaw/jev-dispatcher.pid").read_text().strip()
+        pid_ok = _pid_alive(int(pid_text))
+    except Exception:
+        pid_ok = False
+    dispatcher_ok = reachable and pid_ok
+    checks.append(
+        ("Dispatcher reachable + PID alive",
+         dispatcher_ok,
+         f"reachable={reachable} pid={pid_text} alive={pid_ok}")
+    )
+
+    # 2. Metrics fresh (<10 min) — dispatcher log updated within 10 min
+    log_path = Path("/Users/aryanagarwal/.openclaw/jev-dispatcher.log")
+    fresh = False
+    age_text = "unknown"
+    try:
+        mtime = log_path.stat().st_mtime
+        age_sec = time.time() - mtime
+        fresh = reachable and age_sec < 600
+        age_text = f"{age_sec:.0f}s"
+    except Exception:
+        fresh = False
+    checks.append(("Metrics fresh (<10 min)", fresh,
+                   f"reachable={reachable} log age={age_text}"))
+
+    # 3. office.json valid
+    office_ok = False
+    try:
+        json.loads(
+            Path("/Users/aryanagarwal/AI-Office/packages/office-os/config/office.json").read_text()
+        )
+        office_ok = True
+    except Exception:
+        pass
+    checks.append(("office.json valid", office_ok, ""))
+
+    # 4. Plists loaded (dispatcher, memory learner, morning digest)
+    plists_ok, plists_detail = _plists_loaded()
+    checks.append(
+        ("Plists loaded (dispatcher, memory learner, morning digest)", plists_ok, plists_detail)
+    )
+
+    # 5. qwen_local / ollama reachable
+    ollama_ok = False
+    try:
+        urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=4)
+        ollama_ok = True
+    except Exception:
+        pass
+    checks.append(("qwen_local / ollama reachable", ollama_ok, "http://127.0.0.1:11434/api/tags"))
+
+    # 6. Git status clean-ish (untracked files OK, tracked changes not OK)
+    git_clean = True
+    git_detail = ""
+    try:
+        out = subprocess.run(
+            ["git", "status", "--porcelain"], capture_output=True, text=True, timeout=10,
+            cwd=str(COMPANY_DIR),
+        ).stdout
+        tracked_changes = [line for line in out.splitlines() if line and not line.startswith("?? ")]
+        if tracked_changes:
+            git_clean = False
+            git_detail = "tracked changes: " + "; ".join(tracked_changes[:5])
+    except Exception as e:
+        git_clean = False
+        git_detail = f"git check failed ({e})"
+    checks.append(("Git status clean-ish", git_clean, git_detail))
+
+    # 7. No .git/index.lock
+    index_lock = COMPANY_DIR / ".git" / "index.lock"
+    no_lock = not index_lock.exists()
+    checks.append(("No .git/index.lock", no_lock, str(index_lock)))
+
+    # Build board
+    all_pass = all(ok for _, ok, _ in checks)
+    lines = [
+        "╔═════════════════════════════════════════════════════════════════╗",
+        "║  dost --doctor — system health check                          ║",
+        "╚═════════════════════════════════════════════════════════════════╝",
+        "",
+    ]
+    for name, ok, detail in checks:
+        mark = "✓" if ok else "✗"
+        lines.append(f"[{mark}] {name}" + (f" — {detail}" if detail else ""))
+    lines.append("")
+    if all_pass:
+        lines.append("All checks passed.")
+        code = 0
+    else:
+        lines.append("One or more checks FAILED.")
+        code = 1
+    return "\n".join(lines), code
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="THE CLAUDE COMPANY — Dost")
@@ -655,8 +793,14 @@ def main():
     parser.add_argument("--memory", action="store_true")
     parser.add_argument("--context", action="store_true")
     parser.add_argument("--health", action="store_true", help="Check OpenAI component availability")
+    parser.add_argument("--doctor", action="store_true",
+                        help="Run a one-command system health check")
     args = parser.parse_args()
 
+    if args.doctor:
+        board, code = doctor()
+        print(board)
+        sys.exit(code)
     if args.push_telegram:
         _push_telegram_briefing()
     elif args.briefing:
@@ -694,7 +838,7 @@ def main():
     else:
         print(dost_greeting())
         print("\nI'm your dost. Tell me what you need: research, trading, code, writing, strategy.")
-        print("Commands: --briefing, --push-telegram, --status, --dispatch, --memory, --context, --health, --department X")
+        print("Commands: --briefing, --push-telegram, --status, --dispatch, --memory, --context, --health, --doctor, --department X")
 
 
 if __name__ == "__main__":

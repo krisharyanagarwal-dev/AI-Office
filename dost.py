@@ -23,6 +23,7 @@ dost_greeting = _dost_module.dost_greeting
 generate_daily_briefing = _dost_module.generate_daily_briefing
 provider_health = _dost_module.provider_health
 build_context = _dost_module.build_context
+doctor = _dost_module.doctor
 MEMORY = _dost_module.MEMORY
 
 
@@ -40,8 +41,14 @@ def main():
     parser.add_argument("--memory", action="store_true")
     parser.add_argument("--context", action="store_true")
     parser.add_argument("--health", action="store_true", help="Check OpenAI component availability")
+    parser.add_argument("--doctor", action="store_true",
+                        help="Run a one-command system health check")
     args = parser.parse_args()
 
+    if args.doctor:
+        board, code = doctor()
+        print(board)
+        sys.exit(code)
     if args.push_telegram:
         _dost_module._push_telegram_briefing()
     elif args.briefing:
@@ -79,7 +86,7 @@ def main():
     else:
         print(dost_greeting())
         print("\nI'm your dost. Tell me what you need: research, trading, code, writing, strategy.")
-        print("Commands: --briefing, --push-telegram, --status, --dispatch, --memory, --context, --health, --department X")
+        print("Commands: --briefing, --push-telegram, --status, --dispatch, --memory, --context, --health, --doctor, --department X")
 
 
 if __name__ == "__main__":
