@@ -206,13 +206,14 @@ def mini_office():
 
 
 COLLECTORS = [
-    office_manager,
     office_hud,
-    dashboard_hub,
-    openalice_fleet,
     laptop_jobs,
     mini_office,
 ]
+# Not polled any more (kept above in case they come back):
+#   office_manager  - packages/office-manager moved to _archive; its collect job is retired.
+#   dashboard_hub   - its launchd jobs were retired; nothing serves :8600.
+#   openalice_fleet - moved to _archive; its truth summary is no longer refreshed.
 
 
 def collect_all():
