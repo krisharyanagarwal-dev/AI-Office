@@ -786,6 +786,14 @@ class OfficeHandler(BaseHTTPRequestHandler):
             self._serve_review_page()
         elif path == "/results":
             self._serve_results_page()
+        elif path == "/health":
+            self._serve_health()
+        elif path == "/health/dispatcher":
+            self._serve_health_dispatcher()
+        elif path == "/health/providers":
+            self._serve_health_providers()
+        elif path == "/api/health":
+            self._serve_health()
         else:
             self.send_error(404)
 
@@ -1514,6 +1522,153 @@ class OfficeHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps(payload).encode())
+
+    # ---------- health checks ----------
+    def _check_dispatcher(self):
+        """Is the JEV dispatcher running? (pid file + live log freshness)"""
+        pid_path = Path("/Users/aryanagarwal/.openclaw/jev-dispatcher.pid")
+        log_path = Path(JEV_LOG)
+        detail = {}
+        running = False
+        try:
+            pid = int(pid_path.read_text().strip())
+            os.kill(pid, 0)  # raises if the process does not exist
+            running = True
+            detail["pid"] = pid
+        except (OSError, ValueError, ProcessLookupError, FileNotFoundError):
+            running = False
+        detail["log_exists"] = log_path.exists()
+        try:
+            age_sec = time.time() - log_path.stat().st_mtime
+            detail["log_age_sec"] = int(age_sec)
+            if age_sec > 600 and running:
+                running = False  # log is stale; dispatcher not actively writing
+        except OSError:
+            detail["log_age_sec"] = None
+        if running:
+            return {"status": "healthy", "running": True, **detail}
+        if log_path.exists():
+            return {"status": "degraded", "running": False, **detail}
+        return {"status": "unhealthy", "running": False, **detail}
+
+    def _check_providers(self):
+        """Are provider pools available?"""
+        detail = {}
+        try:
+            router = ProviderRouter()
+            pools = router.status()
+            available = sum(1 for p in pools.values() if p.get("available"))
+            total = len(pools)
+            detail["pools"] = {
+                name: {
+                    "available": p.get("available"),
+                    "tier": p.get("tier"),
+                    "cooldown_remaining": round(p.get("cooldown_remaining", 0), 1),
+                }
+                for name, p in pools.items()
+            }
+        except Exception as e:
+            return {"status": "unhealthy", "available": 0, "total": 0, "error": str(e), **detail}
+        if total == 0:
+            return {"status": "unhealthy", "available": 0, "total": 0, **detail}
+        if available == total:
+            return {"status": "healthy", "available": available, "total": total, **detail}
+        if available > 0:
+            return {"status": "degraded", "available": available, "total": total, **detail}
+        return {"status": "unhealthy", "available": 0, "total": total, **detail}
+
+    def _check_findings_store(self):
+        """Is the findings store accessible?"""
+        paths = [Path("/Users/aryanagarwal/Documents/polymarket/research/findings.json")]
+        try:
+            paths.append(workspace_findings_dir(DEFAULT_WORKSPACE_ID))
+        except Exception:
+            pass
+        accessible = []
+        for p in paths:
+            try:
+                if p.is_file():
+                    json.loads(p.read_text())  # must be valid JSON
+                    accessible.append(str(p))
+                elif p.is_dir():
+                    accessible.append(str(p))
+            except Exception:
+                continue
+        if accessible:
+            return {"status": "healthy", "accessible": True, "paths": accessible}
+        return {"status": "unhealthy", "accessible": False, "paths": []}
+
+    def _check_office_pnl(self):
+        """Is office_pnl.json accessible?"""
+        pnl_path = Path("/Users/aryanagarwal/.openclaw/office_pnl.json")
+        try:
+            data = json.loads(pnl_path.read_text())
+            count = len(data) if isinstance(data, list) else (1 if isinstance(data, dict) else 0)
+            return {
+                "status": "healthy",
+                "accessible": True,
+                "path": str(pnl_path),
+                "entries": count,
+            }
+        except Exception as e:
+            return {
+                "status": "unhealthy",
+                "accessible": False,
+                "path": str(pnl_path),
+                "error": str(e),
+            }
+
+    def _serve_health(self):
+        """GET /health (and /api/health) - aggregate health check."""
+        checks = {
+            "dispatcher": self._check_dispatcher(),
+            "providers": self._check_providers(),
+            "findings_store": self._check_findings_store(),
+            "office_pnl": self._check_office_pnl(),
+        }
+        statuses = [c.get("status") for c in checks.values()]
+        if all(s == "healthy" for s in statuses):
+            overall = "healthy"
+        elif any(s == "unhealthy" for s in statuses):
+            overall = "unhealthy"
+        else:
+            overall = "degraded"
+        payload = {
+            "status": overall,
+            "checks": checks,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        self._send_json(payload)
+
+    def _serve_health_dispatcher(self):
+        """GET /health/dispatcher - detailed dispatcher status."""
+        check = self._check_dispatcher()
+        payload = {
+            "endpoint": "/health/dispatcher",
+            "check": check,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            lines = Path(JEV_LOG).read_text().splitlines()
+            payload["log_tail"] = lines[-5:] if lines else []
+        except Exception:
+            payload["log_tail"] = []
+        try:
+            payload["kill_switch"] = json.loads(Path(KILL_SWITCH_PATH).read_text())
+        except Exception:
+            payload["kill_switch"] = None
+        status = 200 if check["status"] == "healthy" else 503
+        self._send_json(payload, status=status)
+
+    def _serve_health_providers(self):
+        """GET /health/providers - detailed provider pool health."""
+        check = self._check_providers()
+        payload = {
+            "endpoint": "/health/providers",
+            "check": check,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        self._send_json(payload)
 
     def build_activity_panel_html(self, workspace_id: str = "default") -> str:
         """Build the activity feed panel HTML from workspace activity JSONL logs.
