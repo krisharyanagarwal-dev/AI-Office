@@ -34,7 +34,7 @@ DOST_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(COMPANY_DIR))
 sys.path.insert(0, str(DOST_DIR))
 
-from dost.dost import dost_respond, generate_daily_briefing, MEMORY  # noqa: E402
+from dost import companion_respond, generate_daily_briefing, MEMORY  # noqa: E402  (dost/dost.py; DOST_DIR is first on sys.path)
 from openai_components import provider_health, speech_to_text, text_to_speech  # noqa: E402
 
 
@@ -188,8 +188,8 @@ def _report_summary() -> str:
 
 
 def _dost_reply(user_text: str, chat_id: int, want_voice: bool = False) -> tuple[str, Optional[str]]:
-    """Run dost_respond and return (text, voice_path_or_None)."""
-    reply = dost_respond(user_text)
+    """Run companion_respond (same brain as the pet) and return (text, voice_path_or_None)."""
+    reply = companion_respond(user_text)
     # Strip the greeting line for a cleaner chat feel (keep the substance)
     lines = reply.split("\n")
     body = "\n".join(l for l in lines if not l.startswith("Good "))

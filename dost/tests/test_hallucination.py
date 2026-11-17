@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -85,6 +86,15 @@ def _source_text() -> str:
             )
         except (json.JSONDecodeError, TypeError):
             pass
+
+    # Live fleet metrics from :8083/metrics (dost reads these for fleet status
+    # replies — numbers must be traceable to this source, not invented)
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:8083/metrics", timeout=4) as r:
+            metrics = json.loads(r.read().decode("utf-8"))
+        parts.append(json.dumps(metrics))
+    except Exception:
+        pass
 
     return "\n".join(parts)
 

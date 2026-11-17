@@ -168,13 +168,15 @@ def test_add_finding_dedupes_by_agent_and_claim(monkeypatch):
 
     added1 = jev.add_finding("compliance-checker", "kill switch LOCKED", "jev-task-abc", "supported")
     added2 = jev.add_finding("compliance-checker", "kill switch LOCKED", "jev-task-def", "supported")
-    assert added1 is True
+    assert added1 is not False  # returns finding ID string
     assert added2 is False  # duplicate claim+agent
 
     store = json.loads(store_path.read_text())
     assert len(store["findings"]) == 1
     assert store["findings"][0]["agent"] == "compliance-checker"
     assert store["findings"][0]["verdict"] == "supported"
+    assert store["findings"][0]["verification_status"] == "pending"
+    assert store["findings"][0]["verified_by"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -195,9 +197,11 @@ def test_synthesize_cycle_all_supported(monkeypatch):
     store_path.write_text(json.dumps({
         "findings": [
             {"agent": "compliance-checker", "claim": "kill switch LOCKED",
-             "verdict": "supported", "date": "2026-11-16T05:00:00Z"},
+             "verdict": "supported", "date": "2026-11-16T05:00:00Z",
+             "verification_status": "confirmed"},
             {"agent": "risk-control-verifier", "claim": "heat 6%, 3 legs",
-             "verdict": "supported", "date": "2026-11-16T05:01:00Z"},
+             "verdict": "supported", "date": "2026-11-16T05:01:00Z",
+             "verification_status": "confirmed"},
         ]
     }))
     monkeypatch.setattr(jev, "FINDINGS_STORE_PATH", str(store_path))
@@ -232,7 +236,8 @@ def test_synthesize_cycle_writes_report(monkeypatch):
     store_path.write_text(json.dumps({
         "findings": [
             {"agent": "compliance-checker", "claim": "kill switch LOCKED",
-             "verdict": "supported", "date": "2026-11-16T05:00:00Z"},
+             "verdict": "supported", "date": "2026-11-16T05:00:00Z",
+             "verification_status": "confirmed"},
         ]
     }))
     monkeypatch.setattr(jev, "FINDINGS_STORE_PATH", str(store_path))
@@ -425,4 +430,162 @@ def test_stampede_acquire_ttl_expires(monkeypatch):
     # Manually set old timestamp
     jev._stampede_locks["agent-a"] = time.time() - 400  # older than default 300s TTL
     assert jev.stampede_acquire("agent-a") is True  # TTL expired, can re-acquire
+
+
+# --- O0.1: extract_finding regression tests ---
+def test_extract_finding_echo_rejected():
+    echo = "The user wants me to act as JEV executing a direct audit task for agent data-feed-monitor. I need to analyze the STATE BUNDL"
+    claim, method = jev.extract_finding(echo)
+    assert claim is None
+    assert method == "echo"
+
+
+def test_extract_finding_title_echo_rejected():
+    title = "**TITLE:** Trade-Log Archivist – Cost & Edge Validation for Paper-Trading Fleet"
+    claim, method = jev.extract_finding(title)
+    assert claim is None
+    assert method == "echo"
+
+
+def test_extract_finding_preamble_rejected():
+    preamble = "Let me analyze the state bundle carefully to answer the three specific questions."
+    claim, method = jev.extract_finding(preamble)
+    assert claim is None
+    assert method == "echo"
+
+
+def test_extract_finding_finding_line():
+    text = "kill switch LOCKED, drift_count=0\nFINDING: kill switch is LOCKED with no trader process running\nVERDICT: PASS"
+    claim, method = jev.extract_finding(text)
+    assert method == "finding_line"
+    assert claim == "kill switch is LOCKED with no trader process running"
+
+
+def test_extract_finding_finding_line_last_wins():
+    text = "FINDING: first attempt\nmore detail here\nFINDING: corrected final claim about drawdown tier\nVERDICT: PASS"
+    claim, method = jev.extract_finding(text)
+    assert method == "finding_line"
+    assert claim == "corrected final claim about drawdown tier"
+
+
+def test_extract_finding_substantive_fallback():
+    text = "Compliance check: kill switch LOCKED, live_orders_allowed=false, no order path found. VERDICT: PASS"
+    claim, method = jev.extract_finding(text)
+    assert method == "substantive"
+    assert "kill switch" in claim and "LOCKED" in claim
+
+
+def test_extract_finding_empty_and_none():
+    assert jev.extract_finding("") == (None, "none")
+    assert jev.extract_finding(None) == (None, "none")
+
+
+def test_extract_finding_headers_skipped():
+    text = "# AUDIT REPORT\n**POSITION SIZING RULES**\n- item one\nlive_orders_allowed=false and executor_enabled=false confirmed. VERDICT: PASS"
+    claim, method = jev.extract_finding(text)
+    assert method == "substantive"
+    assert "live_orders_allowed" in claim
+
+
+# ---------------------------------------------------------------------------
+# O1.2: Tripartite consensus tests
+# ---------------------------------------------------------------------------
+
+def test_devil_advisor_excludes_producer_and_checkers(monkeypatch):
+    """Devil-advisor must differ from producer and all 3 checkers."""
+    config = jev.load_office_config()
+    agents = jev.get_all_agents(config)
+    agent_ids = {a["agent_id"] for a in agents}
+
+    exclude = {"risk-control-verifier", "strategy-acceptance-verifier", "backtest-auditor", "quant-model-validator"}
+    devil = jev._devil_advisor_for("risk", list(exclude))
+    assert devil is not None
+    assert devil not in exclude
+    assert devil in agent_ids
+
+
+def test_devil_advisor_returns_none_when_all_excluded(monkeypatch):
+    """If every agent is excluded, devil_advisor returns None."""
+    config = jev.load_office_config()
+    agents = jev.get_all_agents(config)
+    all_ids = [a["agent_id"] for a in agents]
+    devil = jev._devil_advisor_for("default", all_ids)
+    assert devil is None
+
+
+def test_tripartite_non_major_domain_returns_unclear(monkeypatch, tmp_path):
+    """Non-major domains (e.g. 'default') fall back to single verification."""
+    store_path = Path(tmp_path) / "findings.json"
+    store_path.write_text(json.dumps({"findings": []}))
+    monkeypatch.setattr(jev, "FINDINGS_STORE_PATH", str(store_path))
+
+    config = jev.load_office_config()
+    result = jev.verify_finding_tripartite("f-test", "some-agent", "default", config)
+    assert result == "unclear"
+
+
+def test_tripartite_consensus_all_confirm(monkeypatch, tmp_path):
+    """3/3 confirm -> confirmed."""
+    store_path = Path(tmp_path) / "findings.json"
+    store_path.write_text(json.dumps({
+        "findings": [{"id": "f-tri-1", "agent": "risk-manager",
+                      "claim": "risk limit valid", "verdict": "supported",
+                      "date": "2026-11-17T00:00:00Z"}]
+    }))
+    monkeypatch.setattr(jev, "FINDINGS_STORE_PATH", str(store_path))
+
+    config = jev.load_office_config()
+
+    # Risk domain checkers (first 3 non-Tier-C, excluding producer "risk-manager"):
+    # strategy-acceptance-verifier, drawdown-analyst, exposure-analyst
+    # Devil-advisor: risk-control-verifier (first verifier not in exclude list)
+    def mock_worker(args):
+        agent_id = args[0]["agent_id"]
+        if agent_id == "drawdown-analyst":
+            return {"exec_text": "VERDICT: confirm", "exec_model": "t", "exec_pool": "t"}
+        if agent_id == "risk-control-verifier":
+            # Devil-advisor: does NOT contest (allows confirmation)
+            return {"exec_text": "VERDICT: confirm", "exec_model": "t", "exec_pool": "t"}
+        # strategy-acceptance-verifier and exposure-analyst confirm
+        return {"exec_text": "VERDICT: confirm", "exec_model": "t", "exec_pool": "t"}
+    monkeypatch.setattr(jev, "execute_agent_worker", mock_worker)
+
+    result = jev.verify_finding_tripartite("f-tri-1", "risk-manager", "risk", config)
+    assert result == "confirmed"
+
+    store = json.loads(store_path.read_text())
+    f = store["findings"][0]
+    assert f["verification_status"] == "confirmed"
+
+
+def test_tripartite_consensus_devil_overturns(monkeypatch, tmp_path):
+    """2/3 confirm but devil-advisor contests -> contested."""
+    store_path = Path(tmp_path) / "findings.json"
+    store_path.write_text(json.dumps({
+        "findings": [{"id": "f-tri-2", "agent": "risk-manager",
+                      "claim": "risk limit valid", "verdict": "supported",
+                      "date": "2026-11-17T00:00:00Z"}]
+    }))
+    monkeypatch.setattr(jev, "FINDINGS_STORE_PATH", str(store_path))
+
+    config = jev.load_office_config()
+
+    def mock_worker(args):
+        agent_id = args[0]["agent_id"]
+        # Checkers: strategy-acceptance-verifier (confirm), drawdown-analyst (confirm),
+        # exposure-analyst (contest)
+        # Devil-advisor: risk-control-verifier (contest)
+        if agent_id == "exposure-analyst":
+            return {"exec_text": "VERDICT: contest", "exec_model": "t", "exec_pool": "t"}
+        if agent_id == "risk-control-verifier":
+            return {"exec_text": "VERDICT: contest", "exec_model": "t", "exec_pool": "t"}
+        return {"exec_text": "VERDICT: confirm", "exec_model": "t", "exec_pool": "t"}
+    monkeypatch.setattr(jev, "execute_agent_worker", mock_worker)
+
+    result = jev.verify_finding_tripartite("f-tri-2", "risk-manager", "risk", config)
+    assert result == "contested"
+
+    store = json.loads(store_path.read_text())
+    f = store["findings"][0]
+    assert f["verification_status"] == "contested"
 
