@@ -548,6 +548,12 @@ class OfficeHandler(BaseHTTPRequestHandler):
             self._serve_api_synthesis()
         elif path == "/api/tasks":
             self._serve_api_tasks()
+        elif path == "/doctor":
+            self._serve_doctor_page()
+        elif path == "/review":
+            self._serve_review_page()
+        elif path == "/results":
+            self._serve_results_page()
         else:
             self.send_error(404)
 
@@ -1444,6 +1450,219 @@ class OfficeHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps(data, indent=2).encode())
+
+    def _serve_doctor_page(self):
+        """Doctor page — system health check board."""
+        payload = self._build_metrics_payload()
+        jev = payload.get("jev", {})
+        pools = payload.get("provider_pools", {})
+        free = payload.get("free_ceiling", {})
+
+        pools_available = sum(1 for p in pools.values() if p.get("available"))
+        pools_total = len(pools)
+
+        lines = [
+            "Dost Doctor — System Health Check",
+            "",
+            f"Dispatcher: reachable, {jev.get('tasks_done',0)}/{jev.get('tasks_created',0)} tasks done ({jev.get('completion_rate',0):.0f}%)",
+            f"Error rate: {jev.get('error_rate_total',0):.1f}%",
+            f"Calls today: {jev.get('calls_today',0)}",
+            f"Provider pools: {pools_available}/{pools_total} available",
+            f"Free-tier headroom: {free.get('headroom_pct',0):.0f}%",
+            "",
+            "Provider details:",
+        ]
+        for pname, pinfo in pools.items():
+            avail = pinfo.get("available", False)
+            cd = pinfo.get("cooldown_remaining", 0)
+            status = "UP" if (avail and cd == 0) else f"COOLING {cd:.0f}s" if cd > 0 else "DOWN"
+            lines.append(f"  {pname}: {status} (tier={pinfo.get('tier','?')})")
+
+        # Cost cap
+        try:
+            pnl_path = Path("/Users/aryanagarwal/.openclaw/office_pnl.json")
+            if pnl_path.exists():
+                pnl = json.loads(pnl_path.read_text())
+                if isinstance(pnl, list):
+                    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                    today_cost = sum(t.get("cost_units",0) for t in pnl if t.get("created_at","").startswith(today))
+                    lines.append(f"")
+                    lines.append(f"Today's cost: {today_cost} units")
+                    if today_cost > 100:
+                        lines.append(f"  ⚠ COST CAP EXCEEDED (100 units)")
+                    elif today_cost > 50:
+                        lines.append(f"  ⚠ Approaching cap")
+        except Exception:
+            pass
+
+        # Findings
+        try:
+            findings_path = Path("/Users/aryanagarwal/Documents/polymarket/research/findings.json")
+            if findings_path.exists():
+                data = json.loads(findings_path.read_text())
+                findings = data.get("findings", [])
+                vs = {}
+                for f in findings:
+                    s = f.get("verification_status", "missing")
+                    vs[s] = vs.get(s, 0) + 1
+                lines.append(f"")
+                lines.append(f"Findings: {len(findings)} total")
+                for s, c in sorted(vs.items()):
+                    lines.append(f"  {s}: {c}")
+        except Exception:
+            pass
+
+        board = "\n".join(lines)
+        html_lines = []
+        for line in board.split("\n"):
+            if "⚠" in line or "EXCEEDED" in line:
+                html_lines.append(f'<div style="color:#ef4444">{escape(line)}</div>')
+            elif line.startswith("  ") and "UP" in line:
+                html_lines.append(f'<div style="color:#10b981">{escape(line)}</div>')
+            elif line.startswith("  ") and "COOLING" in line:
+                html_lines.append(f'<div style="color:#f59e0b">{escape(line)}</div>')
+            elif line.startswith("  ") and "DOWN" in line:
+                html_lines.append(f'<div style="color:#ef4444">{escape(line)}</div>')
+            elif line == "":
+                html_lines.append('<div></div>')
+            else:
+                html_lines.append(f'<div>{escape(line)}</div>')
+        content = "\n".join(html_lines)
+        html = f"""<!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Dost Doctor — Health Check</title>
+            <style>
+                body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #0f0f0f; color: #e0e0e0; }}
+                a {{ color: #3b82f6; }}
+                .btn {{ background: #3b82f6; color: white; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; text-decoration: none; display: inline-block; }}
+                .btn.secondary {{ background: #2a2a2a; }}
+                .card {{ background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }}
+                pre {{ background: #000; padding: 1rem; border-radius: 4px; overflow-x: auto; font-size: 0.85rem; font-family: monospace; white-space: pre-wrap; }}
+            </style>
+        </head>
+        <body>
+            <a href="/" class="btn secondary">← Dashboard</a>
+            <a href="/doctor?refresh=1" class="btn">Refresh</a>
+            <h1>Doctor — System Health Check</h1>
+            <div class="card">
+                <pre>{content}</pre>
+            </div>
+        </body>
+        </html>"""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(html.encode("utf-8"))
+
+    def _serve_review_page(self):
+        """Tier C review page — findings review board."""
+        sys.path.insert(0, "/Users/aryanagarwal/AI-Office/packages/office-os")
+        sys.path.insert(0, "/Users/aryanagarwal/AI-Office/dost")
+        from dost import synthesis_detail
+        try:
+            text = synthesis_detail()
+        except Exception as e:
+            text = f"Error generating synthesis: {e}"
+        html = f"""<!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Tier C Review — Findings</title>
+            <style>
+                body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #0f0f0f; color: #e0e0e0; }}
+                a {{ color: #3b82f6; }}
+                .btn {{ background: #3b82f6; color: white; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; text-decoration: none; display: inline-block; }}
+                .btn.secondary {{ background: #2a2a2a; }}
+                .card {{ background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }}
+                pre {{ background: #000; padding: 1rem; border-radius: 4px; overflow-x: auto; font-size: 0.85rem; font-family: monospace; white-space: pre-wrap; }}
+            </style>
+        </head>
+        <body>
+            <a href="/" class="btn secondary">← Dashboard</a>
+            <a href="/review?refresh=1" class="btn">Refresh</a>
+            <h1>Tier C Review — Findings Board</h1>
+            <div class="card">
+                <pre>{escape(text)}</pre>
+            </div>
+            <p style="color:#94a3b8; font-size:0.8rem">Use `python3 dost.py --review 'index:action'` to confirm/contest/skip/delete findings.</p>
+        </body>
+        </html>"""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(html.encode("utf-8"))
+
+    def _serve_results_page(self):
+        """Results page — recent dispatch results."""
+        try:
+            HIVE_DIR = Path("/Users/aryanagarwal/AI-Office/packages/office-os/tasks")
+            tasks = []
+            if HIVE_DIR.exists():
+                for hive_file in glob.glob(os.path.join(HIVE_DIR, "*.json")):
+                    try:
+                        with open(hive_file) as f:
+                            task = json.load(f)
+                        if (task.get("metadata") or {}).get("source") == "dost":
+                            tasks.append(task)
+                    except Exception:
+                        continue
+                tasks.sort(key=lambda x: x.get("updated_at", "") or x.get("created_at", ""), reverse=True)
+                tasks = tasks[:30]
+        except Exception:
+            tasks = []
+        rows = ""
+        for t in tasks:
+            md = t.get("metadata") or {}
+            result = t.get("result") or {}
+            preview = ""
+            if isinstance(result, dict):
+                preview = result.get("preview", "") or result.get("text", "") or ""
+            elif isinstance(result, str):
+                preview = result
+            preview = escape(str(preview)[:120])
+            rows += f"""
+            <div style="padding:0.5rem 0; border-bottom:1px solid #2a2a2a;">
+                <div style="display:flex; justify-content:space-between;">
+                    <span style="font-family:monospace; font-size:0.8rem; color:#64748b">{escape(t.get('id','?'))}</span>
+                    <span style="font-size:0.85rem; color:#cbd5e1">{escape(t.get('agent_id','?'))}</span>
+                </div>
+                <div style="font-size:0.9rem">{escape(t.get('title','?'))}</div>
+                <div style="font-size:0.75rem; color:#64748b; margin-top:0.25rem">{preview}</div>
+            </div>
+            """
+        if not rows:
+            rows = '<div style="color:#64748b; font-style:italic">No results yet.</div>'
+        html = f"""<!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Results — Dost Dispatch History</title>
+            <style>
+                body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #0f0f0f; color: #e0e0e0; }}
+                a {{ color: #3b82f6; }}
+                .btn {{ background: #3b82f6; color: white; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; text-decoration: none; display: inline-block; }}
+                .btn.secondary {{ background: #2a2a2a; }}
+                .card {{ background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }}
+            </style>
+        </head>
+        <body>
+            <a href="/" class="btn secondary">← Dashboard</a>
+            <a href="/results?refresh=1" class="btn">Refresh</a>
+            <h1>Results — Recent Dispatch History</h1>
+            <div class="card">
+                {rows}
+            </div>
+        </body>
+        </html>"""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(html.encode("utf-8"))
 
     def log_message(self, format, *args):
         pass
