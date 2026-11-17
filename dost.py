@@ -69,6 +69,10 @@ def main():
         prompt = args.debate if args.debate else input("Debate question: ")
         result = _dost_module.dispatch_debate_to_fleet(prompt)
         print(json.dumps(result, indent=2))
+        if result.get("cost_units"):
+            print(f"\n💰 Debate cost: {result['cost_units']} cost_units")
+        if result.get("_cached"):
+            print("⚡ Served from answer cache (no provider calls)")
     elif args.results:
         tasks = _dost_module.list_recent_dost_tasks()
         if not tasks:

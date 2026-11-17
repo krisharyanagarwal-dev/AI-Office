@@ -34,7 +34,12 @@ if str(OFFICE_OS) not in sys.path:
 
 from core.subs.cloud_orchestrator import CloudModelOrchestrator  # noqa: E402
 from context_builder import build_context  # noqa: E402
-from dost import dost_respond, _call_with_retry, _check_pool_cooldowns  # noqa: E402
+from dost import (
+    dost_respond,
+    _call_with_retry,
+    _check_pool_cooldowns,
+    _cost_units_for_pool,
+)  # noqa: E402
 from openai_components import speech_to_text, text_to_speech  # noqa: E402
 
 # avfoundation audio-only input: ":<index>" -> MacBook Air Microphone is index 0.
@@ -271,7 +276,9 @@ def run_dispatch_turn(duration: int):
             pass
 
         if answer_text:
+            cost = _cost_units_for_pool(pool_used) if pool_used else 0
             print(f"\n  dost (fleet): {answer_text}\n")
+            print(f"  [voice-dispatch] cost: {cost} cost_units | pool: {pool_used or '?'}")
             print("[voice-dispatch] speaking reply...")
             tts = text_to_speech(answer_text)
             if not tts.get("ok"):

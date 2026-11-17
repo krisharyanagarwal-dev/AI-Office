@@ -274,6 +274,9 @@ def fallback_narrate(command: str, output: str) -> str:
 
 def dost_respond(task, department=None):
     context = build_context()
+    conv = _conversation_prefix()
+    if conv:
+        context = f"{context}\n\n{conv}"
 
     # Ask the LLM to decide: command or conversation?
     decision = llm_decide(task, context)
@@ -286,14 +289,17 @@ def dost_respond(task, department=None):
             # Narrate the output with the LLM
             narration = llm_narrate(command, output, context)
             if narration:
-                return f"{dost_greeting()}\n\n{narration}\n\nWhat would you like to do next?"
-            # Fallback narration
-            return f"{dost_greeting()}\n\n{fallback_narrate(command, output)}"
+                response = f"{dost_greeting()}\n\n{narration}\n\nWhat would you like to do next?"
+            else:
+                response = f"{dost_greeting()}\n\n{fallback_narrate(command, output)}"
+            _record_conversation_turn(task, response)
+            return response
 
     # Not a command — have the LLM write a warm conversational response
     if decision and not decision.startswith("COMMAND:"):
         # LLM already gave us a natural response
         MEMORY.add_interaction(task, route_department(task), "Conversational response")
+        _record_conversation_turn(task, decision)
         return f"{dost_greeting()}\n\n{decision}\n\nIs there anything else I can help you with?"
 
     # Fallback: no LLM available or decision unparseable
@@ -302,10 +308,13 @@ def dost_respond(task, department=None):
         command = fb[len("COMMAND:"):].strip()
         output = run_research_command(command)
         MEMORY.add_interaction(task, "research", f"Executed research command: {command} (fallback)")
-        return f"{dost_greeting()}\n\n{fallback_narrate(command, output)}"
+        response = f"{dost_greeting()}\n\n{fallback_narrate(command, output)}"
+        _record_conversation_turn(task, response)
+        return response
 
     response = fallback_converse(task, context)
     MEMORY.add_interaction(task, route_department(task), "Conversational response (fallback)")
+    _record_conversation_turn(task, response)
     return f"{dost_greeting()}\n\n{response}\n\nIs there anything else I can help you with?"
 
 
@@ -637,6 +646,138 @@ def clean_findings_store() -> dict:
     }
 
 
+# --- Answer cache -----------------------------------------------------------
+# Repeat questions (fleet status, completion rate, error rate) return a cached
+# answer instead of burning a provider call. TTL 10 minutes.
+
+DOST_ANSWER_CACHE_PATH = "/Users/aryanagarwal/.openclaw/dost_answer_cache.json"
+ANSWER_CACHE_TTL_SEC = 600  # 10 minutes
+
+
+def _hash_question(question: str) -> str:
+    """Normalize and hash a question for cache lookup."""
+    import hashlib
+    normalized = question.strip().lower()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+
+
+def _load_answer_cache() -> dict:
+    """Load the answer cache."""
+    try:
+        with open(DOST_ANSWER_CACHE_PATH) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_answer_cache(cache: dict) -> None:
+    """Atomically write the answer cache."""
+    tmp = DOST_ANSWER_CACHE_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(cache, f, indent=2)
+    os.replace(tmp, DOST_ANSWER_CACHE_PATH)
+
+
+def _get_cached_answer(question_hash: str) -> dict | None:
+    """Return cached answer if not expired, else None."""
+    cache = _load_answer_cache()
+    entry = cache.get(question_hash)
+    if not entry:
+        return None
+    try:
+        cached_at = float(entry.get("cached_at", 0))
+        if time.time() - cached_at > ANSWER_CACHE_TTL_SEC:
+            return None
+    except (ValueError, TypeError):
+        return None
+    return entry
+
+
+def _cache_answer(
+    question_hash: str,
+    question: str,
+    answer_text: str,
+    model: str | None,
+    pool: str | None,
+    cost_units: int,
+    debate_id: str | None = None,
+    agents: list[dict] | None = None,
+    agent_answers: list[dict] | None = None,
+    synthesis: str | None = None,
+) -> None:
+    """Store an answer in the cache."""
+    cache = _load_answer_cache()
+    cache[question_hash] = {
+        "question": question,
+        "answer": answer_text or synthesis or "",
+        "model": model,
+        "pool": pool,
+        "cost_units": cost_units,
+        "cached_at": time.time(),
+        "debate_id": debate_id,
+        "agents": agents or [],
+        "agent_answers": agent_answers or [],
+        "synthesis": synthesis or answer_text or "",
+    }
+    _save_answer_cache(cache)
+
+
+# --- Multi-turn conversation memory -----------------------------------------
+# Remember last N turns so follow-ups ("and the error rate?") know what
+# you're talking about. Stored in dost/conversation.json.
+
+DOST_CONVERSATION_PATH = DOST_DIR / "conversation.json"
+DOST_CONVERSATION_TURNS = 3  # how many previous turns to remember
+
+
+def _load_conversation() -> list[dict]:
+    """Load previous conversation turns."""
+    try:
+        with open(DOST_CONVERSATION_PATH) as f:
+            turns = json.load(f)
+        if isinstance(turns, list):
+            return turns[-DOST_CONVERSATION_TURNS:]
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    return []
+
+
+def _save_conversation(turns: list[dict]) -> None:
+    """Atomically write conversation turns."""
+    tmp = str(DOST_CONVERSATION_PATH) + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(turns[-DOST_CONVERSATION_TURNS:], f, indent=2)
+    os.replace(tmp, DOST_CONVERSATION_PATH)
+
+
+def _conversation_prefix() -> str:
+    """Format previous turns as a context prefix for the LLM."""
+    turns = _load_conversation()
+    if not turns:
+        return ""
+    lines = ["PREVIOUS CONVERSATION:"]
+    for t in turns:
+        user = t.get("user", "")
+        resp = t.get("response", "")
+        lines.append(f"  User: {user[:120]}")
+        lines.append(f"  Dost: {resp[:200]}")
+    lines.append("---")
+    return "\n".join(lines)
+
+
+def _record_conversation_turn(user: str, response: str) -> None:
+    """Append a turn to the conversation history."""
+    turns = _load_conversation()
+    turns.append(
+        {
+            "user": user,
+            "response": response,
+            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+    )
+    _save_conversation(turns)
+
+
 def _agent_tiers() -> dict[str, str]:
     """Return {agent_id: tier} loaded from office.json agent_tiers."""
     tiers: dict[str, str] = {}
@@ -802,6 +943,30 @@ def dispatch_debate_to_fleet(prompt: str, agents: list[str] | None = None) -> di
     if not known:
         known = [a for a in agents if a in agent_tiers] or list(DEBATE_DEFAULT_AGENTS)
 
+    # Answer cache: return cached result if question was asked recently.
+    question_hash = _hash_question(prompt)
+    cached = _get_cached_answer(question_hash)
+    if cached:
+        return {
+            "debate_id": cached.get("debate_id", f"debate-cache-{question_hash}"),
+            "task_ids": [],
+            "agents": cached.get("agents", []),
+            "answers": [
+                {
+                    "agent_id": a.get("agent_id", "cached"),
+                    "tier": a.get("tier", "cached"),
+                    "model": a.get("model"),
+                    "pool": a.get("pool"),
+                    "answer": cached.get("answer", ""),
+                    "error": None,
+                }
+                for a in cached.get("agent_answers", [])
+            ],
+            "synthesis": cached.get("synthesis", ""),
+            "_cached": True,
+            "cost_units": cached.get("cost_units", 0),
+        }
+
     debate_id = f"debate-{uuid.uuid4().hex[:8]}"
     context = build_context()
     orchestrator = CloudModelOrchestrator()
@@ -914,6 +1079,40 @@ def dispatch_debate_to_fleet(prompt: str, agents: list[str] | None = None) -> di
     MEMORY.add_interaction(
         prompt, "debate", f"Debate {debate_id}: {len(answers)} agents ({', '.join(known)})"
     )
+
+    # Cache the result for repeat questions (10-min TTL).
+    total_cost = sum(
+        _cost_units_for_pool(a.get("pool")) for a in answers if a.get("pool")
+    )
+    cache_payload = {
+        "debate_id": debate_id,
+        "agents": [
+            {"agent_id": a["agent_id"], "tier": a["tier"], "model": a.get("model"), "pool": a.get("pool")}
+            for a in answers
+        ],
+        "agent_answers": answers,
+        "answer": synthesis,
+        "synthesis": synthesis,
+        "cost_units": total_cost,
+    }
+    try:
+        _cache_answer(
+            question_hash,
+            prompt,
+            synthesis,
+            None,
+            None,
+            total_cost,
+            debate_id=debate_id,
+            agents=[
+                {"agent_id": a["agent_id"], "tier": a["tier"], "model": a.get("model"), "pool": a.get("pool")}
+                for a in answers
+            ],
+            agent_answers=answers,
+            synthesis=synthesis,
+        )
+    except Exception:
+        pass
 
     return {
         "debate_id": debate_id,
