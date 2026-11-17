@@ -64,6 +64,13 @@ RESULT_MAX_AGE_DAYS = 7
 os.makedirs(HIVE_DIR, exist_ok=True)
 os.makedirs(RESULT_DIR, exist_ok=True)
 
+# --- Stuck task recovery ---
+# dost-submitted tasks marked 'in_progress' but never finalized (worker
+# crashed before finalize_user_task) stay stuck forever because
+# collect_user_submitted_tasks() only picks up 'pending'. Re-execute any
+# dost task stuck 'in_progress' for longer than STUCK_TASK_MIN_AGE_SEC.
+STUCK_TASK_MIN_AGE_SEC = 300  # 5 minutes
+
 
 # --- State bundle: real trading data injected into prompts so agents reason
 # about ground truth instead of role-playing in a vacuum. ---
@@ -1750,6 +1757,106 @@ def _dispatch_chain_task(task: dict, task_file_path: str) -> dict | None:
         return {"ok": False, "error": str(e)}
 
 
+def _recover_in_progress_user_tasks() -> list[dict]:
+    """Recover dost-submitted tasks stuck 'in_progress' for too long.
+
+    collect_user_submitted_tasks() only picks up 'pending' tasks. If a task
+    was marked 'in_progress' but the worker failed before finalizing it, it
+    stays stuck forever. This function scans for stuck tasks older than
+    STUCK_TASK_MIN_AGE_SEC and re-executes them.
+    """
+    results = []
+    now = time.time()
+    for hive_file in glob.glob(os.path.join(HIVE_DIR, "*.json")):
+        try:
+            with open(hive_file) as f:
+                task = json.load(f)
+        except Exception:
+            continue
+
+        # Only consider dost-submitted in_progress tasks
+        if task.get("status") != "in_progress":
+            continue
+        if (task.get("metadata") or {}).get("source") != "dost":
+            continue
+
+        # Check age — only recover tasks stuck for more than threshold
+        updated_at = task.get("updated_at", "")
+        if not updated_at:
+            continue
+        try:
+            updated_time = time.strptime(updated_at, "%Y-%m-%dT%H:%M:%SZ")
+            updated_epoch = time.mktime(updated_time)
+        except ValueError:
+            continue
+        age_sec = now - updated_epoch
+        if age_sec < STUCK_TASK_MIN_AGE_SEC:
+            continue
+
+        agent_info = {"agent_id": task.get("agent_id", "general-assistant"), "tier": "pro"}
+
+        try:
+            with open(hive_file) as f:
+                task = json.load(f)
+            user_prompt = task.get("description", task.get("title", ""))
+
+            # Build live context
+            metrics_summary = ""
+            try:
+                with urllib.request.urlopen("http://127.0.0.1:8083/metrics", timeout=4) as r:
+                    m = json.loads(r.read().decode("utf-8"))
+                jev = m.get("jev", {})
+                pools = m.get("provider_pools", {})
+                avail = sum(1 for p in pools.values() if p.get("available"))
+                metrics_summary = (
+                    f"LIVE FLEET METRICS: {jev.get('tasks_done',0)}/{jev.get('tasks_created',0)} tasks done "
+                    f"({jev.get('completion_rate',0):.0f}% complete), error rate {jev.get('error_rate_total',0):.1f}%, "
+                    f"{jev.get('calls_today',0)} calls today, {avail}/{len(pools)} provider pools available, "
+                    f"{m.get('free_ceiling',{}).get('headroom_pct',0):.0f}% free-tier headroom.\n\n"
+                )
+            except Exception:
+                metrics_summary = "(live metrics unavailable)\n\n"
+
+            contextualized_prompt = (
+                "You are answering as Dost, the AI chief of staff for "
+                "THE CLAUDE COMPANY's research fleet. "
+                + metrics_summary +
+                "Answer the following question about the fleet directly and accurately, "
+                "using the live metrics above where relevant:\n\n"
+                + user_prompt
+            )
+
+            orchestrator = CloudModelOrchestrator()
+            try:
+                exec_text = route_through_local(contextualized_prompt)
+                exec_model_used = "hauhaucs/qwen3.5-9b-uncensored-aggressive"
+                exec_pool_used = "qwen_local"
+            except Exception:
+                model_name, pool_name, _ = orchestrator.decide_model(
+                    agent_info, task_type="exec"
+                )
+                exec_text, exec_model_used, exec_pool_used = orchestrator.call_model(
+                    model_name, pool_name, contextualized_prompt,
+                    task_id=f"jev-exec-recover-{agent_info['agent_id']}",
+                    priority="normal",
+                )
+
+            worker_result = {
+                "status": "done",
+                "exec_text": exec_text,
+                "exec_model": exec_model_used,
+                "exec_pool": exec_pool_used,
+            }
+            r = finalize_user_task(hive_file, worker_result)
+            results.append(r)
+            log(f"  Recovered (user task) {agent_info['agent_id']} -> {r.get('task_id','')}")
+        except Exception as e:
+            log(f"  Exception (user task recovery) {agent_info['agent_id']}: {e}")
+            results.append({"agent_id": agent_info["agent_id"], "status": "error", "error": str(e)})
+
+    return results
+
+
 def finalize_agent_result(agent_info, state_bundle, tier, worker_result):
     """Finalize agent result in main process (shared state: findings store, Hive tasks).
 
@@ -2566,6 +2673,19 @@ def main():
             except Exception as e:
                 log(f"  Exception (user task) {agent_id}: {e}")
                 results.append({"agent_id": agent_id, "status": "error", "error": str(e)})
+
+        # --- Recover stuck in_progress dost tasks ---
+        # collect_user_submitted_tasks() only picks up 'pending' tasks. If a
+        # task was marked 'in_progress' but the worker failed before
+        # finalize_user_task(), it stays stuck forever. Recover any dost
+        # task stuck 'in_progress' for longer than STUCK_TASK_MIN_AGE_SEC.
+        recovery_results = _recover_in_progress_user_tasks()
+        for r in recovery_results:
+            results.append(r)
+            if r.get("status") == "done":
+                log(f"  Recovered (user task) {r.get('agent_id')} -> {r.get('task_id','')}")
+            elif r.get("status") == "error":
+                log(f"  Error (user task recovery) {r.get('agent_id')} - {r.get('error','unknown')}")
 
         done_count = sum(1 for r in results if r.get("status") == "done")
         error_count = sum(1 for r in results if r.get("status") == "error")
