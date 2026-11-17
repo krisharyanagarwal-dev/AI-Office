@@ -5,27 +5,45 @@ THE CLAUDE COMPANY — Dost Voice CLI.
 Mic capture (ffmpeg avfoundation) -> Groq Whisper STT -> dost_respond ->
 local TTS (say + ffmpeg) -> afplay playback. Ctrl+C to exit.
 
+With --dispatch, spoken prompts go to the fleet orchestrator (direct
+CloudModelOrchestrator call, same as debate mode) for an immediate spoken
+answer, plus a task file written to HIVE_DIR for the record.
+
 Paper only. Free tiers only. No Telegram, no tokens needed beyond GROQ_API_KEY.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import signal
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from openai_components import speech_to_text, text_to_speech  # noqa: E402
+COMPANY_DIR = Path(__file__).resolve().parent.parent
+DOST_DIR = Path(__file__).resolve().parent
+
+OFFICE_OS = Path("/Users/aryanagarwal/AI-Office/packages/office-os")
+if str(OFFICE_OS) not in sys.path:
+    sys.path.insert(0, str(OFFICE_OS))
+
+from core.subs.cloud_orchestrator import CloudModelOrchestrator  # noqa: E402
+from context_builder import build_context  # noqa: E402
 from dost import dost_respond  # noqa: E402
+from openai_components import speech_to_text, text_to_speech  # noqa: E402
 
 # avfoundation audio-only input: ":<index>" -> MacBook Air Microphone is index 0.
 MIC_DEVICE = ":0"
 SAMPLE_RATE = 16000
 CHANNELS = 1
+
+# Hive dir for writing voice-dispatch task records.
+HIVE_DIR = Path("/Users/aryanagarwal/AI-Office/packages/office-os/tasks")
 
 # Set by the SIGINT handler to request a clean exit (also interrupts playback).
 STOP = threading.Event()
@@ -116,12 +134,128 @@ def run_once(duration: int):
             pass
 
 
+def run_dispatch_turn(duration: int):
+    """One STT -> fleet dispatch -> TTS -> play turn. Returns transcript or None.
+
+    Routes the spoken prompt directly to the fleet orchestrator (same path as
+    debate mode) for an immediate spoken answer. Also writes a task file to
+    HIVE_DIR for the record (source='dost', metadata.voice_dispatch=true).
+    """
+    import uuid
+
+    wav_path = str(Path(tempfile.mkstemp(suffix=".wav")[1]))
+    try:
+        if STOP.is_set():
+            return None
+        print(f"\n[voice-dispatch] recording {duration}s... speak now")
+        if not record_audio(duration, wav_path):
+            return None
+        print("[voice-dispatch] transcribing...")
+        stt = speech_to_text(wav_path)
+        if not stt.get("ok"):
+            print(f"  [voice-dispatch] STT failed: {stt.get('error')}")
+            return None
+        transcript = (stt.get("text") or "").strip()
+        provider = stt.get("provider", "?")
+        if not transcript:
+            print("[voice-dispatch] (empty transcription — nothing heard, trying again)")
+            return None
+        print(f"  [voice-dispatch] heard ({provider}): {transcript}")
+        print("[voice-dispatch] submitting to fleet...")
+
+        # Build live context (reads :8083/metrics) and submit directly to the
+        # fleet orchestrator — same orchestration as debate mode, bypassing
+        # the dispatcher's general-assistant override so we get an answer now.
+        context = build_context()
+        orchestrator = CloudModelOrchestrator()
+        full_prompt = (
+            f"{context}\n\n"
+            f"Answer the following spoken request from the user directly and "
+            f"concisely. Use the live fleet metrics above where relevant.\n\n"
+            f"USER SAID: {transcript}"
+        )
+
+        task_id = f"jev-{uuid.uuid4().hex[:8]}"
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+        answer_text = None
+        model_used = None
+        pool_used = None
+        error = None
+        try:
+            agent_info = {"agent_id": "general-assistant", "tier": "general"}
+            model, pool_name, _ = orchestrator.decide_model(agent_info, task_type="exec")
+            response_text, model_used, pool_used = orchestrator.call_model(
+                model, pool_name, full_prompt,
+                task_id=f"voice-dispatch-{task_id}",
+                priority="normal",
+            )
+            answer_text = response_text
+        except Exception as e:
+            error = str(e)
+
+        # Write task file for the record.
+        task = {
+            "id": task_id,
+            "title": f"Voice dispatch: {transcript[:60]}",
+            "description": transcript,
+            "status": "done" if answer_text else "error",
+            "agent_id": "general-assistant",
+            "priority": "normal",
+            "user_id": "dost",
+            "created_at": now,
+            "updated_at": now,
+            "metadata": {
+                "tier": "general",
+                "source": "dost",
+                "voice_dispatch": True,
+                "qwen_task_id": f"jev-exec-dost-{task_id[:8]}",
+            },
+            "result": (
+                {"text": answer_text, "model": model_used, "pool": pool_used, "source": "cloud"}
+                if answer_text
+                else None
+            ),
+            "error": error,
+        }
+        try:
+            HIVE_DIR.mkdir(parents=True, exist_ok=True)
+            (HIVE_DIR / f"{task_id}.json").write_text(json.dumps(task, indent=2))
+        except Exception:
+            pass
+
+        if answer_text:
+            print(f"\n  dost (fleet): {answer_text}\n")
+            print("[voice-dispatch] speaking reply...")
+            tts = text_to_speech(answer_text)
+            if not tts.get("ok"):
+                print(f"  [voice-dispatch] TTS failed: {tts.get('error')}")
+            else:
+                play_audio(tts["path"])
+                try:
+                    Path(tts["path"]).unlink()
+                except OSError:
+                    pass
+        else:
+            print(f"  [voice-dispatch] fleet error: {error}")
+            print("    Try again — provider may be cooling down.")
+
+        return transcript
+    finally:
+        try:
+            Path(wav_path).unlink()
+        except OSError:
+            pass
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Dost voice CLI loop")
     parser.add_argument("--seconds", type=int, default=5,
                         help="seconds to record each turn (default: 5)")
     parser.add_argument("--once", action="store_true",
                         help="run a single turn then exit")
+    parser.add_argument("--dispatch", action="store_true",
+                        help="route spoken prompts to the fleet orchestrator "
+                             "(immediate answer via direct cloud call)")
     args = parser.parse_args()
 
     print("=== THE CLAUDE COMPANY — Dost Voice CLI ===")
@@ -129,6 +263,10 @@ def main() -> None:
     print("STT:     Groq whisper-large-v3-turbo")
     print("TTS:     local say + ffmpeg")
     print("Playback: afplay")
+    if args.dispatch:
+        print("Mode:    fleet dispatch (direct cloud call per turn)")
+    else:
+        print("Mode:    dost conversation (dost_respond)")
     print("Press Ctrl+C to exit.\n")
 
     def handle_sigint(signum, frame):
@@ -139,7 +277,10 @@ def main() -> None:
 
     try:
         while not STOP.is_set():
-            run_once(args.seconds)
+            if args.dispatch:
+                run_dispatch_turn(args.seconds)
+            else:
+                run_once(args.seconds)
             if args.once:
                 break
             if not STOP.is_set():
