@@ -434,36 +434,36 @@ DASHBOARD_PUBLIC_TEMPLATE = """<!DOCTYPE html>
         JEV Dispatcher — Paper-only · Kill switch LOCKED · Free tiers only · http://localhost:8083/dashboard
     </p>
     <script>
-        function quickDispatch(prompt) {
+        function quickDispatch(prompt) {{
             document.getElementById('dispatch-prompt').value = prompt;
             document.getElementById('dispatch-form').dispatchEvent(new Event('submit'));
-        }
-        document.getElementById('dispatch-form').addEventListener('submit', async (e) => {
+        }}
+        document.getElementById('dispatch-form').addEventListener('submit', async (e) => {{
             e.preventDefault();
             const prompt = document.getElementById('dispatch-prompt').value;
             if (!prompt) return;
             const resultDiv = document.getElementById('dispatch-result');
             resultDiv.textContent = 'Dispatching...';
             resultDiv.style.color = '#f59e0b';
-            try {
-                const resp = await fetch('/api/task', {
+            try {{
+                const resp = await fetch('/api/task', {{
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    headers: {{ 'Content-Type': 'application/x-www-form-urlencoded' }},
                     body: 'prompt=' + encodeURIComponent(prompt) + '&agent_id=strategy-advisor&priority=normal'
-                });
+                }});
                 const data = await resp.json();
-                if (data.ok) {
+                if (data.ok) {{
                     resultDiv.textContent = 'Dispatched: ' + data.task_id;
                     resultDiv.style.color = '#10b981';
-                } else {
+                }} else {{
                     resultDiv.textContent = 'Error: ' + (data.error || 'unknown');
                     resultDiv.style.color = '#ef4444';
-                }
-            } catch (err) {
+                }}
+            }} catch (err) {{
                 resultDiv.textContent = 'Error: ' + err.message;
                 resultDiv.style.color = '#ef4444';
-            }
-        });
+            }}
+        }});
     </script>
 </body>
 </html>"""
