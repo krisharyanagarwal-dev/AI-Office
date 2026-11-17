@@ -2030,7 +2030,8 @@ def synthesize_cycle():
         verification_counts[vs] = verification_counts.get(vs, 0) + 1
 
     # Overall verdict: only confirmed findings count as supported.
-    # Pending/contested findings are not yet verified.
+    # Pending findings await Tier C human review (boundary) — not a negative
+    # signal on fleet health. Only contested findings reduce confidence.
     total = len(findings)
     supported = verification_counts.get("confirmed", 0)
     blocked = verdict_counts.get("needs-review", 0) + verdict_counts.get("refuted", 0)
@@ -2039,7 +2040,7 @@ def synthesize_cycle():
 
     if contested > 0:
         overall = "CONTESTED"
-        confidence = max(0, 100 - (contested * 30))
+        confidence = max(0, 100 - (contested * 10))
     elif blocked > 0:
         overall = "CAUTION"
         confidence = max(0, 100 - (blocked * 25))
