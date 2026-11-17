@@ -45,6 +45,8 @@ def main():
     parser.add_argument("--briefing-now", action="store_true", help="Generate on-demand briefing immediately")
     parser.add_argument("--export", choices=["md", "json"], help="Export last debate/dispatch results to file")
     parser.add_argument("--synthesis", action="store_true", help="Show detailed synthesis report over all findings")
+    parser.add_argument("--auto-archive", action="store_true", help="Auto-archive pending findings older than 30 days")
+    parser.add_argument("--weekly-digest", action="store_true", help="Show weekly findings digest")
     parser.add_argument("--memory", action="store_true")
     parser.add_argument("--context", action="store_true")
     parser.add_argument("--health", action="store_true", help="Check OpenAI component availability")
@@ -113,6 +115,11 @@ def main():
         _dost_module.export_results(args.export)
     elif args.synthesis:
         print(_dost_module.synthesis_detail())
+    elif args.auto_archive:
+        n = _dost_module.auto_archive_findings()
+        print(f"Archived {n} pending findings older than 30 days.")
+    elif args.weekly_digest:
+        print(_dost_module.weekly_findings_digest())
     elif args.memory:
         print(json.dumps(MEMORY.profile, indent=2))
     elif args.context:
@@ -124,7 +131,7 @@ def main():
     else:
         print(dost_greeting())
         print("\nI'm your dost. Tell me what you need: research, trading, code, writing, strategy.")
-        print("Commands: --briefing, --push-telegram, --status, --dispatch, --results, --history, --memory, --context, --health, --doctor, --department X")
+        print("Commands: --briefing, --briefing-now, --push-telegram, --status, --dispatch, --results, --results-status, --results-agent, --history, --export, --synthesis, --auto-archive, --weekly-digest, --memory, --context, --health, --doctor, --department X")
 
 
 if __name__ == "__main__":

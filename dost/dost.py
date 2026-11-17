@@ -1759,6 +1759,80 @@ def synthesis_detail() -> str:
     return "\n".join(lines)
 
 
+# --- Automation -------------------------------------------------------------
+# Auto-archive old findings and weekly digest for Tier C review.
+
+def auto_archive_findings(store: dict | None = None, days: int = 30) -> int:
+    """Auto-archive pending findings older than `days` days.
+
+    Sets verification_status to 'archived' for pending findings whose date
+    is older than the cutoff. Does NOT delete — Tier C can still review.
+    Returns the number of findings archived.
+    """
+    if store is None:
+        store = _load_findings_store()
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    archived = 0
+    for f in store.get("findings", []):
+        if f.get("verification_status") != "pending":
+            continue
+        date_str = f.get("date", "")
+        if not date_str:
+            continue
+        try:
+            d = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+            if d < cutoff:
+                f["verification_status"] = "archived"
+                f["archived_at"] = datetime.now(timezone.utc).isoformat()
+                archived += 1
+        except Exception:
+            pass
+    if archived > 0:
+        _save_findings_store(store)
+    return archived
+
+
+def weekly_findings_digest() -> str:
+    """Weekly digest: new findings since last week, grouped by verification status."""
+    store = _load_findings_store()
+    findings = store.get("findings", [])
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    new_findings = []
+    for f in findings:
+        date_str = f.get("date", "")
+        if not date_str:
+            continue
+        try:
+            d = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+            if d >= cutoff:
+                new_findings.append(f)
+        except Exception:
+            pass
+
+    vs_counts = {}
+    for f in new_findings:
+        v = f.get("verification_status", "missing")
+        vs_counts[v] = vs_counts.get(v, 0) + 1
+
+    lines = [
+        "# Weekly Findings Digest",
+        f"Week ending {datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
+        f"New findings: {len(new_findings)}",
+        "",
+    ]
+    for vs, count in sorted(vs_counts.items(), key=lambda x: -x[1]):
+        lines.append(f"- {vs}: {count}")
+    lines.append("")
+    if new_findings:
+        lines.append("## New Claims")
+        for f in new_findings[:15]:
+            claim = (f.get("claim") or "")[:100]
+            lines.append(f"- [{f.get('agent', '?')}] {claim}... ({f.get('date', '?')[:10]})")
+    else:
+        lines.append("No new findings this week.")
+    return "\n".join(lines)
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="THE CLAUDE COMPANY — Dost")
