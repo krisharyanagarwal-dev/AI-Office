@@ -34,7 +34,7 @@ if str(OFFICE_OS) not in sys.path:
 
 from core.subs.cloud_orchestrator import CloudModelOrchestrator  # noqa: E402
 from context_builder import build_context  # noqa: E402
-from dost import dost_respond  # noqa: E402
+from dost import dost_respond, _call_with_retry, _check_pool_cooldowns  # noqa: E402
 from openai_components import speech_to_text, text_to_speech  # noqa: E402
 
 # avfoundation audio-only input: ":<index>" -> MacBook Air Microphone is index 0.
@@ -222,17 +222,17 @@ def run_dispatch_turn(duration: int):
         model_used = None
         pool_used = None
         error = None
-        try:
-            agent_info = {"agent_id": "general-assistant", "tier": "general"}
-            model, pool_name, _ = orchestrator.decide_model(agent_info, task_type="exec")
-            response_text, model_used, pool_used = orchestrator.call_model(
-                model, pool_name, full_prompt,
-                task_id=f"voice-dispatch-{task_id}",
-                priority="normal",
-            )
-            answer_text = response_text
-        except Exception as e:
-            error = str(e)
+        # Cooldown-aware selection + auto-retry on provider failure.
+        pool_cooldowns = _check_pool_cooldowns()
+        agent_info = {"agent_id": "general-assistant", "tier": "general"}
+        answer_text, model_used, pool_used, error = _call_with_retry(
+            orchestrator,
+            agent_info,
+            full_prompt,
+            task_id=f"voice-dispatch-{task_id}",
+            pool_cooldowns=pool_cooldowns,
+            max_retries=2,
+        )
 
         # Persist this turn for multi-turn context (success or failure).
         try:

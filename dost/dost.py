@@ -434,9 +434,9 @@ def _record_debate_to_pnl(
 def _check_pool_cooldowns() -> dict[str, int]:
     """Read :8083/metrics and return {pool_name: cooldown_remaining_seconds}.
 
-    Used before debate calls so we know which pools the dispatcher is
-    cooling down (debate has its own orchestrator instance with separate
-    cooldown state). Callers can avoid cooled-down pools or log the risk.
+    Used before debate/dispatch calls so we know which pools the dispatcher
+    is cooling down. Debate and voice dispatch have their own orchestrator
+    instance with separate cooldown state from the dispatcher.
     """
     try:
         with urllib.request.urlopen("http://127.0.0.1:8083/metrics", timeout=4) as r:
@@ -445,6 +445,196 @@ def _check_pool_cooldowns() -> dict[str, int]:
         return {p: pinfo.get("cooldown_remaining", 0) for p, pinfo in pools.items()}
     except Exception:
         return {}
+
+
+def _select_available_pool(
+    orchestrator: CloudModelOrchestrator,
+    agent_info: dict,
+    pool_cooldowns: dict[str, int],
+    max_attempts: int = 5,
+) -> tuple[str, str, bool]:
+    """Pick a model/pool via decide_model, avoiding cooled-down pools.
+
+    decide_model round-robins across all pools. If it returns a pool that's
+    currently cooling down, retry decide_model (different pool next time) up
+    to max_attempts. Returns (model, pool_name, is_cloud).
+    """
+    for _ in range(max_attempts):
+        model, pool_name, is_cloud = orchestrator.decide_model(agent_info, task_type="exec")
+        if pool_cooldowns.get(pool_name, 0) == 0:
+            return model, pool_name, is_cloud
+    # All attempts hit cooled pools — return the last one anyway (best effort)
+    return model, pool_name, is_cloud
+
+
+def _call_with_retry(
+    orchestrator: CloudModelOrchestrator,
+    agent_info: dict,
+    full_prompt: str,
+    task_id: str,
+    pool_cooldowns: dict[str, int],
+    max_retries: int = 2,
+) -> tuple[str | None, str | None, str | None, str | None]:
+    """Call a model with cooldown-aware pool selection and auto-retry.
+
+    On provider failure (410, quota, rate-limit), retry once on a different
+    pool via decide_model round-robin. Returns
+    (response_text, model_used, pool_used, error).
+    """
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            model, pool_name, _ = _select_available_pool(
+                orchestrator, agent_info, pool_cooldowns
+            )
+            response_text, model_used, pool_used = orchestrator.call_model(
+                model, pool_name, full_prompt, task_id=task_id, priority="normal",
+            )
+            return response_text, model_used, pool_used, None
+        except Exception as e:
+            last_error = str(e)
+            # Refresh cooldowns before retry (pool may have just cooled/heated)
+            pool_cooldowns = _check_pool_cooldowns()
+            continue
+    return None, None, None, last_error
+
+
+# --- Findings store hygiene -------------------------------------------------
+# The findings store accumulates task instructions and echo fragments alongside
+# real findings. These helpers detect junk (non-finding) entries and collapse
+# duplicate claims so Tier C review is faster and synthesis confidence is
+# meaningful. All read + write to findings.json atomically.
+
+JUNK_PATTERNS = [
+    "we need",
+    "need answer as jev",
+    "jev executing",
+    "audit task",
+    "finding and verdict",
+    "title:",
+    "based on the provided state bundle",
+    "structured findings with specific numbers",
+    "end with finding and verdict",
+    "what verdict?",
+]
+
+FINDINGS_STORE_PATH = "/Users/aryanagarwal/Documents/polymarket/research/findings.json"
+
+
+def _load_findings_store() -> dict:
+    """Load the findings store, creating it if needed."""
+    try:
+        with open(FINDINGS_STORE_PATH) as f:
+            data = json.load(f)
+        if not isinstance(data, dict) or "findings" not in data:
+            return {"findings": []}
+        return data
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"findings": []}
+
+
+def _save_findings_store(store: dict) -> None:
+    """Atomically write the findings store."""
+    tmp = FINDINGS_STORE_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(store, f, indent=2, sort_keys=True)
+    os.replace(tmp, FINDINGS_STORE_PATH)
+
+
+def _is_junk_finding(finding: dict) -> bool:
+    """Return True if a finding looks like a task instruction, not a real finding."""
+    claim = (finding.get("claim") or "").lower()
+    evidence = (finding.get("evidence_ref") or "").lower()
+    combined = f"{claim} {evidence}"
+    for pattern in JUNK_PATTERNS:
+        if pattern in combined:
+            return True
+    # Findings with no verification_status and very short claims are likely junk
+    if not finding.get("verification_status") and len(claim.strip()) < 20:
+        return True
+    return False
+
+
+def detect_junk_findings(store: dict | None = None) -> list[dict]:
+    """Scan findings and return those that look like task instructions/echoes.
+
+    Each returned dict includes the finding index, agent, claim, and the
+    matched junk pattern. Caller decides what to do (flag, skip, delete).
+    """
+    if store is None:
+        store = _load_findings_store()
+    junked = []
+    for idx, f in enumerate(store.get("findings", [])):
+        if _is_junk_finding(f):
+            claim = f.get("claim", "")
+            matched = next(
+                (p for p in JUNK_PATTERNS if p in (claim + " " + f.get("evidence_ref", "")).lower()),
+                "short-claim-no-status",
+            )
+            junked.append(
+                {
+                    "index": idx,
+                    "agent": f.get("agent", "?"),
+                    "claim": claim[:120],
+                    "matched_pattern": matched,
+                    "verification_status": f.get("verification_status", "missing"),
+                }
+            )
+    return junked
+
+
+def dedup_findings(store: dict | None = None) -> list[dict]:
+    """Collapse findings with identical claims into one (keep most recent).
+
+    Returns a list of removed finding indices.
+    """
+    if store is None:
+        store = _load_findings_store()
+    findings = store.get("findings", [])
+    seen_claims: dict[str, int] = {}  # normalized claim -> index of kept finding
+    removed = []
+    keep_indices = set(range(len(findings)))
+    for idx in range(len(findings) - 1, -1, -1):  # newest first, keep latest
+        f = findings[idx]
+        claim = (f.get("claim") or "").strip().lower()
+        if not claim:
+            continue
+        if claim in seen_claims:
+            removed.append(idx)
+            keep_indices.discard(idx)
+        else:
+            seen_claims[claim] = idx
+    if removed:
+        store["findings"] = [f for i, f in enumerate(findings) if i in keep_indices]
+        _save_findings_store(store)
+    return [{"index": i} for i in removed]
+
+
+def clean_findings_store() -> dict:
+    """Run junk detection + dedup on the findings store.
+
+    Junk findings get verification_status set to 'needs-review' (not deleted —
+    Tier C decides). Duplicates are removed. Returns a summary dict.
+    """
+    store = _load_findings_store()
+    junked = detect_junk_findings(store)
+    # Flag junk findings as needs-review (Tier C decides confirm/contest/skip)
+    flagged = 0
+    for j in junked:
+        idx = j["index"]
+        if idx < len(store.get("findings", [])):
+            f = store["findings"][idx]
+            if f.get("verification_status") not in ("confirmed", "contested"):
+                f["verification_status"] = "needs-review"
+                flagged += 1
+    _save_findings_store(store)
+    removed = dedup_findings(store)
+    return {
+        "junk_detected": len(junked),
+        "junk_flagged": flagged,
+        "duplicates_removed": len(removed),
+        "total_findings": len(store.get("findings", [])),
+    }
 
 
 def _agent_tiers() -> dict[str, str]:
@@ -649,16 +839,15 @@ def dispatch_debate_to_fleet(prompt: str, agents: list[str] | None = None) -> di
         model_used = None
         pool_used = None
         error = None
-        try:
-            model, pool_name, _ = orchestrator.decide_model(agent_info, task_type="exec")
-            response_text, model_used, pool_used = orchestrator.call_model(
-                model, pool_name, full_prompt,
-                task_id=f"debate-{debate_id}-{agent_id}",
-                priority="normal",
-            )
-            answer_text = response_text
-        except Exception as e:
-            error = str(e)
+        # Cooldown-aware selection + auto-retry on provider failure.
+        answer_text, model_used, pool_used, error = _call_with_retry(
+            orchestrator,
+            agent_info,
+            full_prompt,
+            task_id=f"debate-{debate_id}-{agent_id}",
+            pool_cooldowns=pool_cooldowns,
+            max_retries=2,
+        )
 
         # Write one task file per agent to HIVE_DIR for the record.
         task = {
