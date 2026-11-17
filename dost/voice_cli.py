@@ -45,8 +45,37 @@ CHANNELS = 1
 # Hive dir for writing voice-dispatch task records.
 HIVE_DIR = Path("/Users/aryanagarwal/AI-Office/packages/office-os/tasks")
 
+# Multi-turn: last-turn context stored here so follow-ups can reference it.
+LAST_DISPATCH_PATH = DOST_DIR / "last_dispatch.json"
+
 # Set by the SIGINT handler to request a clean exit (also interrupts playback).
 STOP = threading.Event()
+
+
+def load_last_dispatch() -> dict | None:
+    """Load the previous voice-dispatch turn (task_id, prompt, answer) if any."""
+    try:
+        return json.loads(LAST_DISPATCH_PATH.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+def save_last_dispatch(task_id: str, prompt: str, answer: str) -> None:
+    """Persist the last voice-dispatch turn for multi-turn context."""
+    try:
+        LAST_DISPATCH_PATH.write_text(
+            json.dumps(
+                {
+                    "task_id": task_id,
+                    "prompt": prompt,
+                    "answer": answer,
+                    "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                },
+                indent=2,
+            )
+        )
+    except Exception:
+        pass
 
 
 def record_audio(duration: int, wav_path: str) -> bool:
@@ -163,15 +192,27 @@ def run_dispatch_turn(duration: int):
         print(f"  [voice-dispatch] heard ({provider}): {transcript}")
         print("[voice-dispatch] submitting to fleet...")
 
+        # Multi-turn: load previous turn context so follow-ups can reference it.
+        last = load_last_dispatch()
+        context_prefix = ""
+        if last and last.get("answer"):
+            context_prefix = (
+                f"PREVIOUS TURN (context for follow-up):\n"
+                f"User asked: {last.get('prompt','')}\n"
+                f"Dost answered: {last.get('answer','')[:400]}\n"
+                f"---\n"
+            )
+
         # Build live context (reads :8083/metrics) and submit directly to the
         # fleet orchestrator — same orchestration as debate mode, bypassing
         # the dispatcher's general-assistant override so we get an answer now.
         context = build_context()
         orchestrator = CloudModelOrchestrator()
         full_prompt = (
-            f"{context}\n\n"
+            f"{context_prefix}{context}\n\n"
             f"Answer the following spoken request from the user directly and "
-            f"concisely. Use the live fleet metrics above where relevant.\n\n"
+            f"concisely. Use the live fleet metrics above where relevant. If the "
+            f"user is following up on the previous turn, continue that thread.\n\n"
             f"USER SAID: {transcript}"
         )
 
@@ -192,6 +233,12 @@ def run_dispatch_turn(duration: int):
             answer_text = response_text
         except Exception as e:
             error = str(e)
+
+        # Persist this turn for multi-turn context (success or failure).
+        try:
+            save_last_dispatch(task_id, transcript, answer_text or "")
+        except Exception:
+            pass
 
         # Write task file for the record.
         task = {

@@ -39,6 +39,7 @@ def main():
     parser.add_argument("--dispatch", nargs="?", const="", help="Submit a prompt to the fleet orchestrator")
     parser.add_argument("--debate", nargs="?", const="", help="Debate mode: fan a question to multiple pro agents and synthesize")
     parser.add_argument("--results", action="store_true", help="List recent dost-submitted tasks from the fleet hive")
+    parser.add_argument("--history", nargs="?", const="", help="Search dost task history by keyword (optional search term)")
     parser.add_argument("--memory", action="store_true")
     parser.add_argument("--context", action="store_true")
     parser.add_argument("--health", action="store_true", help="Check OpenAI component availability")
@@ -80,6 +81,20 @@ def main():
                 )
                 if t["preview"]:
                     print(f"    preview: {t['preview']}")
+    elif args.history is not None:
+        query = args.history if args.history else input("Search history for: ")
+        results = _dost_module.search_history(query)
+        if not results:
+            print(f"No dost tasks matching '{query}'.")
+        else:
+            print(f"Found {len(results)} dost task(s) matching '{query}':")
+            for t in results:
+                print(
+                    f"{t['task_id']} | {t['status']} | {t['agent_id']} | "
+                    f"{t['model']} | {t['pool']} | {t['updated_at']}"
+                )
+                if t["preview"]:
+                    print(f"    preview: {t['preview']}")
     elif args.memory:
         print(json.dumps(MEMORY.profile, indent=2))
     elif args.context:
@@ -91,7 +106,7 @@ def main():
     else:
         print(dost_greeting())
         print("\nI'm your dost. Tell me what you need: research, trading, code, writing, strategy.")
-        print("Commands: --briefing, --push-telegram, --status, --dispatch, --memory, --context, --health, --doctor, --department X")
+        print("Commands: --briefing, --push-telegram, --status, --dispatch, --results, --history, --memory, --context, --health, --doctor, --department X")
 
 
 if __name__ == "__main__":

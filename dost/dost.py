@@ -788,6 +788,61 @@ def list_recent_dost_tasks(limit: int = 20) -> list[dict]:
     return tasks[:limit]
 
 
+def search_history(query: str, limit: int = 10) -> list[dict]:
+    """Search dost-submitted tasks by keyword.
+
+    Matches against task title, description, and result text. Returns a list
+    of dicts with task_id, status, preview, model, pool, agent_id, updated_at.
+    Case-insensitive substring match.
+    """
+    HIVE_DIR = Path("/Users/aryanagarwal/AI-Office/packages/office-os/tasks")
+    results = []
+    if not HIVE_DIR.exists():
+        return results
+    q = query.lower()
+    for hive_file in glob.glob(os.path.join(HIVE_DIR, "*.json")):
+        try:
+            with open(hive_file) as f:
+                task = json.load(f)
+        except Exception:
+            continue
+        if (task.get("metadata") or {}).get("source") != "dost":
+            continue
+        # Build haystack from title, description, result text.
+        haystack_parts = [
+            task.get("title", "") or "",
+            task.get("description", "") or "",
+        ]
+        result = task.get("result") or {}
+        if isinstance(result, dict):
+            haystack_parts.append(result.get("text", "") or "")
+            haystack_parts.append(result.get("preview", "") or "")
+        elif isinstance(result, str):
+            haystack_parts.append(result)
+        haystack = " ".join(haystack_parts).lower()
+        if q in haystack:
+            preview = ""
+            if isinstance(result, dict):
+                preview = result.get("preview", "") or result.get("text", "") or ""
+            elif isinstance(result, str):
+                preview = result
+            preview = str(preview)[:200]
+            results.append(
+                {
+                    "task_id": task.get("id", ""),
+                    "status": task.get("status", ""),
+                    "preview": preview,
+                    "model": result.get("model", "?") if isinstance(result, dict) else "?",
+                    "pool": result.get("pool", "?") if isinstance(result, dict) else "?",
+                    "agent_id": task.get("agent_id", ""),
+                    "updated_at": task.get("updated_at", ""),
+                    "title": task.get("title", "") or "",
+                }
+            )
+    results.sort(key=lambda t: t["updated_at"] or "", reverse=True)
+    return results[:limit]
+
+
 AUDIT_SYSTEM = """You are Dost, talking to a close friend about the health of their computer systems.
 Below is a read-only survey that just ran. Each line is one system: ok or not, and its problems.
 
@@ -1138,6 +1193,8 @@ def main():
                         help="Show live fleet status from dispatcher metrics")
     parser.add_argument("--results", action="store_true",
                         help="List recent dost-submitted tasks from the fleet hive")
+    parser.add_argument("--history", nargs="?", const="",
+                        help="Search dost task history by keyword (optional search term)")
     parser.add_argument("--dispatch", nargs="?", const="",
                         help="Submit a prompt to the fleet orchestrator (optional prompt text)")
     parser.add_argument("--debate", nargs="?", const="",
@@ -1175,6 +1232,20 @@ def main():
                 )
                 if t["preview"]:
                     print(f"    preview: {t['preview']}")
+    elif args.history is not None:
+        query = args.history if args.history else input("Search history for: ")
+        results = search_history(query)
+        if not results:
+            print(f"No dost tasks matching '{query}'.")
+        else:
+            print(f"Found {len(results)} dost task(s) matching '{query}':")
+            for t in results:
+                print(
+                    f"{t['task_id']} | {t['status']} | {t['agent_id']} | "
+                    f"{t['model']} | {t['pool']} | {t['updated_at']}"
+                )
+                if t["preview"]:
+                    print(f"    preview: {t['preview']}")
     elif args.dispatch is not None:
         prompt = args.dispatch if args.dispatch else input("Prompt to send to fleet: ")
         result = dispatch_prompt_to_fleet(prompt)
@@ -1194,7 +1265,7 @@ def main():
     else:
         print(dost_greeting())
         print("\nI'm your dost. Tell me what you need: research, trading, code, writing, strategy.")
-        print("Commands: --briefing, --push-telegram, --status, --dispatch, --memory, --context, --health, --doctor, --department X")
+        print("Commands: --briefing, --push-telegram, --status, --dispatch, --results, --history, --memory, --context, --health, --doctor, --department X")
 
 
 if __name__ == "__main__":
