@@ -79,15 +79,6 @@
       "tier": "lite",
       "rate_limit_rpm": 50,
       "cooldown_sec": 300
-    },
-    "qwen_local": {
-      "provider": "ollama",
-      "models": [
-        "hauhaucs/qwen3.5-9b-uncensored-aggressive"
-      ],
-      "tier": "general",
-      "rate_limit_rpm": 1000,
-      "cooldown_sec": 0
     }
   },
   "agent_tiers": {

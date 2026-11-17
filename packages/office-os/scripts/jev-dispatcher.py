@@ -19,6 +19,7 @@ import shutil
 import signal
 import sys
 import time
+from datetime import datetime, timezone, timedelta
 import uuid
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -37,6 +38,9 @@ HIVE_DIR = "/Users/aryanagarwal/AI-Office/packages/office-os/tasks"
 JEV_LOG = "/Users/aryanagarwal/.openclaw/jev-dispatcher.log"
 JEV_PID_FILE = "/Users/aryanagarwal/.openclaw/jev-dispatcher.pid"
 PLAN_INTERVAL_SEC = 300  # Re-plan every 5 minutes
+PLAN_INTERVAL_MAX_SEC = 900  # Max re-plan interval (15 min) when nothing to do
+_plan_interval_sec = PLAN_INTERVAL_SEC  # Current (adaptive) interval
+_consecutive_skip_cycles = 0  # Consecutive cycles with 0 done and 0 error
 RESULT_DIR = "/Users/aryanagarwal/.openclaw/autonomous-qwen/results"
 MAX_WORKERS = 20  # Threads per process for I/O concurrency
 WORKER_PROCESSES = os.cpu_count() or 4  # True multi-core parallelism
@@ -50,6 +54,12 @@ SKIP_DONE_MIN = 15  # Don't re-plan agents done within this many minutes
 # collect_user_submitted_tasks() keeps picking up only pending work.
 ARCHIVE_DIR = os.path.join(HIVE_DIR, "archive")
 ARCHIVE_MAX_AGE_DAYS = 7
+
+# --- Results dir rotation ---
+# Once per cycle (cheap check), scan RESULT_DIR for .result files older than
+# RESULT_MAX_AGE_DAYS and move them to RESULT_DIR/archive/.
+RESULT_ARCHIVE_DIR = os.path.join(RESULT_DIR, "archive")
+RESULT_MAX_AGE_DAYS = 7
 
 os.makedirs(HIVE_DIR, exist_ok=True)
 os.makedirs(RESULT_DIR, exist_ok=True)
@@ -437,6 +447,7 @@ def acquire_pid_lock():
 # Prevents the every-15-minutes-same-task loop by persisting conclusions
 # and requiring new cycles to refute or extend, not repeat.
 FINDINGS_STORE_PATH = "/Users/aryanagarwal/Documents/polymarket/research/findings.json"
+FINDINGS_EXPIRY_DAYS = 30  # Pending findings older than this are marked expired
 
 
 def load_findings_store():
@@ -457,6 +468,38 @@ def save_findings_store(store):
     with open(tmp, "w") as f:
         json.dump(store, f, indent=2, sort_keys=True)
     os.replace(tmp, FINDINGS_STORE_PATH)
+
+
+def expire_pending_findings(store=None):
+    """Archive pending findings older than FINDINGS_EXPIRY_DAYS.
+
+    Marks findings whose verification_status == 'pending' and whose `date`
+    is older than FINDINGS_EXPIRY_DAYS as 'expired' (stamping expired_at).
+    Returns the number of findings expired. Cheap enough to run every cycle.
+    """
+    if store is None:
+        store = load_findings_store()
+    cutoff = datetime.now(timezone.utc) - timedelta(days=FINDINGS_EXPIRY_DAYS)
+    expired_count = 0
+    for f in store.get("findings", []):
+        if f.get("verification_status") != "pending":
+            continue
+        date_str = f.get("date")
+        if not date_str:
+            continue
+        try:
+            found_at = datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=timezone.utc
+            )
+        except (ValueError, TypeError):
+            continue
+        if found_at < cutoff:
+            f["verification_status"] = "expired"
+            f["expired_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+            expired_count += 1
+    if expired_count:
+        save_findings_store(store)
+    return expired_count
 
 
 # --- Cache gate: skip re-auditing when source data hasn't changed ---
@@ -1926,6 +1969,36 @@ def archive_old_user_submitted_tasks():
     return archived
 
 
+def rotate_old_results():
+    """Rotate old result files out of RESULT_DIR.
+
+    Moves .result files older than RESULT_MAX_AGE_DAYS to
+    RESULT_DIR/archive/. Cheap once-per-cycle check, safe to run on every
+    cycle because it only touches stale files.
+    """
+    os.makedirs(RESULT_ARCHIVE_DIR, exist_ok=True)
+    now = time.time()
+    cutoff = now - RESULT_MAX_AGE_DAYS * 86400
+    rotated = 0
+    for result_file in glob.glob(os.path.join(RESULT_DIR, "*.result")):
+        try:
+            mtime = os.path.getmtime(result_file)
+        except OSError:
+            continue
+        if mtime >= cutoff:
+            continue
+        try:
+            shutil.move(
+                result_file, os.path.join(RESULT_ARCHIVE_DIR, os.path.basename(result_file))
+            )
+            rotated += 1
+        except OSError:
+            pass
+    if rotated:
+        log(f"Rotated {rotated} old result(s) to {RESULT_ARCHIVE_DIR}")
+    return rotated
+
+
 def synthesize_cycle():
     """Fan-in all findings into a consolidated fleet-level verdict.
 
@@ -2210,6 +2283,32 @@ def main():
             f"JEV cycle complete: {done_count} done, {error_count} error, {skipped_count} skipped."
         )
 
+        # --- Adaptive planning interval ---
+        # Stretch the re-plan interval when a full cycle produces no work
+        # (0 done, 0 error) to save free-tier quota; reset on any done/error.
+        global _plan_interval_sec, _consecutive_skip_cycles
+        if done_count == 0 and error_count == 0:
+            _consecutive_skip_cycles += 1
+            if (
+                _consecutive_skip_cycles >= 2
+                and _plan_interval_sec < PLAN_INTERVAL_MAX_SEC
+            ):
+                _plan_interval_sec = min(
+                    _plan_interval_sec * 2, PLAN_INTERVAL_MAX_SEC
+                )
+                log(
+                    f"  Adaptive interval: {_consecutive_skip_cycles} consecutive "
+                    f"skip cycles -> stretching to {_plan_interval_sec}s"
+                )
+        else:
+            if _consecutive_skip_cycles > 0 or _plan_interval_sec != PLAN_INTERVAL_SEC:
+                _consecutive_skip_cycles = 0
+                _plan_interval_sec = PLAN_INTERVAL_SEC
+                log(
+                    f"  Adaptive interval: work this cycle (done={done_count}, "
+                    f"error={error_count}) -> reset to {PLAN_INTERVAL_SEC}s"
+                )
+
         # --- Task archive rotation: cheap check after Phase 3 ---
         # Moves old done/error dost tasks to HIVE_DIR/archive/ once per cycle.
         try:
@@ -2218,6 +2317,27 @@ def main():
                 log(f"  Task archive rotation: {archived} task(s) archived")
         except Exception as e:
             log(f"  Task archive rotation failed: {e}")
+
+        # --- Findings expiry: cheap check once per cycle ---
+        # Marks pending findings older than FINDINGS_EXPIRY_DAYS as expired.
+        try:
+            expired_count = expire_pending_findings()
+            if expired_count:
+                log(
+                    f"  Findings expiry: {expired_count} pending finding(s) older "
+                    f"than {FINDINGS_EXPIRY_DAYS}d marked expired"
+                )
+        except Exception as e:
+            log(f"  Findings expiry failed: {e}")
+
+        # --- Results dir rotation: cheap check after Phase 3 ---
+        # Moves .result files older than 7 days to RESULT_DIR/archive/ once per cycle.
+        try:
+            rotated = rotate_old_results()
+            if rotated:
+                log(f"  Results rotation: {rotated} result(s) archived")
+        except Exception as e:
+            log(f"  Results rotation failed: {e}")
 
         # --- Synthesis: fan-in all findings into a consolidated report ---
         # Like tradedesk's synthesis agent: reads every finding from the
@@ -2253,8 +2373,8 @@ def main():
                 log(f"\n--- JEV Idle Burst (idle {idle_secs:.0f}s >= {burst_secs}s): {len(agents)} agents ---")
                 break  # exit inner loop, outer loop re-runs the cycle
 
-            if idle_secs >= PLAN_INTERVAL_SEC:
-                # Hard cap: never wait more than PLAN_INTERVAL_SEC between cycles
+            if idle_secs >= _plan_interval_sec:
+                # Hard cap: never wait more than _plan_interval_sec between cycles
                 log(f"\n--- JEV Scheduled Cycle ({idle_secs:.0f}s elapsed) ---")
                 break
 
