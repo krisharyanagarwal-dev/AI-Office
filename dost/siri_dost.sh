@@ -48,7 +48,34 @@ main() {
     fi
 
     local output=""
-    if [ "$#" -eq 0 ]; then
+    local msg="${1:-}"
+
+    # Detect intent from the spoken message
+    local lower_msg
+    lower_msg="$(printf '%s' "$msg" | tr '[:upper:]' '[:lower:]')"
+
+    if printf '%s' "$lower_msg" | grep -qiE "anything broken|system health|is everything ok|anything wrong|any alerts"; then
+        # Siri alert phrase → run doctor and summarize anomalies
+        output="$(python3 "$DOST_CLI" --doctor 2>/dev/null | grep -E "✗|FAILED|Anomaly|Quota" | head -5 || true)"
+        if [ -z "$output" ]; then
+            output="All systems look good. No anomalies detected."
+        fi
+    elif printf '%s' "$lower_msg" | grep -qiE "repeat that|say again|what did you say|last answer"; then
+        # Voice repeat last answer → read from answer cache
+        output="$(python3 -c "
+import json
+try:
+    c = json.load(open('/Users/aryanagarwal/.openclaw/dost_answer_cache.json'))
+    # Get the most recent cached answer
+    if c:
+        k = sorted(c.keys(), key=lambda x: c[x].get('cached_at', 0), reverse=True)[0]
+        print(c[k].get('answer', 'No recent answer found.'))
+    else:
+        print('No recent answer to repeat.')
+except Exception as e:
+    print('Could not read answer cache.')
+" 2>/dev/null)" || true
+    elif [ -z "$msg" ]; then
         # No message → daily briefing (deterministic, no LLM needed)
         output="$(python3 "$DOST_CLI" --briefing 2>/dev/null)" || true
     else
