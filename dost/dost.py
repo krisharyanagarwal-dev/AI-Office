@@ -1260,6 +1260,63 @@ def search_history(query: str | None = None, limit: int = 10) -> list[dict]:
     return results[:limit]
 
 
+def search_history_regex(pattern, limit: int = 10) -> list[dict]:
+    """Search dost-submitted tasks by compiled regex pattern.
+
+    Matches against task title, description, and result text using re.search.
+    Returns a list of dicts with task_id, status, preview, model, pool,
+    agent_id, updated_at, title, parent_task_id.
+    """
+    import re
+
+    HIVE_DIR = Path("/Users/aryanagarwal/AI-Office/packages/office-os/tasks")
+    results = []
+    if not HIVE_DIR.exists():
+        return results
+    for hive_file in glob.glob(os.path.join(HIVE_DIR, "*.json")):
+        try:
+            with open(hive_file) as f:
+                task = json.load(f)
+        except Exception:
+            continue
+        if (task.get("metadata") or {}).get("source") != "dost":
+            continue
+        # Build haystack from title, description, result text.
+        haystack_parts = [
+            task.get("title", "") or "",
+            task.get("description", "") or "",
+        ]
+        result = task.get("result") or {}
+        if isinstance(result, dict):
+            haystack_parts.append(result.get("text", "") or "")
+            haystack_parts.append(result.get("preview", "") or "")
+        elif isinstance(result, str):
+            haystack_parts.append(result)
+        haystack = " ".join(haystack_parts)
+        if pattern.search(haystack):
+            preview = ""
+            if isinstance(result, dict):
+                preview = result.get("preview", "") or result.get("text", "") or ""
+            elif isinstance(result, str):
+                preview = result
+            preview = str(preview)[:200]
+            results.append(
+                {
+                    "task_id": task.get("id", ""),
+                    "status": task.get("status", ""),
+                    "preview": preview,
+                    "model": result.get("model", "?") if isinstance(result, dict) else "?",
+                    "pool": result.get("pool", "?") if isinstance(result, dict) else "?",
+                    "agent_id": task.get("agent_id", ""),
+                    "updated_at": task.get("updated_at", ""),
+                    "title": task.get("title", "") or "",
+                    "parent_task_id": (task.get("metadata") or {}).get("parent_task_id", ""),
+                }
+            )
+    results.sort(key=lambda t: t["updated_at"] or "", reverse=True)
+    return results[:limit]
+
+
 AUDIT_SYSTEM = """You are Dost, talking to a close friend about the health of their computer systems.
 Below is a read-only survey that just ran. Each line is one system: ok or not, and its problems.
 

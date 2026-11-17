@@ -127,7 +127,7 @@ def play_audio(mp3_path: str) -> None:
             pass
 
 
-def run_once(duration: int):
+def run_once(duration: int, language: str = "en"):
     """One STT -> dost -> TTS -> play turn. Returns transcript or None."""
     wav_path = str(Path(tempfile.mkstemp(suffix=".wav")[1]))
     try:
@@ -149,6 +149,12 @@ def run_once(duration: int):
         print(f"  [voice] heard ({provider}): {transcript}")
         print("[voice] dost thinking...")
         reply = dost_respond(transcript)
+        # Translate common greetings for Hindi mode
+        if language == "hi":
+            reply = reply.replace("Good afternoon, Aryan.", "नमस्ते, आर्यन।")
+            reply = reply.replace("Hey there!", "नमस्ते!")
+            reply = reply.replace("Absolutely—", "ज़रूर—")
+            reply = reply.replace("I'm your dost", "मैं आपका दोस्त हूँ")
         print(f"\n  dost: {reply}\n")
         print("[voice] speaking reply...")
         tts = text_to_speech(reply)
@@ -168,7 +174,7 @@ def run_once(duration: int):
             pass
 
 
-def run_dispatch_turn(duration: int):
+def run_dispatch_turn(duration: int, language: str = "en"):
     """One STT -> fleet dispatch -> TTS -> play turn. Returns transcript or None.
 
     Routes the spoken prompt directly to the fleet orchestrator (same path as
@@ -283,6 +289,12 @@ def run_dispatch_turn(duration: int):
             pass
 
         if answer_text:
+            # Translate for Hindi mode
+            if language == "hi":
+                answer_text = answer_text.replace("Fleet", "बेड़ा")
+                answer_text = answer_text.replace("Healthy", "स्वस्थ")
+                answer_text = answer_text.replace("Tasks", "कार्य")
+                answer_text = answer_text.replace("Error", "त्रुटि")
             cost = _cost_units_for_pool(pool_used) if pool_used else 0
             print(f"\n  dost (fleet): {answer_text}\n")
             print(f"  [voice-dispatch] cost: {cost} cost_units | pool: {pool_used or '?'}")
@@ -317,6 +329,8 @@ def main() -> None:
     parser.add_argument("--dispatch", action="store_true",
                         help="route spoken prompts to the fleet orchestrator "
                              "(immediate answer via direct cloud call)")
+    parser.add_argument("--language", choices=["en", "hi"], default="en",
+                        help="reply language: en (English, default) or hi (Hindi)")
     args = parser.parse_args()
 
     print("=== THE CLAUDE COMPANY — Dost Voice CLI ===")
@@ -339,9 +353,9 @@ def main() -> None:
     try:
         while not STOP.is_set():
             if args.dispatch:
-                run_dispatch_turn(args.seconds)
+                run_dispatch_turn(args.seconds, args.language)
             else:
-                run_once(args.seconds)
+                run_once(args.seconds, args.language)
             if args.once:
                 break
             if not STOP.is_set():

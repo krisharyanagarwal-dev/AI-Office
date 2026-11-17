@@ -40,6 +40,7 @@ def main():
     parser.add_argument("--debate", nargs="?", const="", help="Debate mode: fan a question to multiple pro agents and synthesize")
     parser.add_argument("--results", action="store_true", help="List recent dost-submitted tasks from the fleet hive")
     parser.add_argument("--history", nargs="?", const="", help="Search dost task history by keyword (optional search term)")
+    parser.add_argument("--history-regex", help="Search dost task history by regex pattern")
     parser.add_argument("--results-status", choices=["done", "error", "in_progress", "pending"], help="Filter --results by status")
     parser.add_argument("--results-agent", help="Filter --results by agent_id")
     parser.add_argument("--briefing-now", action="store_true", help="Generate on-demand briefing immediately")
@@ -135,6 +136,26 @@ def main():
                 print(f"Found {len(results)} dost task(s) matching '{query}':")
             else:
                 print(f"Recent dost tasks ({len(results)}):")
+            for i, t in enumerate(results, 1):
+                parent = f" ← {t['parent_task_id'][:8]}" if t.get("parent_task_id") else ""
+                print(
+                    f"{i}. {t['task_id']} | {t['status']} | {t['agent_id']} | "
+                    f"{t['pool']} | {t['updated_at']}{parent}"
+                )
+                if t["preview"]:
+                    print(f"    preview: {t['preview']}")
+    elif args.history_regex:
+        import re
+        try:
+            pattern = re.compile(args.history_regex)
+        except re.error as e:
+            print(f"Invalid regex: {e}")
+            sys.exit(1)
+        results = _dost_module.search_history_regex(pattern)
+        if not results:
+            print(f"No dost tasks matching regex '{args.history_regex}'.")
+        else:
+            print(f"Found {len(results)} dost task(s) matching regex '{args.history_regex}':")
             for i, t in enumerate(results, 1):
                 parent = f" ← {t['parent_task_id'][:8]}" if t.get("parent_task_id") else ""
                 print(
