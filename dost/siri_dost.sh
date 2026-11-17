@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+#
+# dost/siri_dost.sh — Siri / Shortcuts entry point for Dost.
+#
+# Usage (from the Shortcuts app):
+#   ./siri_dost.sh                  # no message → reads the daily briefing
+#   ./siri_dost.sh "research NSE edges"  # message → dost_respond directly
+#
+# Prints clean, speakable text to stdout. Always exits 0 so Shortcuts can
+# speak a friendly fallback even when Dost is unreachable.
+#
+# Paper-only. Kill switch locked. No live orders. No Telegram token needed.
+set -u
+
+# Resolve directories relative to this script so the Shortcut keeps working
+# no matter where it is invoked from.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+COMPANY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+DOST_CLI="$COMPANY_DIR/dost.py"
+
+SORRY="Sorry, I'm having trouble reaching Dost right now. Please try again later."
+
+# Clean Dost output for speech:
+#   1. Drop ANSI escape codes
+#   2. Strip emoji symbols (e.g. 📊 🤖) so "say" doesn't read their names
+#   3. Trim whitespace and drop blank lines
+clean_text() {
+    sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' \
+        | perl -CSD -pe 's/\p{Emoji}//g' \
+        | sed 's/[[:space:]]*$//' \
+        | sed -e '/^[[:space:]]*$/d' -e 's/^[[:space:]]*//'
+}
+
+main() {
+    # python3 must be available
+    if ! command -v python3 >/dev/null 2>&1; then
+        printf '%s\n' "$SORRY (python3 not found)"
+        return 0
+    fi
+
+    # dost.py must exist
+    if [ ! -f "$DOST_CLI" ]; then
+        printf '%s\n' "$SORRY (dost.py not found)"
+        return 0
+    fi
+
+    local output=""
+    if [ "$#" -eq 0 ]; then
+        # No message → daily briefing (deterministic, no LLM needed)
+        output="$(python3 "$DOST_CLI" --briefing 2>/dev/null)" || true
+    else
+        # Message → dost_respond directly (warm spoken reply).
+        # Note: --dispatch would only queue a fleet task and print JSON,
+        # which is not speakable, so we use dost_respond instead.
+        output="$(python3 "$DOST_CLI" "$@" 2>/dev/null)" || true
+    fi
+
+    if [ -z "$output" ]; then
+        printf '%s\n' "$SORRY"
+        return 0
+    fi
+
+    printf '%s\n' "$output" | clean_text
+}
+
+main "$@"

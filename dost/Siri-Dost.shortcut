@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>WFWorkflowName</key>
+	<string>Siri Dost</string>
+	<key>WFWorkflowDescription</key>
+	<string>Ask Dost (THE CLAUDE COMPANY) anything and hear the reply spoken aloud. No Telegram token needed.</string>
+	<key>WFWorkflowIcon</key>
+	<string>WFWorkflowIconColorBlue</string>
+	<key>WFWorkflowClientVersion</key>
+	<string>1.0</string>
+	<key>WFWorkflowActions</key>
+	<array>
+		<dict>
+			<key>WFActionIdentifier</key>
+			<string>is.workflow.actions.ask</string>
+			<key>WFActionParameters</key>
+			<dict>
+				<key>WFPrompt</key>
+				<string>Ask Dost...</string>
+				<key>WFInitialResult</key>
+				<string></string>
+			</dict>
+		</dict>
+		<dict>
+			<key>WFActionIdentifier</key>
+			<string>is.workflow.actions.runscript</string>
+			<key>WFActionParameters</key>
+			<dict>
+				<key>WFShellScriptPath</key>
+				<string>/Users/aryanagarwal/AI-Office/dost/siri_dost.sh</string>
+				<key>WFPassInput</key>
+				<true/>
+			</dict>
+		</dict>
+		<dict>
+			<key>WFActionIdentifier</key>
+			<string>is.workflow.actions.speaktext</string>
+			<key>WFActionParameters</key>
+			<dict>
+				<key>WFSpeakPitch</key>
+				<real>1.1</real>
+				<key>WFSpeakRate</key>
+				<real>0.5</real>
+				<key>WFSpeakVolume</key>
+				<real>0.8</real>
+				<key>WFSpeakLanguage</key>
+				<string>en-IN</string>
+			</dict>
+		</dict>
+	</array>
+	<key>WFWorkflowInputTypes</key>
+	<array>
+		<string>WFTextContentItem</string>
+	</array>
+</dict>
+</plist>
