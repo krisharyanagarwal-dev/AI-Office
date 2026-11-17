@@ -1680,7 +1680,74 @@ def finalize_user_task(task_file_path: str, worker_result: dict) -> dict:
             json.dump(task, f, indent=2)
     except OSError:
         pass
+
+    # Auto-dispatch chained follow-up task if chain metadata is set.
+    chain_result = _dispatch_chain_task(task, task_file_path)
+    if chain_result and not chain_result.get("ok"):
+        # Non-fatal: log but don't fail the parent task.
+        pass
+
     return {"agent_id": agent_id, "status": "done", "task_id": task.get("id", "")}
+
+
+def _dispatch_chain_task(task: dict, task_file_path: str) -> dict | None:
+    """Auto-dispatch a follow-up task when a dost task completes with chain metadata.
+
+    Reads task['metadata']['chain'] (dict with prompt/agent_id/priority) and
+    writes a new task file to HIVE_DIR. The chained task is marked with
+    parent_task_id pointing to the completed task.
+
+    Returns the new task info dict, or None if no chain is configured.
+    """
+    metadata = task.get("metadata") or {}
+    chain = metadata.get("chain")
+    if not chain:
+        return None
+
+    chain_prompt = chain.get("prompt", "")
+    if not chain_prompt:
+        return None
+
+    chain_agent = chain.get("agent_id", "general-assistant")
+    chain_priority = chain.get("priority", "normal")
+    parent_task_id = task.get("id", "")
+
+    import uuid
+
+    chain_task_id = f"jev-{uuid.uuid4().hex[:8]}"
+    chain_task = {
+        "id": chain_task_id,
+        "title": f"Chain follow-up: {chain_prompt[:60]}",
+        "description": chain_prompt,
+        "status": "pending",
+        "agent_id": chain_agent,
+        "priority": chain_priority,
+        "user_id": "dost",
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "metadata": {
+            "tier": "pro",
+            "source": "dost",
+            "qwen_task_id": f"jev-exec-dost-{chain_task_id[:8]}",
+            "parent_task_id": parent_task_id,
+            "chained_from": parent_task_id,
+        },
+        "result": None,
+        "error": None,
+    }
+
+    try:
+        HIVE_DIR.mkdir(parents=True, exist_ok=True)
+        chain_task_path = HIVE_DIR / f"{chain_task_id}.json"
+        chain_task_path.write_text(json.dumps(chain_task, indent=2))
+        return {
+            "ok": True,
+            "task_id": chain_task_id,
+            "agent_id": chain_agent,
+            "message": f"Chained follow-up submitted (task {chain_task_id}).",
+        }
+    except OSError as e:
+        return {"ok": False, "error": str(e)}
 
 
 def finalize_agent_result(agent_info, state_bundle, tier, worker_result):

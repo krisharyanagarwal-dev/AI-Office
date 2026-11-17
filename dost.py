@@ -52,6 +52,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Show what would be dispatched without writing")
     parser.add_argument("--batch", help="Batch dispatch: comma-separated prompts")
     parser.add_argument("--parent", help="Parent task ID to thread this dispatch under")
+    parser.add_argument("--chain", help='Chain metadata JSON: {"prompt": "...", "agent_id": "...", "priority": "normal"}. Auto-dispatched when this task completes.')
     parser.add_argument("--review", help="Tier C review: comma-separated 'index:action' pairs (action: confirm/contest/skip/delete). Example: --review '3:confirm,7:contest,9:skip'")
     parser.add_argument("--memory", action="store_true")
     parser.add_argument("--context", action="store_true")
@@ -76,16 +77,31 @@ def main():
             print("Fleet status: unreachable (dispatcher may be down).")
     elif args.dispatch is not None:
         prompt = args.dispatch if args.dispatch else input("Prompt to send to fleet: ")
+        chain = None
+        if args.chain:
+            try:
+                chain = json.loads(args.chain)
+            except json.JSONDecodeError as e:
+                print(f"Invalid --chain JSON: {e}")
+                sys.exit(1)
         result = _dost_module.dispatch_prompt_to_fleet(
             prompt,
             priority=args.results_status or "normal",
             dry_run=args.dry_run,
             parent_task_id=args.parent,
+            chain=chain,
         )
         print(json.dumps(result, indent=2))
         if args.debug:
-            print(f"\n🔧 Debug: dispatch_prompt_to_fleet called with priority={args.results_status or 'normal'}, dry_run={args.dry_run}, parent={args.parent or 'none'}")
+            print(f"\n🔧 Debug: dispatch_prompt_to_fleet called with priority={args.results_status or 'normal'}, dry_run={args.dry_run}, parent={args.parent or 'none'}, chain={chain is not None}")
     elif args.batch:
+        chain = None
+        if args.chain:
+            try:
+                chain = json.loads(args.chain)
+            except json.JSONDecodeError as e:
+                print(f"Invalid --chain JSON: {e}")
+                sys.exit(1)
         prompts = [p.strip() for p in args.batch.split(",") if p.strip()]
         print(f"Batch dispatch: {len(prompts)} prompts")
         for i, prompt in enumerate(prompts, 1):
@@ -95,6 +111,7 @@ def main():
                 priority="normal",
                 dry_run=args.dry_run,
                 parent_task_id=args.parent,
+                chain=chain,
             )
             print(json.dumps(result, indent=2))
             if args.debug:

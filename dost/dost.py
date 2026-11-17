@@ -919,6 +919,7 @@ def dispatch_prompt_to_fleet(
     priority: str = "normal",
     dry_run: bool = False,
     parent_task_id: str | None = None,
+    chain: dict | None = None,
 ) -> dict:
     """Submit a prompt to the fleet orchestrator by writing a task file.
 
@@ -929,6 +930,8 @@ def dispatch_prompt_to_fleet(
     If dry_run is True, shows what would be dispatched without writing.
     If parent_task_id is given, this task is threaded under that parent
     (task threading / multi-turn follow-up).
+    If chain is given (dict with prompt/agent_id/priority), the dispatcher
+    auto-dispatches a follow-up task when this task completes (done).
     """
     import uuid
 
@@ -954,6 +957,9 @@ def dispatch_prompt_to_fleet(
     if parent_task_id:
         task["metadata"]["parent_task_id"] = parent_task_id
         task["title"] = f"Follow-up to {parent_task_id[:8]}: {prompt[:50]}"
+    if chain:
+        task["metadata"]["chain"] = chain
+        task["title"] = f"Chain parent: {prompt[:50]}"
     if dry_run:
         return {
             "ok": True,
@@ -972,6 +978,7 @@ def dispatch_prompt_to_fleet(
             "ok": True,
             "task_id": task_id,
             "agent_id": task["agent_id"],
+            "priority": priority,
             "message": f"Prompt submitted to fleet (task {task_id}). The dispatcher will execute it on the next cycle.",
         }
     except Exception as e:
