@@ -1136,7 +1136,7 @@ def dispatcher_status_line() -> str:
     )
 
 
-def list_recent_dost_tasks(limit: int = 20) -> list[dict]:
+def list_recent_dost_tasks(limit: int = 20, status_filter: str | None = None, agent_filter: str | None = None) -> list[dict]:
     """List recent dost-submitted tasks (source == "dost") sorted by updated_at.
 
     Returns a list of dicts with task_id, status, result preview (first 200
@@ -1153,6 +1153,10 @@ def list_recent_dost_tasks(limit: int = 20) -> list[dict]:
         except Exception:
             continue
         if (task.get("metadata") or {}).get("source") != "dost":
+            continue
+        if status_filter and task.get("status") != status_filter:
+            continue
+        if agent_filter and task.get("agent_id") != agent_filter:
             continue
         result = task.get("result") or {}
         preview = ""
@@ -1636,6 +1640,123 @@ def doctor() -> tuple:
         lines.append("One or more checks FAILED.")
         code = 1
     return "\n".join(lines), code
+
+
+def export_results(fmt: str = "json") -> str:
+    """Export the most recent debate and dispatch results to a file.
+
+    Reads the latest dost task with metadata.debate=true and the latest
+    dost task without debate, writes them to dost/exports/.
+    Returns the file path.
+    """
+    from pathlib import Path
+    export_dir = DOST_DIR / "exports"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+    HIVE_DIR = Path("/Users/aryanagarwal/AI-Office/packages/office-os/tasks")
+    latest_debate = None
+    latest_dispatch = None
+    if HIVE_DIR.exists():
+        for hive_file in sorted(HIVE_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+            try:
+                task = json.loads(hive_file.read_text())
+            except Exception:
+                continue
+            if (task.get("metadata") or {}).get("source") != "dost":
+                continue
+            md = task.get("metadata") or {}
+            if md.get("debate") and latest_debate is None:
+                latest_debate = task
+            elif not md.get("debate") and latest_dispatch is None:
+                latest_dispatch = task
+            if latest_debate and latest_dispatch:
+                break
+
+    data = {
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "debate": latest_debate,
+        "dispatch": latest_dispatch,
+    }
+    if fmt == "md":
+        lines = [f"# Dost Export — {data['exported_at']}", ""]
+        if latest_debate:
+            lines.append("## Latest Debate")
+            lines.append(f"- Question: {latest_debate.get('description', '')}")
+            lines.append(f"- Agent: {latest_debate.get('agent_id', '')}")
+            lines.append(f"- Status: {latest_debate.get('status', '')}")
+            r = latest_debate.get("result") or {}
+            if isinstance(r, dict) and r.get("text"):
+                lines.append(f"- Answer: {r['text'][:500]}")
+            lines.append("")
+        if latest_dispatch:
+            lines.append("## Latest Dispatch")
+            lines.append(f"- Prompt: {latest_dispatch.get('description', '')}")
+            lines.append(f"- Agent: {latest_dispatch.get('agent_id', '')}")
+            lines.append(f"- Status: {latest_dispatch.get('status', '')}")
+            r = latest_dispatch.get("result") or {}
+            if isinstance(r, dict) and r.get("text"):
+                lines.append(f"- Answer: {r['text'][:500]}")
+        content = "\n".join(lines)
+        ext = "md"
+    else:
+        content = json.dumps(data, indent=2)
+        ext = "json"
+    out_path = export_dir / f"dost_export_{timestamp}.{ext}"
+    out_path.write_text(content)
+    return str(out_path)
+
+
+def synthesis_detail() -> str:
+    """Detailed synthesis report over all findings.
+
+    Groups findings by agent, counts verification statuses, shows
+    contested/pending items with their claims for Tier C review.
+    """
+    store = _load_findings_store()
+    findings = store.get("findings", [])
+
+    by_agent = {}
+    vs_counts = {}
+    for f in findings:
+        agent = f.get("agent", "unknown")
+        vs = f.get("verification_status", "missing")
+        by_agent.setdefault(agent, []).append(f)
+        vs_counts[vs] = vs_counts.get(vs, 0) + 1
+
+    lines = [
+        "# Synthesis Detail — Findings Review",
+        f"Total findings: {len(findings)}",
+        "",
+        "## Verification Status",
+    ]
+    for vs, count in sorted(vs_counts.items(), key=lambda x: -x[1]):
+        lines.append(f"- {vs}: {count}")
+    lines.append("")
+
+    # Contested and needs-review items are most important for Tier C
+    priority = ["contested", "needs-review", "pending"]
+    lines.append("## Tier C Review — Priority Items")
+    for vs in priority:
+        items = [f for f in findings if f.get("verification_status") == vs]
+        if not items:
+            continue
+        lines.append(f"\n### {vs} ({len(items)})")
+        for f in items[:10]:  # cap at 10 per status
+            claim = (f.get("claim") or "")[:100]
+            lines.append(f"- [{f.get('agent', '?')}] {claim}... ({f.get('date', '?')[:10]})")
+
+    lines.append("")
+    lines.append("## By Agent")
+    for agent, items in sorted(by_agent.items(), key=lambda x: -len(x[1])):
+        vs_for_agent = {}
+        for f in items:
+            v = f.get("verification_status", "missing")
+            vs_for_agent[v] = vs_for_agent.get(v, 0) + 1
+        detail = ", ".join(f"{k}={v}" for k, v in sorted(vs_for_agent.items()))
+        lines.append(f"- {agent}: {len(items)} findings ({detail})")
+
+    return "\n".join(lines)
 
 
 def main():

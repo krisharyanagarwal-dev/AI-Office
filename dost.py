@@ -40,6 +40,11 @@ def main():
     parser.add_argument("--debate", nargs="?", const="", help="Debate mode: fan a question to multiple pro agents and synthesize")
     parser.add_argument("--results", action="store_true", help="List recent dost-submitted tasks from the fleet hive")
     parser.add_argument("--history", nargs="?", const="", help="Search dost task history by keyword (optional search term)")
+    parser.add_argument("--results-status", choices=["done", "error", "in_progress", "pending"], help="Filter --results by status")
+    parser.add_argument("--results-agent", help="Filter --results by agent_id")
+    parser.add_argument("--briefing-now", action="store_true", help="Generate on-demand briefing immediately")
+    parser.add_argument("--export", choices=["md", "json"], help="Export last debate/dispatch results to file")
+    parser.add_argument("--synthesis", action="store_true", help="Show detailed synthesis report over all findings")
     parser.add_argument("--memory", action="store_true")
     parser.add_argument("--context", action="store_true")
     parser.add_argument("--health", action="store_true", help="Check OpenAI component availability")
@@ -74,7 +79,10 @@ def main():
         if result.get("_cached"):
             print("⚡ Served from answer cache (no provider calls)")
     elif args.results:
-        tasks = _dost_module.list_recent_dost_tasks()
+        tasks = _dost_module.list_recent_dost_tasks(
+            status_filter=args.results_status,
+            agent_filter=args.results_agent,
+        )
         if not tasks:
             print("No dost-submitted tasks found.")
         else:
@@ -85,6 +93,8 @@ def main():
                 )
                 if t["preview"]:
                     print(f"    preview: {t['preview']}")
+    elif args.briefing_now:
+        print(_dost_module.generate_daily_briefing())
     elif args.history is not None:
         query = args.history if args.history else input("Search history for: ")
         results = _dost_module.search_history(query)
@@ -99,6 +109,10 @@ def main():
                 )
                 if t["preview"]:
                     print(f"    preview: {t['preview']}")
+    elif args.export:
+        _dost_module.export_results(args.export)
+    elif args.synthesis:
+        print(_dost_module.synthesis_detail())
     elif args.memory:
         print(json.dumps(MEMORY.profile, indent=2))
     elif args.context:
