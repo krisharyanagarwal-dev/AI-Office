@@ -1744,9 +1744,10 @@ def _dispatch_chain_task(task: dict, task_file_path: str) -> dict | None:
     }
 
     try:
-        HIVE_DIR.mkdir(parents=True, exist_ok=True)
-        chain_task_path = HIVE_DIR / f"{chain_task_id}.json"
-        chain_task_path.write_text(json.dumps(chain_task, indent=2))
+        os.makedirs(HIVE_DIR, exist_ok=True)
+        chain_task_path = os.path.join(HIVE_DIR, f"{chain_task_id}.json")
+        with open(chain_task_path, "w") as f:
+            json.dump(chain_task, f, indent=2)
         return {
             "ok": True,
             "task_id": chain_task_id,
