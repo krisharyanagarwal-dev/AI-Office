@@ -29,6 +29,10 @@ from dost import MEMORY, companion_respond, dost_greeting  # noqa: E402
 from openai_components import speech_to_text, get_key  # noqa: E402
 import models  # noqa: E402
 
+JARVIS = os.environ.get("DOST_JARVIS") == "1"
+if JARVIS:
+    from jarvis import route, execute, resolve_pending, store_pending  # noqa: E402
+
 MAX_AUDIO = 15 * 1024 * 1024  # 15 MB voice clip limit
 AUDIO_EXT = {
     "audio/webm": ".webm", "audio/ogg": ".ogg", "audio/mp4": ".m4a",
@@ -49,6 +53,27 @@ CHAT_DIR = Path.home() / ".openclaw" / "dost_chat"
 def openclaw_reply(text: str) -> str:
     """Placeholder for the openclaw backend — not wired up."""
     return "(openclaw backend not available — try a different model.)"
+
+
+def dost_or_jarvis(text: str) -> str:
+    """Route through Jarvis when DOST_JARVIS=1, else plain companion.
+
+    Read-only tools (fleet, tasks, alerts, recall) run unattended.
+    Action tools (dispatch, debate) store a pending action and ask for
+    an explicit "yes" before writing anything to the fleet.
+    """
+    if not JARVIS:
+        return companion_respond(text)
+    resolved = resolve_pending(text)
+    if resolved is not None:
+        return resolved
+    call = route(text)
+    if call is None:
+        return companion_respond(text)
+    if call.name in ("fleet_status", "recent_tasks", "alerts", "recall"):
+        return execute(call)
+    store_pending(text, call)
+    return execute(call, confirmed=False)
 
 
 class PetHandler(Handler):
@@ -101,7 +126,7 @@ class PetHandler(Handler):
             return openclaw_reply(text)
         # default: dost companion
         with MODEL_LOCK:
-            return companion_respond(text)
+            return dost_or_jarvis(text)
 
     def stream_answer(self, text, history, backend):
         """Yield SSE chunks. Each chunk is str or dict {type, text, label, ms}."""
@@ -119,7 +144,7 @@ class PetHandler(Handler):
             ms = 0
         else:
             with MODEL_LOCK:
-                reply = companion_respond(text)
+                reply = dost_or_jarvis(text)
             label = None
             ms = 0
 

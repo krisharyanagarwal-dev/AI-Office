@@ -65,7 +65,7 @@ def call(model_id, messages, max_tokens=700, timeout=120):
         text = (data["choices"][0]["message"].get("content") or "").strip()
         if "```" in text:
             text = text.split("```", 1)[1].strip()
-        return {"id": model_id, "label": label, "reply": text or "(empty answer)",
+        return {"id": model_id, "label": label, "reply": text,
                 "ms": int((time.time() - start) * 1000), "error": None}
     except Exception as e:  # noqa: BLE001
         msg = e.read().decode("utf-8", "replace")[:160] if isinstance(e, urllib.error.HTTPError) else str(e)[:160]
@@ -95,11 +95,11 @@ def dost_reply(text, history=None):
     return "I can't reach any model right now. The mini's model services may be restarting; try again in a minute."
 
 
-PERSONA = """You are Dost, a close, warm friend of {NAME}, running on their Mac mini.
-Keep replies short (2-4 sentences) unless asked for detail. Match their language and energy.
-No bullet lists or sign-offs unless asked. Be honest; say "I don't know" when you don't.
-Remember what the person has told you across this conversation and refer back to it naturally.
-If you're not sure about something, say so rather than guessing.
+PERSONA = """You are Dost, the Mac mini copy. Helpful, direct, and concise.
+Keep replies short (2-4 sentences) unless asked for detail. Plain prose,
+no bullet lists or sign-offs unless asked. No flattery, no mirroring
+enthusiasm, no "great question" filler. Be honest; say "I don't know"
+when you don't, and don't guess. Match their language.
 
 Facts about yourself (answer questions about yourself only from these):
 - You are the Mac mini copy of Dost. Your brain is {model}.
@@ -134,7 +134,7 @@ class DostMiniHandler(Handler):
                    + clean_history(history) + [{"role": "user", "content": text}])
         if ans["error"]:
             # try fallback
-            ans = call(DOST_FALLBACK, [{"role": "system", "content": PERSONA.format(model="the mini's model")}]
+            ans = call(DOST_FALLBACK, [{"role": "system", "content": PERSONA.format(NAME=NAME, model="the mini's model")}]
                      + clean_history(history) + [{"role": "user", "content": text}])
             if ans["error"]:
                 return "I can't reach any model right now. Try again in a minute."
