@@ -171,6 +171,7 @@ LOGIN_TEMPLATE = """<!DOCTYPE html>
         .users {{ margin-top: 1rem; font-size: 0.8rem; color: #64748b; }}
         .users div {{ margin-bottom: 0.25rem; }}
     </style>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
     <div class="card">
@@ -187,7 +188,131 @@ LOGIN_TEMPLATE = """<!DOCTYPE html>
             <div>• demo (user)</div>
         </div>
     </div>
+
+    <script>
+    // Chart.js charts
+    const charts = {};
+
+    function initCharts() {
+        // Fetch metrics
+        fetch('/metrics')
+            .then(r => r.json())
+            .then(data => {
+                const jev = data.jev || {};
+                const pools = data.provider_pools || {};
+
+                // Completion rate chart
+                const completionCtx = document.getElementById('completionChart');
+                if (completionCtx) {
+                    charts.completion = new Chart(completionCtx.getContext('2d'), {
+                        type: 'gauge',
+                        data: {
+                            labels: ['Completion Rate'],
+                            datasets: [{
+                                data: [Math.min(100, jev.completion_rate || 0)],
+                                backgroundColor: '#10b981',
+                                borderColor: '#ffffff',
+                                borderWidth: 2
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            plugins: {
+                                legend: { display: false },
+                                title: { display: true, text: 'Task Completion Rate (%)' }
+                            },
+                            scales: {
+                                y: { min: 0, max: 100 }
+                            }
+                        }
+                    });
+                }
+
+                // Error rate chart
+                const errorCtx = document.getElementById('errorChart');
+                if (errorCtx) {
+                    charts.error = new Chart(errorCtx.getContext('2d'), {
+                        type: 'gauge',
+                        data: {
+                            labels: ['Error Rate (%)'],
+                            datasets: [{
+                                data: [Math.min(100, jev.error_rate || 0)],
+                                backgroundColor: '#ef4444',
+                                borderColor: '#ffffff',
+                                borderWidth: 2
+                            ]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            plugins: {
+                                legend: { display: false },
+                                title: { display: true, text: 'Error Rate (%)' }
+                            },
+                            scales: { y: { min: 0, max: 100 } }
+                        }
+                    });
+                }
+
+                // Pool status chart
+                const poolCtx = document.getElementById('poolChart');
+                if (poolCtx && pools) {
+                    const poolNames = Object.keys(pools);
+                    const poolValues = pools.map(p => p.available ? 1 : (p.cooldown_remaining > 0 ? 0.5 : 0));
+                    charts.pools = new Chart(poolCtx.getContext('2d'), {
+                        type: 'bar',
+                        data: {
+                            labels: poolNames.map(p => p.split('_')[0]),
+                            datasets: [{
+                                label: 'Pool Status',
+                                data: poolValues,
+                                backgroundColor: poolValues.map(v => v === 1 ? '#10b981' : (v === 0.5 ? '#f59e0b' : '#ef4444'))
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            scales: {
+                                y: { min: 0, max: 1, ticks: { display: false } }
+                            },
+                            plugins: {
+                                legend: { display: false },
+                                title: { display: true, text: 'Provider Pool Status' }
+                            }
+                        }
+                    });
+                }
+            })
+            .catch(err => console.error('Failed to load metrics:', err));
+        }
+
+        // Initialize charts when page loads
+        document.addEventListener('DOMContentLoaded', initCharts);
+        // Refresh charts every 30 seconds
+        setInterval(() => {
+            fetch('/metrics')
+                .then(r => r.json())
+                .then(data => {
+                    const jev = data.jev || {};
+                    const pools = data.provider_pools || {};
+                    
+                    // Update completion chart
+                    if (charts.completion) {
+                        charts.completion.data.datasets[0].data = [Math.min(100, jev.completion_rate || 0)];
+                        charts.completion.update();
+                    }
+                    
+                    // Update error chart
+                    if (charts.error) {
+                        charts.error.data.datasets[0].data = [Math.min(100, jev.error_rate || 0)];
+                        charts.error.update();
+                    }
+                })
+                .catch(() => {});
+        }, 30000);
+    </script>
 </body>
+</html>
 </html>"""
 
 def _org_rows():
@@ -359,13 +484,27 @@ DASHBOARD_TEMPLATE = """<!DOCTYPE html>
 
     <div class="card">
         <h3>🏥 Provider Health</h3>
-        {provider_health_html}
+        <div class="sparkline">{sparkline_html}</div>
+        <div class="small">Green = up · Red = down/cooling · Dim = idle</div>
     </div>
-
     <div class="card">
-        <h3>Latest Results (Your Tasks)</h3>
-        {result_html}
-    </div>
+        <h3>📊 Cost Trend</h3>
+        <div class="chart-container">
+            <div class="chart-title">Daily Cost Units</div>
+            <div class="chart-canvas"><canvas id="costChart"></canvas></div>
+        </div>
+        </div>
+        <div class="card">
+            <h3>📊 Task Completion Trend</h3>
+            <div class="chart-container">
+                <div class="chart-title">Tasks Completed Over Time</div>
+                <div class="chart-canvas"><canvas id="taskChart"></canvas></div>
+            </div>
+        </div>
+        <div class="card">
+            <h3>🧩 Recent Dost Tasks (last 10)</h3>
+            {dost_rows}
+        </div>
 
     <p style="margin-top: 1rem; color: #64748b; font-size: 0.8rem;">
         Office OS — Zero Claude Tokens — Free Models Only — http://localhost:8083
@@ -529,7 +668,11 @@ DASHBOARD_PUBLIC_TEMPLATE = """<!DOCTYPE html>
         .cost-trend .stat {{ background: #151515; border: 1px solid #2a2a2a; border-radius: 6px; padding: 0.75rem; flex: 1; }}
         .cost-trend .stat .num {{ font-size: 1.25rem; font-family: monospace; font-weight: 700; }}
         .cost-trend .stat .lbl {{ font-size: 0.7rem; color: #94a3b8; text-transform: uppercase; }}
+        .chart-container {{ position: relative; height: 200px; margin-bottom: 1rem; }}
+        .chart-title {{ font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; margin-bottom: 0.5rem; }}
+        .chart-canvas {{ width: 100%; height: 200px; }}
     </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
     <header>
@@ -1525,31 +1668,34 @@ class OfficeHandler(BaseHTTPRequestHandler):
 
     # ---------- health checks ----------
     def _check_dispatcher(self):
-        """Is the JEV dispatcher running? (pid file + live log freshness)"""
+        """Is the JEV dispatcher reachable? (http://localhost:8083/metrics)"""
+        detail = {}
+        url = "http://localhost:8083/metrics"
+        reachable = False
+        try:
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                detail["status_code"] = resp.getcode()
+                reachable = resp.getcode() == 200
+        except Exception as e:
+            detail["error"] = str(e)
+        # Supplemental context: pid file + log freshness
         pid_path = Path("/Users/aryanagarwal/.openclaw/jev-dispatcher.pid")
         log_path = Path(JEV_LOG)
-        detail = {}
-        running = False
         try:
-            pid = int(pid_path.read_text().strip())
-            os.kill(pid, 0)  # raises if the process does not exist
-            running = True
-            detail["pid"] = pid
-        except (OSError, ValueError, ProcessLookupError, FileNotFoundError):
-            running = False
+            detail["pid"] = int(pid_path.read_text().strip())
+        except (OSError, ValueError, FileNotFoundError):
+            pass
         detail["log_exists"] = log_path.exists()
         try:
-            age_sec = time.time() - log_path.stat().st_mtime
-            detail["log_age_sec"] = int(age_sec)
-            if age_sec > 600 and running:
-                running = False  # log is stale; dispatcher not actively writing
+            detail["log_age_sec"] = int(time.time() - log_path.stat().st_mtime)
         except OSError:
             detail["log_age_sec"] = None
-        if running:
-            return {"status": "healthy", "running": True, **detail}
-        if log_path.exists():
-            return {"status": "degraded", "running": False, **detail}
-        return {"status": "unhealthy", "running": False, **detail}
+        if reachable:
+            return {"status": "healthy", "reachable": True, **detail}
+        if detail.get("pid") or log_path.exists():
+            return {"status": "degraded", "reachable": False, **detail}
+        return {"status": "unhealthy", "reachable": False, **detail}
 
     def _check_providers(self):
         """Are provider pools available?"""

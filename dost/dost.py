@@ -45,6 +45,17 @@ sys.path.insert(0, str(DOST_DIR))
 from company_dispatcher import dispatch, route_department  # noqa: E402
 from openai_components import chat_completion, provider_health  # noqa: E402
 from context_builder import build_context  # noqa: E402
+from workspace import (  # noqa: E402
+    create_workspace,
+    get_workspace,
+    list_workspaces,
+    add_user,
+    list_users,
+    get_user_role,
+    workspace_tasks_dir,
+    ensure_default_workspace,
+    DEFAULT_WORKSPACE_ID,
+)
 
 # Cloud model orchestrator (same orchestration the dispatcher uses) for direct
 # debate calls that bypass the dispatcher's general-assistant override.
@@ -920,6 +931,7 @@ def dispatch_prompt_to_fleet(
     dry_run: bool = False,
     parent_task_id: str | None = None,
     chain: dict | None = None,
+    workspace_id: str | None = None,
 ) -> dict:
     """Submit a prompt to the fleet orchestrator by writing a task file.
 
@@ -960,6 +972,8 @@ def dispatch_prompt_to_fleet(
     if chain:
         task["metadata"]["chain"] = chain
         task["title"] = f"Chain parent: {prompt[:50]}"
+    if workspace_id:
+        task["metadata"]["workspace_id"] = workspace_id
     if dry_run:
         return {
             "ok": True,
@@ -2173,8 +2187,69 @@ def load_template(name: str) -> dict | None:
         return None
 
 
+def _handle_workspace_command(args) -> None:
+    """Handle the `dost workspace` subcommand group."""
+    action = args.action
+    rest = args.rest
+    if action == "list":
+        workspaces = list_workspaces()
+        if not workspaces:
+            print("No workspaces found.")
+        else:
+            print("ID | Name | Plan | Owner | Active")
+            for ws in workspaces:
+                print(
+                    f"{ws['id']} | {ws.get('name','')} | {ws.get('plan','')} | "
+                    f"{ws.get('owner_email','')} | {ws.get('active', True)}"
+                )
+    elif action == "create":
+        if not rest:
+            print("Usage: dost workspace create <name> [--owner <email>] [--plan <plan>]")
+            return
+        name = rest[0]
+        owner = "admin@default.local"
+        plan = "starter"
+        i = 1
+        while i < len(rest):
+            if rest[i] == "--owner" and i + 1 < len(rest):
+                owner = rest[i + 1]
+                i += 2
+            elif rest[i] == "--plan" and i + 1 < len(rest):
+                plan = rest[i + 1]
+                i += 2
+            else:
+                i += 1
+        ws = create_workspace(name, owner_email=owner, plan=plan)
+        print(json.dumps(ws, indent=2))
+    elif action == "add-user":
+        if len(rest) < 2:
+            print("Usage: dost workspace add-user <workspace_id> <email> [role]")
+            return
+        workspace_id = rest[0]
+        email = rest[1]
+        role = rest[2] if len(rest) > 2 else "viewer"
+        added = add_user(workspace_id, email, role)
+        print(json.dumps(added, indent=2))
+    else:
+        print("Unknown workspace action. Use: list | create <name> | add-user <workspace_id> <email> [role]")
+
+
 def main():
     import argparse
+    import sys as _sys
+
+    # Route `dost workspace <action> ...` through a dedicated subparser so the
+    # `message` positional (nargs="?") does not steal the subcommand name.
+    if len(_sys.argv) > 1 and _sys.argv[1] == "workspace":
+        _ws_parser = argparse.ArgumentParser(prog="dost workspace")
+        _ws_parser.add_argument("action", choices=["list", "create", "add-user"],
+                                help="Workspace action: list | create <name> | add-user <workspace_id> <email> [role]")
+        _ws_parser.add_argument("rest", nargs="*", help="Additional arguments for the workspace action")
+        _ws_args, _ws_extras = _ws_parser.parse_known_args(_sys.argv[2:])
+        _ws_args.rest = list(_ws_args.rest) + list(_ws_extras)
+        _handle_workspace_command(_ws_args)
+        return
+
     parser = argparse.ArgumentParser(description="THE CLAUDE COMPANY — Dost")
     parser.add_argument("message", nargs="?")
     parser.add_argument("--department", choices=["research", "trading", "fleet", "ops", "upgrade", "assistant"])
@@ -2198,6 +2273,21 @@ def main():
     parser.add_argument("--health", action="store_true", help="Check OpenAI component availability")
     parser.add_argument("--doctor", action="store_true",
                         help="Run a one-command system health check")
+    parser.add_argument("--workspace", help="Workspace id to scope all dispatch operations to")
+    parser.add_argument("--create-workspace", metavar="NAME",
+                        help="Create a new workspace with the given name")
+    parser.add_argument("--list-workspaces", action="store_true",
+                        help="List all workspaces")
+    parser.add_argument("--add-user", nargs=2, metavar=("EMAIL", "ROLE"),
+                        help="Add a user (email role) to the current/default workspace")
+
+    # `dost workspace` subcommand group for workspace management
+    subparsers = parser.add_subparsers(dest="command", help="Subcommands")
+    ws_parser = subparsers.add_parser("workspace", help="Workspace management")
+    ws_parser.add_argument("action", choices=["list", "create", "add-user"],
+                           help="Workspace action: list | create <name> | add-user <workspace_id> <email> [role]")
+    ws_parser.add_argument("rest", nargs="*", help="Additional arguments for the workspace action")
+
     args = parser.parse_args()
 
     if args.doctor:
@@ -2206,6 +2296,8 @@ def main():
         sys.exit(code)
     if args.push_telegram:
         _push_telegram_briefing()
+    elif args.command == "workspace":
+        _handle_workspace_command(args)
     elif args.briefing:
         print(generate_daily_briefing())
     elif args.status:
@@ -2240,9 +2332,26 @@ def main():
                 )
                 if t["preview"]:
                     print(f"    preview: {t['preview']}")
+    elif args.create_workspace:
+        ws = create_workspace(args.create_workspace, owner_email="admin@default.local")
+        print(json.dumps(ws, indent=2))
+    elif args.list_workspaces:
+        workspaces = list_workspaces()
+        if not workspaces:
+            print("No workspaces found.")
+        else:
+            print("ID | Name | Plan | Owner")
+            for ws in workspaces:
+                print(f"{ws['id']} | {ws.get('name','')} | {ws.get('plan','')} | {ws.get('owner_email','')}")
+    elif args.add_user:
+        email, role = args.add_user
+        ws_id = args.workspace or ensure_default_workspace()
+        added = add_user(ws_id, email, role)
+        print(json.dumps(added, indent=2))
     elif args.dispatch is not None:
+        workspace_id = args.workspace or ensure_default_workspace()
         prompt = args.dispatch if args.dispatch else input("Prompt to send to fleet: ")
-        result = dispatch_prompt_to_fleet(prompt)
+        result = dispatch_prompt_to_fleet(prompt, workspace_id=workspace_id)
         print(json.dumps(result, indent=2))
     elif args.debate is not None:
         prompt = args.debate if args.debate else input("Debate question: ")
@@ -2257,7 +2366,8 @@ def main():
             prompt = template.get("prompt", "")
             agent_id = template.get("agent_id")
             priority = template.get("priority", "normal")
-            result = dispatch_prompt_to_fleet(prompt, agent_id=agent_id, priority=priority)
+            workspace_id = args.workspace or ensure_default_workspace()
+            result = dispatch_prompt_to_fleet(prompt, agent_id=agent_id, priority=priority, workspace_id=workspace_id)
             print(json.dumps(result, indent=2))
     elif args.memory:
         print(json.dumps(MEMORY.profile, indent=2))

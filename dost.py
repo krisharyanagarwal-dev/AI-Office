@@ -25,6 +25,16 @@ provider_health = _dost_module.provider_health
 build_context = _dost_module.build_context
 doctor = _dost_module.doctor
 MEMORY = _dost_module.MEMORY
+dispatch_prompt_to_fleet = _dost_module.dispatch_prompt_to_fleet
+create_workspace = _dost_module.create_workspace
+get_workspace = _dost_module.get_workspace
+list_workspaces = _dost_module.list_workspaces
+add_user = _dost_module.add_user
+list_users = _dost_module.list_users
+get_user_role = _dost_module.get_user_role
+ensure_default_workspace = _dost_module.ensure_default_workspace
+DEFAULT_WORKSPACE_ID = _dost_module.DEFAULT_WORKSPACE_ID
+_handle_workspace_command = _dost_module._handle_workspace_command
 
 
 def main():
@@ -59,6 +69,21 @@ def main():
     parser.add_argument("--health", action="store_true", help="Check OpenAI component availability")
     parser.add_argument("--doctor", action="store_true",
                         help="Run a one-command system health check")
+    parser.add_argument("--workspace", help="Workspace id to scope all dispatch operations to")
+    parser.add_argument("--create-workspace", metavar="NAME",
+                        help="Create a new workspace with the given name")
+    parser.add_argument("--list-workspaces", action="store_true",
+                        help="List all workspaces")
+    parser.add_argument("--add-user", nargs=2, metavar=("EMAIL", "ROLE"),
+                        help="Add a user (email role) to the current/default workspace")
+
+    # `dost workspace` subcommand group for workspace management
+    subparsers = parser.add_subparsers(dest="command", help="Subcommands")
+    ws_parser = subparsers.add_parser("workspace", help="Workspace management")
+    ws_parser.add_argument("action", choices=["list", "create", "add-user"],
+                           help="Workspace action: list | create <name> | add-user <workspace_id> <email> [role]")
+    ws_parser.add_argument("rest", nargs="*", help="Additional arguments for the workspace action")
+
     args = parser.parse_args()
 
     if args.doctor:
@@ -67,6 +92,8 @@ def main():
         sys.exit(code)
     if args.push_telegram:
         _dost_module._push_telegram_briefing()
+    elif args.command == "workspace":
+        _handle_workspace_command(args)
     elif args.briefing:
         print(generate_daily_briefing())
     elif args.status:
@@ -75,7 +102,24 @@ def main():
             print(json.dumps(st, indent=2))
         else:
             print("Fleet status: unreachable (dispatcher may be down).")
+    elif args.create_workspace:
+        ws = create_workspace(args.create_workspace, owner_email="admin@default.local")
+        print(json.dumps(ws, indent=2))
+    elif args.list_workspaces:
+        workspaces = list_workspaces()
+        if not workspaces:
+            print("No workspaces found.")
+        else:
+            print("ID | Name | Plan | Owner")
+            for ws in workspaces:
+                print(f"{ws['id']} | {ws.get('name','')} | {ws.get('plan','')} | {ws.get('owner_email','')}")
+    elif args.add_user:
+        email, role = args.add_user
+        ws_id = args.workspace or ensure_default_workspace()
+        added = add_user(ws_id, email, role)
+        print(json.dumps(added, indent=2))
     elif args.dispatch is not None:
+        workspace_id = args.workspace or ensure_default_workspace()
         prompt = args.dispatch if args.dispatch else input("Prompt to send to fleet: ")
         chain = None
         if args.chain:
@@ -90,6 +134,7 @@ def main():
             dry_run=args.dry_run,
             parent_task_id=args.parent,
             chain=chain,
+            workspace_id=workspace_id,
         )
         print(json.dumps(result, indent=2))
         if args.debug:
