@@ -98,8 +98,22 @@ class Handler(BaseHTTPRequestHandler):
     def voice_status(self):
         return False
 
+    def listen(self):
+        """Receive audio and return {ok, text} or {ok, error}."""
+        return {"ok": False, "error": "Voice transcription not available on this server."}
+
     def greet(self):
         return "Hi, " + self.NAME + "!"
+
+    def list_models(self):
+        """Return list of {id, label, provider} dicts. Override in subclass."""
+        models = []
+        for k, v in self.MODELS.items():
+            if isinstance(v, tuple):
+                models.append({"id": k, "label": v[0], "provider": v[1] if len(v) > 1 else ""})
+            else:
+                models.append({"id": k, "label": str(v), "provider": ""})
+        return models
 
     def compare_models(self, text, history):
         """Default compare: run each model sequentially."""
@@ -164,13 +178,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/greet":
             self._json(200, {"reply": self.greet()})
         elif path == "/api/models":
-            models = []
-            for k, v in self.MODELS.items():
-                if isinstance(v, tuple):
-                    models.append({"id": k, "label": v[0], "provider": v[1] if len(v) > 1 else ""})
-                else:
-                    models.append({"id": k, "label": str(v), "provider": ""})
-            self._json(200, {"models": models})
+            self._json(200, {"models": self.list_models()})
         elif path == "/api/health":
             self._json(200, {"status": "ok"})
         elif path == "/api/history":
@@ -187,6 +195,17 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
         path = self.path.split("?", 1)[0]
         store = self.__class__.STORE
+
+        if path == "/api/listen":
+            try:
+                result = self.listen()
+                if result.get("ok"):
+                    self._json(200, {"text": result.get("text", "")})
+                else:
+                    self._json(502, {"error": result.get("error", "Voice transcription failed.")})
+            except Exception:  # noqa: BLE001
+                self._json(500, {"error": "Voice transcription failed. Try again."})
+            return
 
         try:
             payload = self._read_json()
@@ -281,8 +300,12 @@ class Handler(BaseHTTPRequestHandler):
                     stream = chunk_text(full)
                     reply = ""
                 for chunk in stream:
-                    reply = reply + chunk
-                    send_event("content", {"type": "text", "text": chunk})
+                    if isinstance(chunk, dict):
+                        reply = reply + chunk.get("text", "")
+                        send_event("content", chunk)
+                    else:
+                        reply = reply + chunk
+                        send_event("content", {"type": "text", "text": chunk})
                     time.sleep(0.03)
             if store is not None:
                 ts = time.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -298,7 +321,7 @@ class Handler(BaseHTTPRequestHandler):
             pass
         except Exception:  # noqa: BLE001
             try:
-                send_event("error", {"error": "Dost couldn't answer right now. Try again."})
+                send_event("content", {"type": "error", "error": "Dost couldn't answer right now. Try again."})
             except BrokenPipeError:
                 pass
         finally:
