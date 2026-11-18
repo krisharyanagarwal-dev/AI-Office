@@ -36,6 +36,13 @@ ensure_default_workspace = _dost_module.ensure_default_workspace
 DEFAULT_WORKSPACE_ID = _dost_module.DEFAULT_WORKSPACE_ID
 _handle_workspace_command = _dost_module._handle_workspace_command
 
+# Strategy pipeline (dispatch → backtest → cost-size → validate)
+_strategy_pipeline_path = Path(__file__).resolve().parent / "dost" / "strategy_pipeline.py"
+_strategy_pipeline_spec = importlib.util.spec_from_file_location("strategy_pipeline", _strategy_pipeline_path)
+_strategy_pipeline_module = importlib.util.module_from_spec(_strategy_pipeline_spec)
+_strategy_pipeline_spec.loader.exec_module(_strategy_pipeline_module)
+run_strategy_pipeline = _strategy_pipeline_module.run_strategy_pipeline
+
 
 def main():
     import argparse
@@ -266,6 +273,14 @@ def main():
         print(build_context())
     elif args.health:
         print(json.dumps(provider_health(), indent=2))
+    elif args.backtest is not None:
+        prompt = args.backtest if args.backtest else input("Strategy pipeline prompt: ")
+        result = run_strategy_pipeline(
+            prompt=prompt,
+            agent_id="strategy-advisor",
+            priority="normal",
+        )
+        print(json.dumps(result, indent=2, default=str))
     elif args.message:
         print(dost_respond(args.message, args.department))
     else:
