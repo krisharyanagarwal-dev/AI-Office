@@ -56,7 +56,7 @@ main() {
 
     if printf '%s' "$lower_msg" | grep -qiE "anything broken|system health|is everything ok|anything wrong|any alerts"; then
         # Siri alert phrase → run doctor and summarize anomalies
-        output="$(python3 "$DOST_CLI" --doctor 2>/dev/null | grep -E "✗|FAILED|Anomaly|Quota" | head -5 || true)"
+        output="$(python3 "$DOST_CLI" --doctor 2>/dev/null | grep -E "FAIL|FAILED|Anomaly|Quota" | head -5 || true)"
         if [ -z "$output" ]; then
             output="All systems look good. No anomalies detected."
         fi

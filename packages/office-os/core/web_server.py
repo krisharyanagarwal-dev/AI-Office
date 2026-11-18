@@ -1197,120 +1197,120 @@ DASHBOARD_PUBLIC_TEMPLATE = """<!DOCTYPE html>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>JEV Dispatcher Dashboard — Office OS</title>
     <style>
-        * {{ box-sizing: border-box; }}
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #0f0f0f; color: #e0e0e0; }}
-        header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }}
-        h1 {{ font-size: 1.5rem; margin: 0; display: flex; align-items: center; gap: 0.5rem; }}
-        h1 .dot {{ width: 8px; height: 8px; background: #10b981; border-radius: 50%; animation: pulse 2s infinite; }}
-        @keyframes pulse {{ 0%, 100% {{ opacity: 1; }} 50% {{ opacity: 0.5; }} }}
-        .user-bar {{ background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 4px; padding: 0.5rem 1rem; font-size: 0.85rem; color: #94a3b8; }}
-        .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; margin-bottom: 1rem; }}
-        .card {{ background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px; padding: 1rem; }}
-        .card h3 {{ margin-top: 0; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; margin-bottom: 0.75rem; }}
-        .kv {{ display: flex; justify-content: space-between; padding: 0.45rem 0; border-bottom: 1px solid #2a2a2a; font-size: 0.9rem; }}
-        .kv:last-child {{ border-bottom: none; }}
-        .kv .label {{ color: #94a3b8; }}
-        .kv .value {{ font-family: monospace; color: #e0e0e0; }}
-        .status-locked {{ color: #10b981; font-weight: 700; }}
-        .status-off {{ color: #ef4444; font-weight: 700; }}
-        .tier {{ display: flex; justify-content: space-between; padding: 0.45rem 0; border-bottom: 1px solid #2a2a2a; font-size: 0.9rem; }}
-        .tier:last-child {{ border-bottom: none; }}
-        .tier-a {{ color: #10b981; font-weight: 700; }}
-        .tier-b {{ color: #f59e0b; font-weight: 700; }}
-        .tier-c {{ color: #ef4444; font-weight: 700; }}
-        .task {{ display: flex; justify-content: space-between; padding: 0.5rem 0; border-bottom: 1px solid #2a2a2a; }}
-        .task:last-child {{ border-bottom: none; }}
-        .task-id {{ font-family: monospace; font-size: 0.8rem; color: #64748b; }}
-        .task-agent {{ font-size: 0.85rem; color: #cbd5e1; }}
-        .task-title {{ font-size: 0.9rem; }}
-        .status-badge {{ font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 4px; font-weight: 600; }}
-        .status-done {{ background: #10b981; color: white; }}
-        .status-in_progress {{ background: #f59e0b; color: white; }}
-        .status-pending {{ background: #64748b; color: white; }}
-        .status-failed {{ background: #ef4444; color: white; }}
-        .status-error {{ background: #ef4444; color: white; }}
-        .result-card {{ background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px; padding: 1rem; margin-top: 1rem; }}
-        .result-card pre {{ background: #000; padding: 1rem; border-radius: 4px; overflow-x: auto; font-size: 0.8rem; font-family: monospace; white-space: pre-wrap; }}
-        .refresh {{ margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem; }}
-        .btn {{ background: #3b82f6; color: white; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; font-weight: 600; text-decoration: none; }}
-        .btn:hover {{ background: #2563eb; }}
-        .btn.secondary {{ background: #2a2a2a; }}
-        .empty {{ color: #64748b; font-style: italic; }}
-        .logout {{ color: #94a3b8; text-decoration: none; font-size: 0.85rem; }}
-        .logout:hover {{ color: #e0e0e0; }}
-        .mono {{ font-family: monospace; font-size: 0.85rem; }}
-        .small {{ font-size: 0.8rem; color: #94a3b8; }}
-        .ok {{ color: #10b981; }}
-        .cost-badge {{ display: inline-block; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.75rem; font-weight: 700; }}
-        .cost-ok {{ background: #10b981; color: white; }}
-        .cost-warn {{ background: #f59e0b; color: white; }}
-        .cost-bad {{ background: #ef4444; color: white; }}
-        .sparkline {{ display: flex; align-items: flex-end; gap: 2px; height: 40px; margin-top: 0.5rem; }}
-        .spark-bar {{ width: 6px; background: #3b82f6; border-radius: 2px; }}
-        .spark-bar.up {{ background: #10b981; }}
-        .spark-bar.down {{ background: #ef4444; }}
-        .spark-bar.idle {{ background: #2a2a2a; }}
-        .findings-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 0.5rem; }}
-        .finding-stat {{ background: #151515; border: 1px solid #2a2a2a; border-radius: 6px; padding: 0.75rem; text-align: center; }}
-        .finding-stat .num {{ font-size: 1.5rem; font-family: monospace; font-weight: 700; }}
-        .finding-stat .lbl {{ font-size: 0.7rem; color: #94a3b8; text-transform: uppercase; }}
-        .activity-item {{ display: flex; justify-content: space-between; padding: 0.45rem 0; border-bottom: 1px solid #2a2a2a; font-size: 0.85rem; }}
-        .activity-item:last-child {{ border-bottom: none; }}
-        .activity-time {{ color: #64748b; font-size: 0.75rem; }}
-        .activity-source {{ font-family: monospace; font-size: 0.75rem; }}
-        .source-voice {{ color: #10b981; }}
-        .source-debate {{ color: #f59e0b; }}
-        .source-dost {{ color: #3b82f6; }}
+        * {{{{ box-sizing: border-box; }}}}
+        body {{{{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #0f0f0f; color: #e0e0e0; }}}}
+        header {{{{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }}}}
+        h1 {{{{ font-size: 1.5rem; margin: 0; display: flex; align-items: center; gap: 0.5rem; }}}}
+        h1 .dot {{{{ width: 8px; height: 8px; background: #10b981; border-radius: 50%; animation: pulse 2s infinite; }}}}
+        @keyframes pulse {{{{ 0%, 100% {{{{ opacity: 1; }}}} 50% {{{{ opacity: 0.5; }}}} }}}}
+        .user-bar {{{{ background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 4px; padding: 0.5rem 1rem; font-size: 0.85rem; color: #94a3b8; }}}}
+        .grid {{{{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; margin-bottom: 1rem; }}}}
+        .card {{{{ background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px; padding: 1rem; }}}}
+        .card h3 {{{{ margin-top: 0; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; margin-bottom: 0.75rem; }}}}
+        .kv {{{{ display: flex; justify-content: space-between; padding: 0.45rem 0; border-bottom: 1px solid #2a2a2a; font-size: 0.9rem; }}}}
+        .kv:last-child {{{{ border-bottom: none; }}}}
+        .kv .label {{{{ color: #94a3b8; }}}}
+        .kv .value {{{{ font-family: monospace; color: #e0e0e0; }}}}
+        .status-locked {{{{ color: #10b981; font-weight: 700; }}}}
+        .status-off {{{{ color: #ef4444; font-weight: 700; }}}}
+        .tier {{{{ display: flex; justify-content: space-between; padding: 0.45rem 0; border-bottom: 1px solid #2a2a2a; font-size: 0.9rem; }}}}
+        .tier:last-child {{{{ border-bottom: none; }}}}
+        .tier-a {{{{ color: #10b981; font-weight: 700; }}}}
+        .tier-b {{{{ color: #f59e0b; font-weight: 700; }}}}
+        .tier-c {{{{ color: #ef4444; font-weight: 700; }}}}
+        .task {{{{ display: flex; justify-content: space-between; padding: 0.5rem 0; border-bottom: 1px solid #2a2a2a; }}}}
+        .task:last-child {{{{ border-bottom: none; }}}}
+        .task-id {{{{ font-family: monospace; font-size: 0.8rem; color: #64748b; }}}}
+        .task-agent {{{{ font-size: 0.85rem; color: #cbd5e1; }}}}
+        .task-title {{{{ font-size: 0.9rem; }}}}
+        .status-badge {{{{ font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 4px; font-weight: 600; }}}}
+        .status-done {{{{ background: #10b981; color: white; }}}}
+        .status-in_progress {{{{ background: #f59e0b; color: white; }}}}
+        .status-pending {{{{ background: #64748b; color: white; }}}}
+        .status-failed {{{{ background: #ef4444; color: white; }}}}
+        .status-error {{{{ background: #ef4444; color: white; }}}}
+        .result-card {{{{ background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px; padding: 1rem; margin-top: 1rem; }}}}
+        .result-card pre {{{{ background: #000; padding: 1rem; border-radius: 4px; overflow-x: auto; font-size: 0.8rem; font-family: monospace; white-space: pre-wrap; }}}}
+        .refresh {{{{ margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem; }}}}
+        .btn {{{{ background: #3b82f6; color: white; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; font-weight: 600; text-decoration: none; }}}}
+        .btn:hover {{{{ background: #2563eb; }}}}
+        .btn.secondary {{{{ background: #2a2a2a; }}}}
+        .empty {{{{ color: #64748b; font-style: italic; }}}}
+        .logout {{{{ color: #94a3b8; text-decoration: none; font-size: 0.85rem; }}}}
+        .logout:hover {{{{ color: #e0e0e0; }}}}
+        .mono {{{{ font-family: monospace; font-size: 0.85rem; }}}}
+        .small {{{{ font-size: 0.8rem; color: #94a3b8; }}}}
+        .ok {{{{ color: #10b981; }}}}
+        .cost-badge {{{{ display: inline-block; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.75rem; font-weight: 700; }}}}
+        .cost-ok {{{{ background: #10b981; color: white; }}}}
+        .cost-warn {{{{ background: #f59e0b; color: white; }}}}
+        .cost-bad {{{{ background: #ef4444; color: white; }}}}
+        .sparkline {{{{ display: flex; align-items: flex-end; gap: 2px; height: 40px; margin-top: 0.5rem; }}}}
+        .spark-bar {{{{ width: 6px; background: #3b82f6; border-radius: 2px; }}}}
+        .spark-bar.up {{{{ background: #10b981; }}}}
+        .spark-bar.down {{{{ background: #ef4444; }}}}
+        .spark-bar.idle {{{{ background: #2a2a2a; }}}}
+        .findings-grid {{{{ display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 0.5rem; }}}}
+        .finding-stat {{{{ background: #151515; border: 1px solid #2a2a2a; border-radius: 6px; padding: 0.75rem; text-align: center; }}}}
+        .finding-stat .num {{{{ font-size: 1.5rem; font-family: monospace; font-weight: 700; }}}}
+        .finding-stat .lbl {{{{ font-size: 0.7rem; color: #94a3b8; text-transform: uppercase; }}}}
+        .activity-item {{{{ display: flex; justify-content: space-between; padding: 0.45rem 0; border-bottom: 1px solid #2a2a2a; font-size: 0.85rem; }}}}
+        .activity-item:last-child {{{{ border-bottom: none; }}}}
+        .activity-time {{{{ color: #64748b; font-size: 0.75rem; }}}}
+        .activity-source {{{{ font-family: monospace; font-size: 0.75rem; }}}}
+        .source-voice {{{{ color: #10b981; }}}}
+        .source-debate {{{{ color: #f59e0b; }}}}
+        .source-dost {{{{ color: #3b82f6; }}}}
         /* Activity feed panel */
-        .activity-feed {{ display: grid; gap: 0.5rem; }}
-        .activity-item {{ display: flex; justify-content: space-between; align-items: baseline; padding: 0.5rem 0.75rem; border: 1px solid #2a2a2a; border-radius: 6px; background: #151515; font-size: 0.85rem; }}
-        .activity-item:hover {{ border-color: #3b82f6; }}
-        .activity-item .act-time {{ color: #64748b; font-size: 0.75rem; font-family: monospace; }}
-        .activity-item .act-actor {{ color: #cbd5e1; font-size: 0.8rem; }}
-        .activity-item .act-action {{ color: #e0e0e0; font-weight: 600; }}
-        .activity-item .act-target {{ color: #94a3b8; font-size: 0.8rem; }}
-        .activity-item .act-type {{ font-size: 0.7rem; padding: 0.1rem 0.45rem; border-radius: 4px; font-weight: 700; text-transform: uppercase; }}
-        .activity-type-dispatch {{ background: #3b82f6; color: white; }}
-        .activity-type-debate {{ background: #f59e0b; color: white; }}
-        .activity-type-finding {{ background: #10b981; color: white; }}
-        .activity-type-cost-alert {{ background: #ef4444; color: white; }}
-        .activity-type-system {{ background: #8b5cf6; color: white; }}
-        .activity-legend {{ display: flex; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.5rem; font-size: 0.75rem; color: #94a3b8; }}
-        .activity-legend .leg {{ display: flex; align-items: center; gap: 0.3rem; }}
-        .activity-breakdown {{ display: flex; gap: 0.75rem; flex-wrap: wrap; margin-top: 0.5rem; }}
-        .activity-breakdown .stat {{ background: #151515; border: 1px solid #2a2a2a; border-radius: 6px; padding: 0.6rem 0.9rem; text-align: center; }}
-        .activity-breakdown .stat .num {{ font-size: 1.3rem; font-family: monospace; font-weight: 700; }}
-        .activity-breakdown .stat .lbl {{ font-size: 0.68rem; color: #94a3b8; text-transform: uppercase; }}
-        .activity-empty {{ color: #64748b; font-style: italic; text-align: center; padding: 1rem; }}
-        .findings-panel {{ margin-top: 0.75rem; }}
-        .finding-status {{ display: inline-block; font-size: 0.7rem; padding: 0.1rem 0.4rem; border-radius: 4px; font-weight: 600; text-transform: uppercase; }}
-        .finding-confirmed {{ background: #10b981; color: white; }}
-        .finding-contested {{ background: #f59e0b; color: white; }}
-        .finding-pending {{ background: #64748b; color: white; }}
-        .finding-skipped {{ background: #94a3b8; color: white; }}
-        .findings-panel .finding-item {{ display: flex; justify-content: space-between; padding: 0.45rem 0; border-bottom: 1px solid #2a2a2a; font-size: 0.85rem; }}
-        .findings-panel .finding-item:last-child {{ border-bottom: none; }}
-        .findings-panel .finding-claim {{ font-family: monospace; font-size: 0.8rem; color: #cbd5e1; max-width: 420px; }}
-        .findings-panel .finding-agent {{ color: #94a3b8; font-size: 0.75rem; }}
-        .findings-panel .finding-date {{ color: #64748b; font-size: 0.75rem; font-family: monospace; }}
-        .findings-panel .agent-breakdown {{ display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.5rem; }}
-        .findings-panel .agent-chip {{ background: #151515; border: 1px solid #2a2a2a; border-radius: 4px; padding: 0.3rem 0.6rem; font-size: 0.75rem; color: #cbd5e1; }}
-        .findings-panel .tier-c-review {{ border: 1px solid #ef4444; background: #2a0a0a; border-radius: 6px; padding: 0.75rem; margin-top: 0.75rem; }}
-        .findings-panel .tier-c-title {{ color: #ef4444; font-weight: 700; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.5rem; }}
-        .findings-panel .tier-c-item {{ display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid #3a1a1a; font-size: 0.85rem; }}
-        .findings-panel .tier-c-item:last-child {{ border-bottom: none; }}
-        .cost-panel {{ background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px; padding: 1rem; }}
-        .cost-per-agent {{ width: 100%; border-collapse: collapse; font-size: 0.85rem; }}
-        .cost-per-agent th, .cost-per-agent td {{ padding: 0.4rem 0.6rem; text-align: left; border-bottom: 1px solid #2a2a2a; }}
-        .cost-per-agent th {{ color: #94a3b8; font-size: 0.7rem; text-transform: uppercase; }}
-        .cost-per-agent tr:last-child td {{ border-bottom: none; }}
-        .cost-trend {{ display: flex; gap: 1rem; }}
-        .cost-trend .stat {{ background: #151515; border: 1px solid #2a2a2a; border-radius: 6px; padding: 0.75rem; flex: 1; }}
-        .cost-trend .stat .num {{ font-size: 1.25rem; font-family: monospace; font-weight: 700; }}
-        .cost-trend .stat .lbl {{ font-size: 0.7rem; color: #94a3b8; text-transform: uppercase; }}
-        .chart-container {{ position: relative; height: 200px; margin-bottom: 1rem; }}
-        .chart-title {{ font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; margin-bottom: 0.5rem; }}
-        .chart-canvas {{ width: 100%; height: 200px; }}
+        .activity-feed {{{{ display: grid; gap: 0.5rem; }}}}
+        .activity-item {{{{ display: flex; justify-content: space-between; align-items: baseline; padding: 0.5rem 0.75rem; border: 1px solid #2a2a2a; border-radius: 6px; background: #151515; font-size: 0.85rem; }}}}
+        .activity-item:hover {{{{ border-color: #3b82f6; }}}}
+        .activity-item .act-time {{{{ color: #64748b; font-size: 0.75rem; font-family: monospace; }}}}
+        .activity-item .act-actor {{{{ color: #cbd5e1; font-size: 0.8rem; }}}}
+        .activity-item .act-action {{{{ color: #e0e0e0; font-weight: 600; }}}}
+        .activity-item .act-target {{{{ color: #94a3b8; font-size: 0.8rem; }}}}
+        .activity-item .act-type {{{{ font-size: 0.7rem; padding: 0.1rem 0.45rem; border-radius: 4px; font-weight: 700; text-transform: uppercase; }}}}
+        .activity-type-dispatch {{{{ background: #3b82f6; color: white; }}}}
+        .activity-type-debate {{{{ background: #f59e0b; color: white; }}}}
+        .activity-type-finding {{{{ background: #10b981; color: white; }}}}
+        .activity-type-cost-alert {{{{ background: #ef4444; color: white; }}}}
+        .activity-type-system {{{{ background: #8b5cf6; color: white; }}}}
+        .activity-legend {{{{ display: flex; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.5rem; font-size: 0.75rem; color: #94a3b8; }}}}
+        .activity-legend .leg {{{{ display: flex; align-items: center; gap: 0.3rem; }}}}
+        .activity-breakdown {{{{ display: flex; gap: 0.75rem; flex-wrap: wrap; margin-top: 0.5rem; }}}}
+        .activity-breakdown .stat {{{{ background: #151515; border: 1px solid #2a2a2a; border-radius: 6px; padding: 0.6rem 0.9rem; text-align: center; }}}}
+        .activity-breakdown .stat .num {{{{ font-size: 1.3rem; font-family: monospace; font-weight: 700; }}}}
+        .activity-breakdown .stat .lbl {{{{ font-size: 0.68rem; color: #94a3b8; text-transform: uppercase; }}}}
+        .activity-empty {{{{ color: #64748b; font-style: italic; text-align: center; padding: 1rem; }}}}
+        .findings-panel {{{{ margin-top: 0.75rem; }}}}
+        .finding-status {{{{ display: inline-block; font-size: 0.7rem; padding: 0.1rem 0.4rem; border-radius: 4px; font-weight: 600; text-transform: uppercase; }}}}
+        .finding-confirmed {{{{ background: #10b981; color: white; }}}}
+        .finding-contested {{{{ background: #f59e0b; color: white; }}}}
+        .finding-pending {{{{ background: #64748b; color: white; }}}}
+        .finding-skipped {{{{ background: #94a3b8; color: white; }}}}
+        .findings-panel .finding-item {{{{ display: flex; justify-content: space-between; padding: 0.45rem 0; border-bottom: 1px solid #2a2a2a; font-size: 0.85rem; }}}}
+        .findings-panel .finding-item:last-child {{{{ border-bottom: none; }}}}
+        .findings-panel .finding-claim {{{{ font-family: monospace; font-size: 0.8rem; color: #cbd5e1; max-width: 420px; }}}}
+        .findings-panel .finding-agent {{{{ color: #94a3b8; font-size: 0.75rem; }}}}
+        .findings-panel .finding-date {{{{ color: #64748b; font-size: 0.75rem; font-family: monospace; }}}}
+        .findings-panel .agent-breakdown {{{{ display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.5rem; }}}}
+        .findings-panel .agent-chip {{{{ background: #151515; border: 1px solid #2a2a2a; border-radius: 4px; padding: 0.3rem 0.6rem; font-size: 0.75rem; color: #cbd5e1; }}}}
+        .findings-panel .tier-c-review {{{{ border: 1px solid #ef4444; background: #2a0a0a; border-radius: 6px; padding: 0.75rem; margin-top: 0.75rem; }}}}
+        .findings-panel .tier-c-title {{{{ color: #ef4444; font-weight: 700; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.5rem; }}}}
+        .findings-panel .tier-c-item {{{{ display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid #3a1a1a; font-size: 0.85rem; }}}}
+        .findings-panel .tier-c-item:last-child {{{{ border-bottom: none; }}}}
+        .cost-panel {{{{ background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px; padding: 1rem; }}}}
+        .cost-per-agent {{{{ width: 100%; border-collapse: collapse; font-size: 0.85rem; }}}}
+        .cost-per-agent th, .cost-per-agent td {{{{ padding: 0.4rem 0.6rem; text-align: left; border-bottom: 1px solid #2a2a2a; }}}}
+        .cost-per-agent th {{{{ color: #94a3b8; font-size: 0.7rem; text-transform: uppercase; }}}}
+        .cost-per-agent tr:last-child td {{{{ border-bottom: none; }}}}
+        .cost-trend {{{{ display: flex; gap: 1rem; }}}}
+        .cost-trend .stat {{{{ background: #151515; border: 1px solid #2a2a2a; border-radius: 6px; padding: 0.75rem; flex: 1; }}}}
+        .cost-trend .stat .num {{{{ font-size: 1.25rem; font-family: monospace; font-weight: 700; }}}}
+        .cost-trend .stat .lbl {{{{ font-size: 0.7rem; color: #94a3b8; text-transform: uppercase; }}}}
+        .chart-container {{{{ position: relative; height: 200px; margin-bottom: 1rem; }}}}
+        .chart-title {{{{ font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; margin-bottom: 0.5rem; }}}}
+        .chart-canvas {{{{ width: 100%; height: 200px; }}}}
     </style>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
@@ -1330,28 +1330,28 @@ DASHBOARD_PUBLIC_TEMPLATE = """<!DOCTYPE html>
 
     <div class="card">
         <h3>🔒 Kill Switch</h3>
-        <div class="kv"><span class="label">Verdict</span><span class="value status-locked">{kill_verdict}</span></div>
-        <div class="kv"><span class="label">Live orders allowed</span><span class="value status-off">{kill_live}</span></div>
+        <div class="kv"><span class="label">Verdict</span><span class="value status-locked">{{kill_verdict}}</span></div>
+        <div class="kv"><span class="label">Live orders allowed</span><span class="value status-off">{{kill_live}}</span></div>
         <div class="kv"><span class="label">Mode</span><span class="value">Paper-only · Tier C human-only · No live orders</span></div>
     </div>
 
     <div class="grid">
         <div class="card">
             <h3>📊 Fleet Status (JEV)</h3>
-            <div class="kv"><span class="label">Tasks created (cycle)</span><span class="value mono">{jev_created}</span></div>
-            <div class="kv"><span class="label">Tasks done (cycle)</span><span class="value mono">{jev_done}</span></div>
-            <div class="kv"><span class="label">Completion rate</span><span class="value mono">{completion_rate}%</span></div>
-            <div class="kv"><span class="label">Error rate</span><span class="value mono">{error_rate}%</span></div>
-            <div class="kv"><span class="label">Calls today</span><span class="value mono">{calls_today}</span></div>
-            <div class="kv"><span class="label">Tasks per min</span><span class="value mono">{tasks_per_min}</span></div>
+            <div class="kv"><span class="label">Tasks created (cycle)</span><span class="value mono">{{jev_created}}</span></div>
+            <div class="kv"><span class="label">Tasks done (cycle)</span><span class="value mono">{{jev_done}}</span></div>
+            <div class="kv"><span class="label">Completion rate</span><span class="value mono">{{completion_rate}}%</span></div>
+            <div class="kv"><span class="label">Error rate</span><span class="value mono">{{error_rate}}%</span></div>
+            <div class="kv"><span class="label">Calls today</span><span class="value mono">{{calls_today}}</span></div>
+            <div class="kv"><span class="label">Tasks per min</span><span class="value mono">{{tasks_per_min}}</span></div>
         </div>
         <div class="card">
             <h3>🎯 Autonomy Tiers</h3>
-            <div class="tier"><span class="label">Tier A — autonomous</span><span class="value tier-a">{tier_a}</span></div>
-            <div class="tier"><span class="label">Tier B — gated</span><span class="value tier-b">{tier_b}</span></div>
-            <div class="tier"><span class="label">Tier C — human-only</span><span class="value tier-c">{tier_c}</span></div>
-            <div class="kv"><span class="label">Provider pools available</span><span class="value mono ok">{pools_available}/{pools_total}</span></div>
-            <div class="kv"><span class="label">Free-tier headroom</span><span class="value mono">{headroom_pct}%</span></div>
+            <div class="tier"><span class="label">Tier A — autonomous</span><span class="value tier-a">{{tier_a}}</span></div>
+            <div class="tier"><span class="label">Tier B — gated</span><span class="value tier-b">{{tier_b}}</span></div>
+            <div class="tier"><span class="label">Tier C — human-only</span><span class="value tier-c">{{tier_c}}</span></div>
+            <div class="kv"><span class="label">Provider pools available</span><span class="value mono ok">{{pools_available}}/{{pools_total}}</span></div>
+            <div class="kv"><span class="label">Free-tier headroom</span><span class="value mono">{{headroom_pct}}%</span></div>
         </div>
         <div class="card cost-panel">
             <h3>💰 Cost (Today)</h3>
@@ -1359,42 +1359,42 @@ DASHBOARD_PUBLIC_TEMPLATE = """<!DOCTYPE html>
                 <h4 style="margin:0 0 0.5rem 0;font-size:0.8rem;color:#94a3b8;text-transform:uppercase;">Per Agent</h4>
                 <table class="cost-per-agent">
                     <thead><tr><th>Agent</th><th>Cost units</th></tr></thead>
-                    <tbody>{cost_per_agent_rows}</tbody>
+                    <tbody>{{cost_per_agent_rows}}</tbody>
                 </table>
             </div>
             <div class="cost-section">
                 <h4 style="margin:0 0 0.5rem 0;font-size:0.8rem;color:#94a3b8;text-transform:uppercase;">Per Task Type</h4>
                 <table class="cost-per-agent">
                     <thead><tr><th>Type</th><th>Cost units</th></tr></thead>
-                    <tbody>{cost_per_type_rows}</tbody>
+                    <tbody>{{cost_per_type_rows}}</tbody>
                 </table>
             </div>
             <div class="cost-trend">
-                {trend_html}
-                <div class="kv"><span class="label">Headroom remaining</span><span class="value mono">{cost_headroom_pct}%</span></div>
+                {{trend_html}}
+                <div class="kv"><span class="label">Headroom remaining</span><span class="value mono">{{cost_headroom_pct}}%</span></div>
             </div>
         </div>
         <div class="card">
             <h3>🧩 Findings</h3>
             <div class="findings-grid">
-                <div class="finding-stat"><div class="num">{findings_confirmed}</div><div class="lbl">Confirmed</div></div>
-                <div class="finding-stat"><div class="num">{findings_contested}</div><div class="lbl">Contested</div></div>
-                <div class="finding-stat"><div class="num">{findings_pending}</div><div class="lbl">Pending</div></div>
-                <div class="finding-stat"><div class="num">{findings_skipped}</div><div class="lbl">Skipped</div></div>
-                <div class="finding-stat"><div class="num">{findings_total}</div><div class="lbl">Total</div></div>
+                <div class="finding-stat"><div class="num">{{findings_confirmed}}</div><div class="lbl">Confirmed</div></div>
+                <div class="finding-stat"><div class="num">{{findings_contested}}</div><div class="lbl">Contested</div></div>
+                <div class="finding-stat"><div class="num">{{findings_pending}}</div><div class="lbl">Pending</div></div>
+                <div class="finding-stat"><div class="num">{{findings_skipped}}</div><div class="lbl">Skipped</div></div>
+                <div class="finding-stat"><div class="num">{{findings_total}}</div><div class="lbl">Total</div></div>
             </div>
             <div class="findings-panel">
                 <div style="margin-bottom:0.5rem;">
                     <strong style="color:#94a3b8;font-size:0.75rem;text-transform:uppercase">Recent findings (last 10)</strong>
-                    {findings_recent_html}
+                    {{findings_recent_html}}
                 </div>
                 <div style="margin-top:0.75rem;margin-bottom:0.5rem;">
                     <strong style="color:#94a3b8;font-size:0.75rem;text-transform:uppercase">By agent</strong>
-                    <div class="agent-breakdown">{findings_agent_html}</div>
+                    <div class="agent-breakdown">{{findings_agent_html}}</div>
                 </div>
                 <div class="tier-c-review">
                     <div class="tier-c-title">⚠ Pending — needs Tier C review</div>
-                    {findings_tier_c_html}
+                    {{findings_tier_c_html}}
                 </div>
             </div>
         </div>
@@ -1415,7 +1415,7 @@ DASHBOARD_PUBLIC_TEMPLATE = """<!DOCTYPE html>
 
         <div class="card">
             <h3>🏥 Provider Health</h3>
-            <div class="sparkline">{sparkline_html}</div>
+            <div class="sparkline">{{sparkline_html}}</div>
             <div class="small">Green = up · Red = down/cooling · Dim = idle</div>
         </div>
         <div class="card">
@@ -1434,17 +1434,17 @@ DASHBOARD_PUBLIC_TEMPLATE = """<!DOCTYPE html>
         </div>
         <div class="card">
             <h3>🧩 Recent Dost Tasks (last 10)</h3>
-            {dost_rows}
+            {{dost_rows}}
         </div>
 
     <div class="card">
         <h3>📡 Activity Feed</h3>
-        {activity_panel}
+        {{activity_panel}}
     </div>
 
     <div class="card">
         <h3>🧠 Synthesis Panel</h3>
-        <div class="result-card"><pre>{synthesis}</pre></div>
+        <div class="result-card"><pre>{{synthesis}}</pre></div>
         <p class="small">Last synthesis line from jev-dispatcher.log.</p>
     </div>
 
@@ -1452,164 +1452,164 @@ DASHBOARD_PUBLIC_TEMPLATE = """<!DOCTYPE html>
         JEV Dispatcher — Paper-only · Kill switch LOCKED · Free tiers only · http://localhost:8083/dashboard
     </p>
     <script>
-        function quickDispatch(prompt) {{
+        function quickDispatch(prompt) {{{{
             document.getElementById('dispatch-prompt').value = prompt;
             document.getElementById('dispatch-form').dispatchEvent(new Event('submit'));
-        }}
-        document.getElementById('dispatch-form').addEventListener('submit', async (e) => {{
+        }}}}
+        document.getElementById('dispatch-form').addEventListener('submit', async (e) => {{{{
             e.preventDefault();
             const prompt = document.getElementById('dispatch-prompt').value;
             if (!prompt) return;
             const resultDiv = document.getElementById('dispatch-result');
             resultDiv.textContent = 'Dispatching...';
             resultDiv.style.color = '#f59e0b';
-            try {{
-                const resp = await fetch('/api/task', {{
+            try {{{{
+                const resp = await fetch('/api/task', {{{{
                     method: 'POST',
-                    headers: {{ 'Content-Type': 'application/x-www-form-urlencoded' }},
+                    headers: {{{{ 'Content-Type': 'application/x-www-form-urlencoded' }}}},
                     body: 'prompt=' + encodeURIComponent(prompt) + '&agent_id=strategy-advisor&priority=normal'
-                }});
+                }}}});
                 const data = await resp.json();
-                if (data.ok) {{
+                if (data.ok) {{{{
                     resultDiv.textContent = 'Dispatched: ' + data.task_id;
                     resultDiv.style.color = '#10b981';
-                }} else {{
+                }}}} else {{{{
                     resultDiv.textContent = 'Error: ' + (data.error || 'unknown');
                     resultDiv.style.color = '#ef4444';
-                }}
-            }} catch (err) {{
+                }}}}
+            }}}} catch (err) {{{{
                 resultDiv.textContent = 'Error: ' + err.message;
                 resultDiv.style.color = '#ef4444';
-            }}
-        }});
+            }}}}
+        }}}});
     </script>
 
     <script>
         // Chart.js charts
-        const charts = {};
+        const charts = {{}};
 
-        function initCharts() {
+        function initCharts() {{
             fetch('/metrics')
                 .then(r => r.json())
-                .then(data => {
-                    const jev = data.jev || {};
-                    const pools = data.provider_pools || {};
+                .then(data => {{
+                    const jev = data.jev || {{}};
+                    const pools = data.provider_pools || {{}};
 
                     // Completion rate chart
                     const completionCtx = document.getElementById('costChart');
-                    if (completionCtx && !charts.completion) {
-                        charts.completion = new Chart(completionCtx.getContext('2d'), {
+                    if (completionCtx && !charts.completion) {{
+                        charts.completion = new Chart(completionCtx.getContext('2d'), {{
                             type: 'gauge',
-                            data: {
+                            data: {{
                                 labels: ['Completion Rate'],
-                                datasets: [{
+                                datasets: [{{
                                     data: [Math.min(100, jev.completion_rate || 0)],
                                     backgroundColor: '#10b981',
                                     borderColor: '#ffffff',
                                     borderWidth: 2
                                 ]
-                            },
-                            options: {
+                            }},
+                            options: {{
                                 responsive: true,
                                 maintainAspectRatio: false,
-                                plugins: {
-                                    legend: { display: false },
-                                    title: { display: true, text: 'Task Completion Rate (%)' }
-                                },
-                                scales: {
-                                    y: { min: 0, max: 100 }
-                                }
-                            }
-                        });
-                    }
+                                plugins: {{
+                                    legend: {{ display: false }},
+                                    title: {{ display: true, text: 'Task Completion Rate (%)' }}
+                                }},
+                                scales: {{
+                                    y: {{ min: 0, max: 100 }}
+                                }}
+                            }}
+                        }});
+                    }}
 
                     // Error rate chart
                     const errorCtx = document.getElementById('errorChart');
-                    if (errorCtx && !charts.error) {
-                        charts.error = new Chart(errorCtx.getContext('2d'), {
+                    if (errorCtx && !charts.error) {{
+                        charts.error = new Chart(errorCtx.getContext('2d'), {{
                             type: 'gauge',
-                            data: {
+                            data: {{
                                 labels: ['Error Rate (%)'],
-                                datasets: [{
+                                datasets: [{{
                                     data: [Math.min(100, jev.error_rate || 0)],
                                     backgroundColor: '#ef4444',
                                     borderColor: '#ffffff',
                                     borderWidth: 2
                                 ]
-                            },
-                            options: {
+                            }},
+                            options: {{
                                 responsive: true,
                                 maintainAspectRatio: false,
-                                plugins: {
-                                    legend: { display: false },
-                                    title: { display: true, text: 'Error Rate (%)' }
-                                },
-                                scales: {
-                                    y: { min: 0, max: 100 }
-                                }
-                            }
-                        });
-                    }
+                                plugins: {{
+                                    legend: {{ display: false }},
+                                    title: {{ display: true, text: 'Error Rate (%)' }}
+                                }},
+                                scales: {{
+                                    y: {{ min: 0, max: 100 }}
+                                }}
+                            }}
+                        }});
+                    }}
 
                     // Pool status chart
                     const poolCtx = document.getElementById('poolChart');
-                    if (poolCtx && pools && !charts.pools) {
+                    if (poolCtx && pools && !charts.pools) {{
                         const poolNames = Object.keys(pools);
                         const poolValues = pools.map(p => p.available ? 1 : (p.cooldown_remaining > 0 ? 0.5 : 0));
-                        charts.pools = new Chart(poolCtx.getContext('2d'), {
+                        charts.pools = new Chart(poolCtx.getContext('2d'), {{
                             type: 'bar',
-                            data: {
+                            data: {{
                                 labels: poolNames.map(p => p.split('_')[0]),
-                                datasets: [{
+                                datasets: [{{
                                     label: 'Pool Status',
                                     data: poolValues,
                                     backgroundColor: poolValues.map(v => v === 1 ? '#10b981' : (v === 0.5 ? '#f59e0b' : '#ef4444'))
-                                }]
-                            },
-                            options: {
+                                }}]
+                            }},
+                            options: {{
                                 responsive: true,
-                                scales: {
-                                    y: { min: 0, max: 1, ticks: { display: false } }
-                                },
-                                plugins: {
-                                    legend: { display: false },
-                                    title: { display: true, text: 'Provider Pool Status' }
-                                }
-                            }
-                        });
-                    }
-                })
+                                scales: {{
+                                    y: {{ min: 0, max: 1, ticks: {{ display: false }} }}
+                                }},
+                                plugins: {{
+                                    legend: {{ display: false }},
+                                    title: {{ display: true, text: 'Provider Pool Status' }}
+                                }}
+                            }}
+                        }});
+                    }}
+                }})
                 .catch(err => console.error('Failed to load metrics:', err));
-        }
+        }}
 
         // Initialize charts when page loads
         document.addEventListener('DOMContentLoaded', initCharts);
         // Refresh charts every 30 seconds
-        setInterval(() => {
+        setInterval(() => {{
             fetch('/metrics')
                 .then(r => r.json())
-                .then(data => {
-                    const jev = data.jev || {};
-                    const pools = data.provider_pools || {};
+                .then(data => {{
+                    const jev = data.jev || {{}};
+                    const pools = data.provider_pools || {{}};
 
-                    if (charts.completion) {
+                    if (charts.completion) {{
                         charts.completion.data.datasets[0].data = [Math.min(100, jev.completion_rate || 0)];
                         charts.completion.update();
-                    }
+                    }}
 
-                    if (charts.error) {
+                    if (charts.error) {{
                         charts.error.data.datasets[0].data = [Math.min(100, jev.error_rate || 0)];
                         charts.error.update();
-                    }
+                    }}
 
-                    if (charts.pools && pools) {
+                    if (charts.pools && pools) {{
                         const poolValues = pools.map(p => p.available ? 1 : (p.cooldown_remaining > 0 ? 0.5 : 0));
                         charts.pools.data.datasets[0].data = poolValues;
                         charts.pools.update();
-                    }
-                })
+                    }}
+                }})
                 .catch(err => console.error('Failed to load metrics:', err));
-        }, 30000);
+        }}, 30000);
     </script>
 </body>
 </html>"""
