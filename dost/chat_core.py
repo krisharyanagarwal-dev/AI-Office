@@ -332,7 +332,13 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class DostChatServer(ThreadingHTTPServer):
-    """ThreadingHTTPServer with Handler.STORE wired."""
+    """ThreadingHTTPServer with Handler.STORE wired.
+
+    allow_reuse_address lets rapid restarts rebind without hitting
+    "Address already in use" from a TIME_WAIT socket.
+    """
+
+    allow_reuse_address = True
 
     def __init__(self, server_address, handler_cls, store):
         handler_cls.STORE = store
