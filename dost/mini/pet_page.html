@@ -1,0 +1,642 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dost</title>
+<style>
+  :root {
+    --bg: #f6f3ee; --card: #ffffff; --ink: #2a2622; --muted: #8a8178;
+    --pet: #ffb86b; --pet-edge: #e89a4c; --me: #2f6fed; --me-ink: #ffffff;
+    --dost: #efe9e1; --line: #e6dfd6; --good: #3fae6a; --warn: #d9603b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #161412; --card: #201d1a; --ink: #f1ebe3; --muted: #9b9188;
+      --pet: #f2a25a; --pet-edge: #c97c38; --me: #4b82f0; --me-ink: #ffffff;
+      --dost: #2c2824; --line: #35302a; --good: #5cc684; --warn: #e97a57;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #161412; --card: #201d1a; --ink: #f1ebe3; --muted: #9b9188;
+    --pet: #f2a25a; --pet-edge: #c97c38; --me: #4b82f0; --me-ink: #ffffff;
+    --dost: #2c2824; --line: #35302a; --good: #5cc684; --warn: #e97a57;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex; justify-content: center;
+  }
+  .app {
+    width: 100%; max-width: 560px; height: 100%;
+    display: flex; flex-direction: column; background: var(--card);
+    border-left: 1px solid var(--line); border-right: 1px solid var(--line);
+  }
+  header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 14px; border-bottom: 1px solid var(--line);
+    flex-wrap: wrap;
+  }
+  .pet-wrap { position: relative; width: 84px; height: 84px; flex: 0 0 84px; }
+  .pet { width: 100%; height: 100%; transition: transform .3s ease; transform-origin: 50% 90%; }
+  .pet .body { fill: var(--pet); stroke: var(--pet-edge); stroke-width: 2; }
+  .pet .eye { fill: var(--ink); transform-origin: center; transform-box: fill-box; }
+  .pet .blush { fill: #ff7a7a; opacity: .35; }
+  .pet .mouth { fill: none; stroke: var(--ink); stroke-width: 2.5; stroke-linecap: round; }
+  .pet.idle { animation: bob 3.2s ease-in-out infinite; }
+  .pet.thinking { animation: wobble 1s ease-in-out infinite; }
+  .pet.happy { animation: hop .6s ease-out 1; }
+  .pet.sleepy .eye { transform: scaleY(.15); }
+  .pet .eye.blink { animation: blink 4.5s infinite; }
+  @keyframes bob { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
+  @keyframes wobble { 0%,100% { transform: rotate(-3deg); } 50% { transform: rotate(3deg); } }
+  @keyframes hop { 0% { transform: translateY(0); } 40% { transform: translateY(-12px); } 100% { transform: translateY(0); } }
+  @keyframes blink { 0%,94%,100% { transform: scaleY(1); } 97% { transform: scaleY(.1); } }
+  .who h1 { font-size: 20px; margin: 0; }
+  .who .status { color: var(--muted); font-size: 14px; }
+  .who .status b { color: var(--good); font-weight: 600; }
+  .controls { margin-left: auto; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  button.icon {
+    border: 1px solid var(--line); background: var(--dost); color: var(--ink);
+    width: 40px; height: 40px; border-radius: 12px; font-size: 18px; cursor: pointer;
+  }
+  button.icon[aria-pressed="true"] { background: var(--me); color: var(--me-ink); border-color: var(--me); }
+  button.icon:disabled { opacity: .4; cursor: not-allowed; }
+  #log {
+    flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px;
+  }
+  .msg { max-width: 82%; padding: 10px 14px; border-radius: 18px; word-wrap: break-word; }
+  .msg.you { align-self: flex-end; background: var(--me); color: var(--me-ink); border-bottom-right-radius: 6px; }
+  .msg.dost { align-self: flex-start; background: var(--dost); border-bottom-left-radius: 6px; }
+  .msg.sys { align-self: center; color: var(--muted); font-size: 14px; background: none; }
+  .msg.err { align-self: center; color: var(--warn); font-size: 14px; background: none; }
+  form {
+    display: flex; gap: 8px; padding: 12px 16px 16px; border-top: 1px solid var(--line);
+  }
+  input[type=text] {
+    flex: 1; min-width: 0; font: inherit; color: var(--ink); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 14px; padding: 10px 14px;
+  }
+  input[type=text]:focus { outline: 2px solid var(--me); outline-offset: -1px; }
+  .send {
+    border: none; background: var(--me); color: var(--me-ink); border-radius: 14px;
+    padding: 0 18px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  .send:disabled { opacity: .5; cursor: wait; }
+  select.brain {
+    height: 40px; max-width: 150px; border: 1px solid var(--line); background: var(--dost);
+    color: var(--ink); border-radius: 12px; padding: 0 8px; font: inherit; font-size: 13px; font-weight: 600;
+  }
+  .msg .tag { font-size: 12px; font-weight: 700; color: var(--muted); margin-bottom: 4px; }
+  .typing { display: none; align-self: flex-start; color: var(--muted); font-size: 14px; padding-left: 6px; }
+  .typing.show { display: block; }
+  .clear-btn {
+    background: none; border: none; color: var(--muted); font-size: 13px;
+    cursor: pointer; padding: 4px 8px; border-radius: 6px;
+  }
+  .clear-btn:hover { background: rgba(0,0,0,.06); color: var(--ink); }
+  .error-banner {
+    align-self: center; background: rgba(217, 96, 59, .12); color: var(--warn);
+    padding: 8px 12px; border-radius: 8px; font-size: 13px; margin-bottom: 8px;
+    max-width: 82%; text-align: center; border: 1px solid rgba(217, 96, 59, .3);
+  }
+  .retry-btn {
+    background: var(--me); color: var(--me-ink); border: none;
+    border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer; margin-left: 8px;
+  }
+  .retry-btn:hover { opacity: .9; }
+  @media (max-width: 380px) {
+    .pet-wrap { width: 64px; height: 64px; flex-basis: 64px; }
+    .who h1 { font-size: 18px; }
+    .controls { gap: 6px; }
+    .controls button.icon { width: 36px; height: 36px; font-size: 16px; }
+    select.brain { max-width: 130px; font-size: 12px; padding: 0 6px; }
+  }
+  @media (max-width: 500px) {
+    header { gap: 8px; padding: 10px 12px; }
+    .pet-wrap { width: 72px; height: 72px; flex-basis: 72px; }
+    .controls button.icon { width: 38px; height: 38px; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="pet-wrap">
+      <svg id="pet" class="pet idle" viewBox="0 0 100 100" aria-label="Dost, your pet">
+        <ellipse class="body" cx="50" cy="56" rx="38" ry="34"/>
+        <path class="body" d="M22 30 L30 12 L42 26 Z"/>
+        <path class="body" d="M78 30 L70 12 L58 26 Z"/>
+        <ellipse class="eye blink" cx="37" cy="52" rx="5.5" ry="6.5"/>
+        <ellipse class="eye blink" cx="63" cy="52" rx="5.5" ry="6.5"/>
+        <circle class="blush" cx="27" cy="63" r="5"/>
+        <circle class="blush" cx="73" cy="63" r="5"/>
+        <path id="mouth" class="mouth" d="M42 66 Q50 72 58 66"/>
+      </svg>
+    </div>
+    <div class="who">
+      <h1>Dost</h1>
+      <div class="status" id="status"><b>●</b> here with you</div>
+    </div>
+    <div class="controls">
+      <button class="icon clear-btn" id="clearBtn" title="New conversation">⌫</button>
+      <select id="brain" class="brain" title="Who answers" aria-label="Who answers">
+        <option value="dost">Dost</option>
+        <option value="openclaw">OpenClaw</option>
+        <option value="compare">Compare models</option>
+      </select>
+      <button class="icon" id="speakBtn" aria-pressed="true" title="Read replies aloud">🔊</button>
+      <button class="icon" id="micBtn" title="Talk to Dost">🎙️</button>
+    </div>
+  </header>
+
+  <div id="log" aria-live="polite"></div>
+  <div class="typing" id="typing">Dost is thinking…</div>
+
+  <form id="form" autocomplete="off">
+    <input type="text" id="input" placeholder="Text Dost…" maxlength="2000" aria-label="Message">
+    <button class="send" id="send" type="submit">Send</button>
+  </form>
+</div>
+
+<script>
+if (location.protocol === 'file:') { location.replace('http://127.0.0.1:8787/'); }
+(() => {
+  const log = document.getElementById('log');
+  const form = document.getElementById('form');
+  const input = document.getElementById('input');
+  const sendBtn = document.getElementById('send');
+  const micBtn = document.getElementById('micBtn');
+  const speakBtn = document.getElementById('speakBtn');
+  const clearBtn = document.getElementById('clearBtn');
+  const pet = document.getElementById('pet');
+  const mouth = document.getElementById('mouth');
+  const statusEl = document.getElementById('status');
+  const typing = document.getElementById('typing');
+
+  let busy = false;
+  let abortController = null;
+  let lastUserMsgEl = null; // for retry / branching
+  const brainSel = document.getElementById('brain');
+  let backend = 'dost';
+  let modelList = [];
+  const SESSION_ID = 'default';
+  let branchId = 'main';
+  const HISTORY_KEY = 'dost:v1:messages';
+  try { backend = localStorage.getItem('dostBackend') || 'dost'; } catch (e) {}
+  try {
+    const saved = localStorage.getItem('dostBranch');
+    if (saved) branchId = saved;
+  } catch (e) {}
+
+  function labelOf(id) {
+    const m = modelList.find(x => x.id === id);
+    return m ? m.label : id;
+  }
+
+  async function loadModels() {
+    try {
+      const r = await fetch('/api/models');
+      modelList = (await r.json()).models || [];
+    } catch (e) { modelList = []; }
+    const groups = {};
+    modelList.forEach(m => { (groups[m.provider] = groups[m.provider] || []).push(m); });
+    Object.keys(groups).forEach(p => {
+      const g = document.createElement('optgroup');
+      g.label = p;
+      groups[p].forEach(m => {
+        const o = document.createElement('option');
+        o.value = m.id; o.textContent = m.label;
+        g.appendChild(o);
+      });
+      brainSel.appendChild(g);
+    });
+    if (![...brainSel.options].some(o => o.value === backend)) backend = 'dost';
+    brainSel.value = backend;
+  }
+  brainSel.addEventListener('change', () => {
+    backend = brainSel.value;
+    try { localStorage.setItem('dostBackend', backend); } catch (e) {}
+    const name = brainSel.options[brainSel.selectedIndex].textContent;
+    addMsg(backend === 'compare' ? 'Now asking several models at once.' : 'Now talking to ' + name + '.', 'sys');
+  });
+  loadModels();
+  fetch('/api/voice-status')
+    .then(r => r.json())
+    .then(d => {
+      if (!d.stt) {
+        micBtn.style.display = 'none';
+      }
+    })
+    .catch(() => {});
+
+  // ---- Markdown rendering (escape -> parse -> sanitize) ----
+  function escapeHtml(text) {
+    return text.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"}[c]));
+  }
+
+  function renderMarkdown(text) {
+    // Escape HTML first, then convert safe markdown
+    let html = escapeHtml(text);
+    // Code blocks (triple backtick, optional language)
+    html = html.replace(/```([\w-]*)\n([\s\S]*?)```/g, (_, lang, code) => {
+      const langClass = lang ? ` language-${escapeHtml(lang)}` : '';
+      return `<pre><code class="${langClass}">${escapeHtml(code)}</code></pre>`;
+    });
+    // Inline code
+    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+    // Bold
+    html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    // Italic
+    html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+    // Newlines
+    html = html.replace(/\n/g, '<br>');
+    return html;
+  }
+
+  function addMsg(text, who, html) {
+    const el = document.createElement('div');
+    el.className = 'msg ' + who;
+    if (html) {
+      el.innerHTML = html;
+    } else {
+      el.textContent = text;
+    }
+    // Retry button on assistant messages
+    if (who === 'dost') {
+      const retry = document.createElement('button');
+      retry.className = 'retry-btn';
+      retry.textContent = 'Retry';
+      retry.title = 'Retry this reply as a new branch';
+      retry.onclick = (ev) => {
+        ev.stopPropagation();
+        // Find the preceding user message
+        let prev = el.previousElementSibling;
+        let userText = '';
+        while (prev) {
+          if (prev.classList.contains('msg') && prev.classList.contains('you')) {
+            userText = prev.textContent;
+            break;
+          }
+          prev = prev.previousElementSibling;
+        }
+        if (userText) {
+          const newBranch = 'branch-' + Date.now().toString(36).slice(-4);
+          branchId = newBranch;
+          try { localStorage.setItem('dostBranch', newBranch); } catch (e) {}
+          setStatus('<b>●</b> retrying on new branch…');
+          ask(userText);
+        }
+      };
+      el.appendChild(retry);
+    }
+    log.appendChild(el);
+    log.scrollTop = log.scrollHeight;
+    return el;
+  }
+
+  function speak(text) {
+    if (!('speechSynthesis' in window)) return;
+    if (speakBtn.getAttribute('aria-pressed') === 'false') return;
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text.slice(0, 1200));
+    u.rate = 1.02; u.pitch = 1.05;
+    u.onstart = () => setMood('happy');
+    u.onend = () => setMood('idle');
+    window.speechSynthesis.speak(u);
+  }
+
+  function addModelMsg(label, text, ms) {
+    const el = addMsg('', 'dost');
+    const tag = document.createElement('div');
+    tag.className = 'tag';
+    tag.textContent = label + (ms ? ' · ' + (ms / 1000).toFixed(1) + 's' : '');
+    const body = document.createElement('div');
+    body.textContent = text;
+    el.appendChild(tag); el.appendChild(body);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function setMood(mood) {
+    pet.setAttribute('class', 'pet ' + mood);
+    if (mood === 'thinking') { mouth.setAttribute('d', 'M43 68 L57 68'); }
+    else if (mood === 'happy') { mouth.setAttribute('d', 'M40 64 Q50 78 60 64'); }
+    else if (mood === 'sleepy') { mouth.setAttribute('d', 'M44 68 Q50 66 56 68'); }
+    else { mouth.setAttribute('d', 'M42 66 Q50 72 58 66'); }
+  }
+  function setStatus(html) { statusEl.innerHTML = html; }
+  function showError(msg, retryFn) {
+    const banner = document.createElement('div');
+    banner.className = 'error-banner';
+    banner.textContent = msg;
+    if (retryFn) {
+      const btn = document.createElement('button');
+      btn.className = 'retry-btn';
+      btn.textContent = 'Retry';
+      btn.onclick = () => { banner.remove(); retryFn(); };
+      banner.append(btn);
+    }
+    log.appendChild(banner);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  // ---- Persistence ----
+  function loadHistory() {
+    try {
+      const raw = localStorage.getItem(HISTORY_KEY);
+      if (!raw) return [];
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr : [];
+    } catch (e) { return []; }
+  }
+  function saveHistory(messages) {
+    try { localStorage.setItem(HISTORY_KEY, JSON.stringify(messages)); } catch (e) {}
+  }
+  function renderHistory() {
+    const messages = loadHistory();
+    log.replaceChildren();
+    messages.forEach(m => {
+      if (m.role === 'user') addMsg(m.content, 'you');
+      else if (m.role === 'assistant') addMsg(m.content, 'dost', true);
+    });
+  }
+  renderHistory();
+
+  // ---- Shortcuts ----
+  function parseShortcut(text) {
+    const m = text.match(/^ask\s+([^:]+):\s*([\s\S]+)$/i);
+    if (!m) return null;
+    const who = m[1].trim().toLowerCase();
+    if (who === 'all' || who === 'everyone' || who === 'models') return {backend: 'compare', text: m[2]};
+    const hit = modelList.find(x => x.label.toLowerCase().includes(who) || x.id.toLowerCase().includes(who));
+    return hit ? {backend: hit.id, text: m[2]} : null;
+  }
+  const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const canSpeak = 'speechSynthesis' in window;
+  let rec = null;
+  let listening = false;
+
+  // ---- Streaming SSE ----
+  async function ask(text) {
+    if (busy || !text.trim()) return;
+    const sc = parseShortcut(text.trim());
+    const target = sc ? sc.backend : backend;
+    const prompt = sc ? sc.text : text;
+    busy = true; sendBtn.disabled = true;
+    abortController = new AbortController();
+
+    // Add user message to UI + history
+    lastUserMsgEl = addMsg(text, 'you');
+    const history = loadHistory();
+    history.push({role: 'user', content: text, ts: new Date().toISOString(), branch_id: branchId});
+    saveHistory(history);
+
+    typing.classList.add('show');
+    setMood('thinking');
+    setStatus('<b>●</b> ' + (target === 'compare' ? 'asking several models…' : 'thinking…'));
+
+    let fullReply = '';
+    let currentAssistantEl = null;
+
+    try {
+      const res = await fetch('/api/chat/stream', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({text: prompt, backend: target, session_id: SESSION_ID, branch_id: branchId}),
+        signal: abortController.signal,
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'request failed');
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, {stream: true});
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const evt = JSON.parse(line.slice(6));
+            if (evt.type === 'text' || evt.type === 'model') {
+              if (!currentAssistantEl) {
+                currentAssistantEl = document.createElement('div');
+                currentAssistantEl.className = 'msg dost';
+                if (evt.type === 'model' && evt.label) {
+                  const tag = document.createElement('div');
+                  tag.className = 'tag';
+                  tag.textContent = evt.label + (evt.ms ? ' · ' + (evt.ms / 1000).toFixed(1) + 's' : '');
+                  currentAssistantEl.appendChild(tag);
+                }
+                const body = document.createElement('div');
+                currentAssistantEl.appendChild(body);
+                log.insertBefore(currentAssistantEl, typing.nextSibling);
+                log.scrollTop = log.scrollHeight;
+              }
+              const bodyDiv = currentAssistantEl.querySelector('div:not(.tag)') || currentAssistantEl;
+              fullReply += evt.text;
+              bodyDiv.innerHTML = renderMarkdown(fullReply);
+              log.scrollTop = log.scrollHeight;
+            } else if (evt.type === 'compare') {
+              // compare renders all answers at once
+              (evt.answers || []).forEach(a => addModelMsg(a.label, a.error ? 'Failed: ' + a.error : a.reply, a.ms));
+              const first = (evt.answers || []).find(a => !a.error);
+              if (first) { fullReply = first.reply; currentAssistantEl = null; speak(first.reply); }
+            } else if (evt.event === 'error' || evt.type === 'error') {
+              throw new Error(evt.error || 'stream error');
+            }
+          } catch (e) { /* ignore malformed SSE lines */ }
+        }
+      }
+
+      // Finalize assistant message
+      if (currentAssistantEl && fullReply) {
+        speak(fullReply);
+        history.push({role: 'assistant', content: fullReply, ts: new Date().toISOString(), branch_id: branchId});
+        saveHistory(history);
+        setMood('happy');
+        setTimeout(() => setMood('idle'), 1200);
+      } else if (fullReply && !currentAssistantEl) {
+        // compare already rendered
+        history.push({role: 'assistant', content: fullReply, ts: new Date().toISOString(), branch_id: branchId});
+        saveHistory(history);
+      }
+    } catch (e) {
+      if (e.name === 'AbortError') {
+        setStatus('<b>●</b> stopped');
+        setMood('sleepy');
+      } else {
+        addMsg('Could not reach Dost: ' + e.message, 'err');
+        showError(e.message, () => ask(text));
+        setMood('sleepy');
+      }
+    } finally {
+      typing.classList.remove('show');
+      setStatus('<b>●</b> here with you');
+      busy = false; sendBtn.disabled = false;
+      abortController = null;
+    }
+  }
+
+  // ---- Fallback non-streaming (used if SSE fails) ----
+  async function askFallback(text) {
+    if (busy || !text.trim()) return;
+    const sc = parseShortcut(text.trim());
+    const target = sc ? sc.backend : backend;
+    const prompt = sc ? sc.text : text;
+    busy = true; sendBtn.disabled = true;
+    addMsg(text, 'you');
+    typing.classList.add('show');
+    setMood('thinking');
+    setStatus('<b>●</b> thinking…');
+    try {
+      const r = await fetch('/api/chat', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({text: prompt, backend: target, session_id: SESSION_ID, branch_id: branchId})
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || 'request failed');
+      if (target === 'compare') {
+        (data.answers || []).forEach(a => addModelMsg(a.label, a.error ? 'Failed: ' + a.error : a.reply, a.ms));
+        const first = (data.answers || []).find(a => !a.error);
+        if (first) speak(first.reply);
+      } else {
+        addMsg(data.reply, 'dost', true);
+        speak(data.reply);
+        const history = loadHistory();
+        history.push({role: 'assistant', content: data.reply, ts: new Date().toISOString(), branch_id: branchId});
+        saveHistory(history);
+      }
+      setMood('happy');
+      setTimeout(() => setMood('idle'), 1200);
+    } catch (e) {
+      addMsg('Could not reach Dost: ' + e.message, 'err');
+      showError(e.message, () => askFallback(text));
+      setMood('sleepy');
+    } finally {
+      typing.classList.remove('show');
+      setStatus('<b>●</b> here with you');
+      busy = false; sendBtn.disabled = false;
+    }
+  }
+
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const t = input.value; input.value = '';
+    ask(t);
+  });
+
+  speakBtn.addEventListener('click', () => {
+    const on = speakBtn.getAttribute('aria-pressed') !== 'true';
+    speakBtn.setAttribute('aria-pressed', String(on));
+    if (!on && canSpeak) window.speechSynthesis.cancel();
+  });
+
+  // Clear conversation
+  clearBtn.addEventListener('click', () => {
+    if (!confirm('Clear this conversation?')) return;
+    busy = true; sendBtn.disabled = true;
+    fetch('/api/clear', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({session_id: SESSION_ID})})
+      .then(async r => {
+        if (!r.ok) throw new Error('clear failed');
+        localStorage.removeItem(HISTORY_KEY);
+        log.replaceChildren();
+        branchId = 'main';
+        try { localStorage.removeItem('dostBranch'); } catch (e) {}
+        setStatus('<b>●</b> here with you');
+        setMood('idle');
+      })
+      .catch(e => addMsg('Could not clear: ' + e.message, 'err'))
+      .finally(() => { busy = false; sendBtn.disabled = false; });
+  });
+
+  // Voice in
+  let recorder = null;
+  let chunks = [];
+  let stopTimer = null;
+  const MAX_SECONDS = 20;
+  function pickMime() {
+    const options = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg'];
+    if (!window.MediaRecorder) return '';
+    for (const m of options) { if (MediaRecorder.isTypeSupported(m)) return m; }
+    return '';
+  }
+  function micIdle() {
+    listening = false;
+    micBtn.setAttribute('aria-pressed', 'false');
+    micBtn.textContent = '🎙️';
+    setStatus('<b>●</b> here with you');
+  }
+  async function startRecording() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) {
+      addMsg('This window cannot record audio. Open Dost in Chrome instead.', 'err');
+      return;
+    }
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({audio: true});
+    } catch (e) {
+      addMsg('Microphone is blocked (' + (e.name || 'error') + '). Turn it on in System Settings → Privacy & Security → Microphone, then reopen this window.', 'err');
+      return;
+    }
+    const mime = pickMime();
+    recorder = mime ? new MediaRecorder(stream, {mimeType: mime}) : new MediaRecorder(stream);
+    chunks = [];
+    recorder.ondataavailable = (ev) => { if (ev.data && ev.data.size) chunks.push(ev.data); };
+    recorder.onstop = async () => {
+      stream.getTracks().forEach(t => t.stop());
+      clearTimeout(stopTimer);
+      micIdle();
+      const type = (recorder.mimeType || mime || 'audio/webm').split(';')[0];
+      const blob = new Blob(chunks, {type});
+      if (blob.size < 1000) { addMsg('Did not catch that. Hold on a little longer.', 'sys'); return; }
+      setMood('thinking');
+      setStatus('<b>●</b> listening to what you said…');
+      try {
+        const r = await fetch('/api/listen', {method: 'POST', headers: {'Content-Type': type}, body: blob});
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || 'could not transcribe');
+        const said = (data.text || '').trim();
+        if (!said) { addMsg('Did not catch any words. Try again.', 'sys'); setMood('idle'); return; }
+        ask(said);
+      } catch (e) {
+        addMsg('Voice failed: ' + e.message, 'err');
+        setMood('sleepy');
+      } finally {
+        setStatus('<b>●</b> here with you');
+      }
+    };
+    recorder.start();
+    listening = true;
+    micBtn.setAttribute('aria-pressed', 'true');
+    micBtn.textContent = '⏹';
+    setMood('thinking');
+    setStatus('<b>●</b> recording… tap ⏹ when done');
+    stopTimer = setTimeout(() => { if (recorder && recorder.state === 'recording') recorder.stop(); }, MAX_SECONDS * 1000);
+  }
+  micBtn.addEventListener('click', () => {
+    if (listening && recorder && recorder.state === 'recording') { recorder.stop(); return; }
+    if (busy) return;
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
+    startRecording();
+  });
+
+  fetch('/api/greet').then(r => r.json()).then(d => {
+    if (d.reply) { addMsg(d.reply, 'dost', true); speak(d.reply); }
+  }).catch(() => addMsg('Dost is not running. Start pet_server.py first.', 'err'));
+
+  setMood('idle');
+  input.focus();
+  window.addEventListener('beforeunload', () => { if (abortController) abortController.abort(); });
+})();
+</script>
+</body>
+</html>
