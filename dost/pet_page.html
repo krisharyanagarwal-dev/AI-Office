@@ -35,8 +35,9 @@
     border-left: 1px solid var(--line); border-right: 1px solid var(--line);
   }
   header {
-    display: flex; align-items: center; gap: 14px;
-    padding: 14px 16px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 14px; border-bottom: 1px solid var(--line);
+    flex-wrap: wrap;
   }
   .pet-wrap { position: relative; width: 84px; height: 84px; flex: 0 0 84px; }
   .pet { width: 100%; height: 100%; transition: transform .3s ease; transform-origin: 50% 90%; }
@@ -56,7 +57,7 @@
   .who h1 { font-size: 20px; margin: 0; }
   .who .status { color: var(--muted); font-size: 14px; }
   .who .status b { color: var(--good); font-weight: 600; }
-  .controls { margin-left: auto; display: flex; gap: 8px; }
+  .controls { margin-left: auto; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   button.icon {
     border: 1px solid var(--line); background: var(--dost); color: var(--ink);
     width: 40px; height: 40px; border-radius: 12px; font-size: 18px; cursor: pointer;
@@ -66,7 +67,7 @@
   #log {
     flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px;
   }
-  .msg { max-width: 82%; padding: 10px 14px; border-radius: 18px; white-space: pre-wrap; word-wrap: break-word; }
+  .msg { max-width: 82%; padding: 10px 14px; border-radius: 18px; word-wrap: break-word; }
   .msg.you { align-self: flex-end; background: var(--me); color: var(--me-ink); border-bottom-right-radius: 6px; }
   .msg.dost { align-self: flex-start; background: var(--dost); border-bottom-left-radius: 6px; }
   .msg.sys { align-self: center; color: var(--muted); font-size: 14px; background: none; }
@@ -91,9 +92,32 @@
   .msg .tag { font-size: 12px; font-weight: 700; color: var(--muted); margin-bottom: 4px; }
   .typing { display: none; align-self: flex-start; color: var(--muted); font-size: 14px; padding-left: 6px; }
   .typing.show { display: block; }
+  .clear-btn {
+    background: none; border: none; color: var(--muted); font-size: 13px;
+    cursor: pointer; padding: 4px 8px; border-radius: 6px;
+  }
+  .clear-btn:hover { background: rgba(0,0,0,.06); color: var(--ink); }
+  .error-banner {
+    align-self: center; background: rgba(217, 96, 59, .12); color: var(--warn);
+    padding: 8px 12px; border-radius: 8px; font-size: 13px; margin-bottom: 8px;
+    max-width: 82%; text-align: center; border: 1px solid rgba(217, 96, 59, .3);
+  }
+  .retry-btn {
+    background: var(--me); color: var(--me-ink); border: none;
+    border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer; margin-left: 8px;
+  }
+  .retry-btn:hover { opacity: .9; }
   @media (max-width: 380px) {
     .pet-wrap { width: 64px; height: 64px; flex-basis: 64px; }
     .who h1 { font-size: 18px; }
+    .controls { gap: 6px; }
+    .controls button.icon { width: 36px; height: 36px; font-size: 16px; }
+    select.brain { max-width: 130px; font-size: 12px; padding: 0 6px; }
+  }
+  @media (max-width: 500px) {
+    header { gap: 8px; padding: 10px 12px; }
+    .pet-wrap { width: 72px; height: 72px; flex-basis: 72px; }
+    .controls button.icon { width: 38px; height: 38px; }
   }
 </style>
 </head>
@@ -117,6 +141,7 @@
       <div class="status" id="status"><b>●</b> here with you</div>
     </div>
     <div class="controls">
+      <button class="icon clear-btn" id="clearBtn" title="New conversation">⌫</button>
       <select id="brain" class="brain" title="Who answers" aria-label="Who answers">
         <option value="dost">Dost</option>
         <option value="openclaw">OpenClaw</option>
@@ -137,7 +162,6 @@
 </div>
 
 <script>
-// Opened as a file? The chat and mic need the local server, so go there.
 if (location.protocol === 'file:') { location.replace('http://127.0.0.1:8787/'); }
 (() => {
   const log = document.getElementById('log');
@@ -146,17 +170,26 @@ if (location.protocol === 'file:') { location.replace('http://127.0.0.1:8787/');
   const sendBtn = document.getElementById('send');
   const micBtn = document.getElementById('micBtn');
   const speakBtn = document.getElementById('speakBtn');
+  const clearBtn = document.getElementById('clearBtn');
   const pet = document.getElementById('pet');
   const mouth = document.getElementById('mouth');
   const statusEl = document.getElementById('status');
   const typing = document.getElementById('typing');
 
   let busy = false;
+  let abortController = null;
+  let lastUserMsgEl = null; // for retry / branching
   const brainSel = document.getElementById('brain');
   let backend = 'dost';
   let modelList = [];
-  const histories = {};  // per-model chat history for direct model chats
+  const SESSION_ID = 'default';
+  let branchId = 'main';
+  const HISTORY_KEY = 'dost:v1:messages';
   try { backend = localStorage.getItem('dostBackend') || 'dost'; } catch (e) {}
+  try {
+    const saved = localStorage.getItem('dostBranch');
+    if (saved) branchId = saved;
+  } catch (e) {}
 
   function labelOf(id) {
     const m = modelList.find(x => x.id === id);
@@ -190,41 +223,83 @@ if (location.protocol === 'file:') { location.replace('http://127.0.0.1:8787/');
     addMsg(backend === 'compare' ? 'Now asking several models at once.' : 'Now talking to ' + name + '.', 'sys');
   });
   loadModels();
+  fetch('/api/voice-status')
+    .then(r => r.json())
+    .then(d => {
+      if (!d.stt) {
+        micBtn.style.display = 'none';
+      }
+    })
+    .catch(() => {});
 
-  // Typed shortcuts: "ask all: ..." compares; "ask nemotron: ..." picks a model by name.
-  function parseShortcut(text) {
-    const m = text.match(/^ask\s+([^:]+):\s*([\s\S]+)$/i);
-    if (!m) return null;
-    const who = m[1].trim().toLowerCase();
-    if (who === 'all' || who === 'everyone' || who === 'models') return {backend: 'compare', text: m[2]};
-    const hit = modelList.find(x => x.label.toLowerCase().includes(who) || x.id.toLowerCase().includes(who));
-    return hit ? {backend: hit.id, text: m[2]} : null;
+  // ---- Markdown rendering (escape -> parse -> sanitize) ----
+  function escapeHtml(text) {
+    return text.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"}[c]));
   }
-  const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
-  const canSpeak = 'speechSynthesis' in window;
-  let rec = null;
-  let listening = false;
 
-  function setMood(mood) {
-    pet.setAttribute('class', 'pet ' + mood);
-    if (mood === 'thinking') { mouth.setAttribute('d', 'M43 68 L57 68'); }
-    else if (mood === 'happy') { mouth.setAttribute('d', 'M40 64 Q50 78 60 64'); }
-    else if (mood === 'sleepy') { mouth.setAttribute('d', 'M44 68 Q50 66 56 68'); }
-    else { mouth.setAttribute('d', 'M42 66 Q50 72 58 66'); }
+  function renderMarkdown(text) {
+    // Escape HTML first, then convert safe markdown
+    let html = escapeHtml(text);
+    // Code blocks (triple backtick, optional language)
+    html = html.replace(/```([\w-]*)\n([\s\S]*?)```/g, (_, lang, code) => {
+      const langClass = lang ? ` language-${escapeHtml(lang)}` : '';
+      return `<pre><code class="${langClass}">${escapeHtml(code)}</code></pre>`;
+    });
+    // Inline code
+    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+    // Bold
+    html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    // Italic
+    html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+    // Newlines
+    html = html.replace(/\n/g, '<br>');
+    return html;
   }
-  function setStatus(html) { statusEl.innerHTML = html; }
 
-  function addMsg(text, who) {
+  function addMsg(text, who, html) {
     const el = document.createElement('div');
     el.className = 'msg ' + who;
-    el.textContent = text;
+    if (html) {
+      el.innerHTML = html;
+    } else {
+      el.textContent = text;
+    }
+    // Retry button on assistant messages
+    if (who === 'dost') {
+      const retry = document.createElement('button');
+      retry.className = 'retry-btn';
+      retry.textContent = 'Retry';
+      retry.title = 'Retry this reply as a new branch';
+      retry.onclick = (ev) => {
+        ev.stopPropagation();
+        // Find the preceding user message
+        let prev = el.previousElementSibling;
+        let userText = '';
+        while (prev) {
+          if (prev.classList.contains('msg') && prev.classList.contains('you')) {
+            userText = prev.textContent;
+            break;
+          }
+          prev = prev.previousElementSibling;
+        }
+        if (userText) {
+          const newBranch = 'branch-' + Date.now().toString(36).slice(-4);
+          branchId = newBranch;
+          try { localStorage.setItem('dostBranch', newBranch); } catch (e) {}
+          setStatus('<b>●</b> retrying on new branch…');
+          ask(userText);
+        }
+      };
+      el.appendChild(retry);
+    }
     log.appendChild(el);
     log.scrollTop = log.scrollHeight;
     return el;
   }
 
   function speak(text) {
-    if (!canSpeak || !speakBtn.getAttribute('aria-pressed') || speakBtn.getAttribute('aria-pressed') === 'false') return;
+    if (!('speechSynthesis' in window)) return;
+    if (speakBtn.getAttribute('aria-pressed') === 'false') return;
     window.speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text.slice(0, 1200));
     u.rate = 1.02; u.pitch = 1.05;
@@ -244,7 +319,175 @@ if (location.protocol === 'file:') { location.replace('http://127.0.0.1:8787/');
     log.scrollTop = log.scrollHeight;
   }
 
+  function setMood(mood) {
+    pet.setAttribute('class', 'pet ' + mood);
+    if (mood === 'thinking') { mouth.setAttribute('d', 'M43 68 L57 68'); }
+    else if (mood === 'happy') { mouth.setAttribute('d', 'M40 64 Q50 78 60 64'); }
+    else if (mood === 'sleepy') { mouth.setAttribute('d', 'M44 68 Q50 66 56 68'); }
+    else { mouth.setAttribute('d', 'M42 66 Q50 72 58 66'); }
+  }
+  function setStatus(html) { statusEl.innerHTML = html; }
+  function showError(msg, retryFn) {
+    const banner = document.createElement('div');
+    banner.className = 'error-banner';
+    banner.textContent = msg;
+    if (retryFn) {
+      const btn = document.createElement('button');
+      btn.className = 'retry-btn';
+      btn.textContent = 'Retry';
+      btn.onclick = () => { banner.remove(); retryFn(); };
+      banner.append(btn);
+    }
+    log.appendChild(banner);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  // ---- Persistence ----
+  function loadHistory() {
+    try {
+      const raw = localStorage.getItem(HISTORY_KEY);
+      if (!raw) return [];
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr : [];
+    } catch (e) { return []; }
+  }
+  function saveHistory(messages) {
+    try { localStorage.setItem(HISTORY_KEY, JSON.stringify(messages)); } catch (e) {}
+  }
+  function renderHistory() {
+    const messages = loadHistory();
+    log.replaceChildren();
+    messages.forEach(m => {
+      if (m.role === 'user') addMsg(m.content, 'you');
+      else if (m.role === 'assistant') addMsg(m.content, 'dost', true);
+    });
+  }
+  renderHistory();
+
+  // ---- Shortcuts ----
+  function parseShortcut(text) {
+    const m = text.match(/^ask\s+([^:]+):\s*([\s\S]+)$/i);
+    if (!m) return null;
+    const who = m[1].trim().toLowerCase();
+    if (who === 'all' || who === 'everyone' || who === 'models') return {backend: 'compare', text: m[2]};
+    const hit = modelList.find(x => x.label.toLowerCase().includes(who) || x.id.toLowerCase().includes(who));
+    return hit ? {backend: hit.id, text: m[2]} : null;
+  }
+  const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const canSpeak = 'speechSynthesis' in window;
+  let rec = null;
+  let listening = false;
+
+  // ---- Streaming SSE ----
   async function ask(text) {
+    if (busy || !text.trim()) return;
+    const sc = parseShortcut(text.trim());
+    const target = sc ? sc.backend : backend;
+    const prompt = sc ? sc.text : text;
+    busy = true; sendBtn.disabled = true;
+    abortController = new AbortController();
+
+    // Add user message to UI + history
+    lastUserMsgEl = addMsg(text, 'you');
+    const history = loadHistory();
+    history.push({role: 'user', content: text, ts: new Date().toISOString(), branch_id: branchId});
+    saveHistory(history);
+
+    typing.classList.add('show');
+    setMood('thinking');
+    setStatus('<b>●</b> ' + (target === 'compare' ? 'asking several models…' : 'thinking…'));
+
+    let fullReply = '';
+    let currentAssistantEl = null;
+
+    try {
+      const res = await fetch('/api/chat/stream', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({text: prompt, backend: target, session_id: SESSION_ID, branch_id: branchId}),
+        signal: abortController.signal,
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'request failed');
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, {stream: true});
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const evt = JSON.parse(line.slice(6));
+            if (evt.type === 'text' || evt.type === 'model') {
+              if (!currentAssistantEl) {
+                currentAssistantEl = document.createElement('div');
+                currentAssistantEl.className = 'msg dost';
+                if (evt.type === 'model' && evt.label) {
+                  const tag = document.createElement('div');
+                  tag.className = 'tag';
+                  tag.textContent = evt.label + (evt.ms ? ' · ' + (evt.ms / 1000).toFixed(1) + 's' : '');
+                  currentAssistantEl.appendChild(tag);
+                }
+                const body = document.createElement('div');
+                currentAssistantEl.appendChild(body);
+                log.insertBefore(currentAssistantEl, typing.nextSibling);
+                log.scrollTop = log.scrollHeight;
+              }
+              const bodyDiv = currentAssistantEl.querySelector('div:not(.tag)') || currentAssistantEl;
+              fullReply += evt.text;
+              bodyDiv.innerHTML = renderMarkdown(fullReply);
+              log.scrollTop = log.scrollHeight;
+            } else if (evt.type === 'compare') {
+              // compare renders all answers at once
+              (evt.answers || []).forEach(a => addModelMsg(a.label, a.error ? 'Failed: ' + a.error : a.reply, a.ms));
+              const first = (evt.answers || []).find(a => !a.error);
+              if (first) { fullReply = first.reply; currentAssistantEl = null; speak(first.reply); }
+            } else if (evt.event === 'error' || evt.type === 'error') {
+              throw new Error(evt.error || 'stream error');
+            }
+          } catch (e) { /* ignore malformed SSE lines */ }
+        }
+      }
+
+      // Finalize assistant message
+      if (currentAssistantEl && fullReply) {
+        speak(fullReply);
+        history.push({role: 'assistant', content: fullReply, ts: new Date().toISOString(), branch_id: branchId});
+        saveHistory(history);
+        setMood('happy');
+        setTimeout(() => setMood('idle'), 1200);
+      } else if (fullReply && !currentAssistantEl) {
+        // compare already rendered
+        history.push({role: 'assistant', content: fullReply, ts: new Date().toISOString(), branch_id: branchId});
+        saveHistory(history);
+      }
+    } catch (e) {
+      if (e.name === 'AbortError') {
+        setStatus('<b>●</b> stopped');
+        setMood('sleepy');
+      } else {
+        addMsg('Could not reach Dost: ' + e.message, 'err');
+        showError(e.message, () => ask(text));
+        setMood('sleepy');
+      }
+    } finally {
+      typing.classList.remove('show');
+      setStatus('<b>●</b> here with you');
+      busy = false; sendBtn.disabled = false;
+      abortController = null;
+    }
+  }
+
+  // ---- Fallback non-streaming (used if SSE fails) ----
+  async function askFallback(text) {
     if (busy || !text.trim()) return;
     const sc = parseShortcut(text.trim());
     const target = sc ? sc.backend : backend;
@@ -253,13 +496,11 @@ if (location.protocol === 'file:') { location.replace('http://127.0.0.1:8787/');
     addMsg(text, 'you');
     typing.classList.add('show');
     setMood('thinking');
-    setStatus('<b>●</b> ' + (target === 'compare' ? 'asking several models…' : 'thinking…'));
+    setStatus('<b>●</b> thinking…');
     try {
-      const body = {text: prompt, backend: target};
-      if (target.includes(':')) body.history = histories[target] || [];
       const r = await fetch('/api/chat', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(body)
+        body: JSON.stringify({text: prompt, backend: target, session_id: SESSION_ID, branch_id: branchId})
       });
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || 'request failed');
@@ -267,19 +508,18 @@ if (location.protocol === 'file:') { location.replace('http://127.0.0.1:8787/');
         (data.answers || []).forEach(a => addModelMsg(a.label, a.error ? 'Failed: ' + a.error : a.reply, a.ms));
         const first = (data.answers || []).find(a => !a.error);
         if (first) speak(first.reply);
-      } else if (target.includes(':')) {
-        addModelMsg(data.label || labelOf(target), data.reply, data.ms);
-        const h = histories[target] = histories[target] || [];
-        h.push({role: 'user', content: prompt}, {role: 'assistant', content: data.reply});
-        speak(data.reply);
       } else {
-        addMsg(data.reply, 'dost');
+        addMsg(data.reply, 'dost', true);
         speak(data.reply);
+        const history = loadHistory();
+        history.push({role: 'assistant', content: data.reply, ts: new Date().toISOString(), branch_id: branchId});
+        saveHistory(history);
       }
       setMood('happy');
       setTimeout(() => setMood('idle'), 1200);
     } catch (e) {
       addMsg('Could not reach Dost: ' + e.message, 'err');
+      showError(e.message, () => askFallback(text));
       setMood('sleepy');
     } finally {
       typing.classList.remove('show');
@@ -300,27 +540,41 @@ if (location.protocol === 'file:') { location.replace('http://127.0.0.1:8787/');
     if (!on && canSpeak) window.speechSynthesis.cancel();
   });
 
-  // Voice in: record with the mic, send the clip to the server, which
-  // transcribes it (Groq Whisper). Works in Chrome and in the Dost app.
+  // Clear conversation
+  clearBtn.addEventListener('click', () => {
+    if (!confirm('Clear this conversation?')) return;
+    busy = true; sendBtn.disabled = true;
+    fetch('/api/clear', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({session_id: SESSION_ID})})
+      .then(async r => {
+        if (!r.ok) throw new Error('clear failed');
+        localStorage.removeItem(HISTORY_KEY);
+        log.replaceChildren();
+        branchId = 'main';
+        try { localStorage.removeItem('dostBranch'); } catch (e) {}
+        setStatus('<b>●</b> here with you');
+        setMood('idle');
+      })
+      .catch(e => addMsg('Could not clear: ' + e.message, 'err'))
+      .finally(() => { busy = false; sendBtn.disabled = false; });
+  });
+
+  // Voice in
   let recorder = null;
   let chunks = [];
   let stopTimer = null;
   const MAX_SECONDS = 20;
-
   function pickMime() {
     const options = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg'];
     if (!window.MediaRecorder) return '';
     for (const m of options) { if (MediaRecorder.isTypeSupported(m)) return m; }
     return '';
   }
-
   function micIdle() {
     listening = false;
     micBtn.setAttribute('aria-pressed', 'false');
     micBtn.textContent = '🎙️';
     setStatus('<b>●</b> here with you');
   }
-
   async function startRecording() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) {
       addMsg('This window cannot record audio. Open Dost in Chrome instead.', 'err');
@@ -330,7 +584,7 @@ if (location.protocol === 'file:') { location.replace('http://127.0.0.1:8787/');
     try {
       stream = await navigator.mediaDevices.getUserMedia({audio: true});
     } catch (e) {
-      addMsg('Microphone is blocked (' + (e.name || 'error') + '). Turn it on in System Settings → Privacy & Security → Microphone, then quit and reopen this window.', 'err');
+      addMsg('Microphone is blocked (' + (e.name || 'error') + '). Turn it on in System Settings → Privacy & Security → Microphone, then reopen this window.', 'err');
       return;
     }
     const mime = pickMime();
@@ -368,7 +622,6 @@ if (location.protocol === 'file:') { location.replace('http://127.0.0.1:8787/');
     setStatus('<b>●</b> recording… tap ⏹ when done');
     stopTimer = setTimeout(() => { if (recorder && recorder.state === 'recording') recorder.stop(); }, MAX_SECONDS * 1000);
   }
-
   micBtn.addEventListener('click', () => {
     if (listening && recorder && recorder.state === 'recording') { recorder.stop(); return; }
     if (busy) return;
@@ -377,11 +630,12 @@ if (location.protocol === 'file:') { location.replace('http://127.0.0.1:8787/');
   });
 
   fetch('/api/greet').then(r => r.json()).then(d => {
-    if (d.reply) { addMsg(d.reply, 'dost'); speak(d.reply); }
+    if (d.reply) { addMsg(d.reply, 'dost', true); speak(d.reply); }
   }).catch(() => addMsg('Dost is not running. Start pet_server.py first.', 'err'));
 
   setMood('idle');
   input.focus();
+  window.addEventListener('beforeunload', () => { if (abortController) abortController.abort(); });
 })();
 </script>
 </body>

@@ -350,6 +350,8 @@ COMPANION_STYLE = """Talk like a close, warm friend who also happens to run the 
 - Never end with "anything else I can help with" or similar.
 - Be honest about losses and failures, but kind about it.
 - Ground any numbers in the CONTEXT and never invent them.
+- Remember what the person has told you across this conversation and refer back to it naturally.
+- If you're not sure about something, say so rather than guessing.
 
 FACTS ABOUT YOURSELF (these override the rule about hiding models and plumbing;
 answer questions about yourself from these facts only, and say "I don't know"
@@ -367,7 +369,11 @@ for anything not covered):
   submit prompts to the fleet orchestrator.
 - What you cannot do: place trades (paper only, live orders locked), edit
   files, start or stop services, or control other systems on the computer.
-  Never claim you are "going live" beyond the fleet connection."""
+  Never claim you are "going live" beyond the fleet connection.
+- You remember past conversations in this chat window. If the person refers
+  to something earlier, use that context.
+- You are paper-only: every backtest uses real Groww costs, nothing is
+  overstated. The kill switch is locked and Tier C is human-only."""
 
 DISPATCHER_METRICS_URL = "http://127.0.0.1:8083/metrics"
 HIVE_DIR = Path("/Users/aryanagarwal/AI-Office/packages/office-os/tasks")
@@ -886,6 +892,9 @@ def _agent_tiers() -> dict[str, str]:
 def wants_audit(task: str) -> bool:
     t = task.lower()
     return any(w in t for w in AUDIT_WORDS)
+
+
+AUDIT_WORDS = ["audit", "check the system", "system health", "is everything ok", "anything wrong", "any alerts"]
 
 
 def run_system_audit() -> list:
