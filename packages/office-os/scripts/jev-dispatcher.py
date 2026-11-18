@@ -1609,8 +1609,7 @@ def execute_agent_worker(args):
                     exec_pool_used = "qwen_local"
                 else:
                     exec_text, exec_model_used, exec_pool_used = orchestrator.call_model(
-                        *orchestrator.decide_model(agent_info, task_type="exec"),
-                        exec_prompt,
+                        model_name, pool_name, exec_prompt,
                         task_id=f"jev-exec-{agent_id}",
                         priority="normal",
                     )

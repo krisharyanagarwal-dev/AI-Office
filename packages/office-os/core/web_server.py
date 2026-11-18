@@ -193,97 +193,221 @@ LOGIN_TEMPLATE = """<!DOCTYPE html>
     // Chart.js charts
     const charts = {};
 
-    function initCharts() {
+    function initCharts() {{{{
         // Fetch metrics
         fetch('/metrics')
             .then(r => r.json())
-            .then(data => {
-                const jev = data.jev || {};
-                const pools = data.provider_pools || {};
+            .then(data => {{{{
+                const jev = data.jev || {{{{}}}};
+                const pools = data.provider_pools || {{{{}}}};
 
                 // Completion rate chart
                 const completionCtx = document.getElementById('completionChart');
-                if (completionCtx) {
-                    charts.completion = new Chart(completionCtx.getContext('2d'), {
+                if (completionCtx) {{{{
+                    charts.completion = new Chart(completionCtx.getContext('2d'), {{{{
                         type: 'gauge',
-                        data: {
+                        data: {{{{
                             labels: ['Completion Rate'],
-                            datasets: [{
+                            datasets: [{{{{
                                 data: [Math.min(100, jev.completion_rate || 0)],
                                 backgroundColor: '#10b981',
                                 borderColor: '#ffffff',
                                 borderWidth: 2
-                            }]
-                        },
-                        options: {
+                            }}}}]
+                        }}}},
+                        options: {{{{
                             responsive: true,
                             maintainAspectRatio: false,
-                            plugins: {
-                                legend: { display: false },
-                                title: { display: true, text: 'Task Completion Rate (%)' }
-                            },
-                            scales: {
-                                y: { min: 0, max: 100 }
-                            }
-                        }
-                    });
-                }
+                            plugins: {{{{
+                                legend: {{{{ display: false }}}},
+                                title: {{{{ display: true, text: 'Task Completion Rate (%)' }}}}
+                            }}}},
+                            scales: {{{{
+                                y: {{{{ min: 0, max: 100 }}}}
+                            }}}}
+                        }}}}
+                    }}}});
+                }}}}
 
                 // Error rate chart
                 const errorCtx = document.getElementById('errorChart');
-                if (errorCtx) {
-                    charts.error = new Chart(errorCtx.getContext('2d'), {
+                if (errorCtx) {{{{
+                    charts.error = new Chart(errorCtx.getContext('2d'), {{{{
                         type: 'gauge',
-                        data: {
+                        data: {{{{
                             labels: ['Error Rate (%)'],
-                            datasets: [{
+                            datasets: [{{{{
                                 data: [Math.min(100, jev.error_rate || 0)],
                                 backgroundColor: '#ef4444',
                                 borderColor: '#ffffff',
                                 borderWidth: 2
                             ]
-                        },
-                        options: {
+                        }}}},
+                        options: {{{{
                             responsive: true,
                             maintainAspectRatio: false,
-                            plugins: {
-                                legend: { display: false },
-                                title: { display: true, text: 'Error Rate (%)' }
-                            },
-                            scales: { y: { min: 0, max: 100 } }
-                        }
-                    });
-                }
+                            plugins: {{{{
+                                legend: {{{{ display: false }}}},
+                                title: {{{{ display: true, text: 'Error Rate (%)' }}}}
+                            }}}},
+                            scales: {{{{ y: {{{{ min: 0, max: 100 }}}} }}}}
+                        }}}}
+                    }}}});
+                }}}}
 
                 // Pool status chart
                 const poolCtx = document.getElementById('poolChart');
-                if (poolCtx && pools) {
+                if (poolCtx && pools) {{{{
                     const poolNames = Object.keys(pools);
                     const poolValues = pools.map(p => p.available ? 1 : (p.cooldown_remaining > 0 ? 0.5 : 0));
-                    charts.pools = new Chart(poolCtx.getContext('2d'), {
+                    charts.pools = new Chart(poolCtx.getContext('2d'), {{{{
                         type: 'bar',
-                        data: {
+                        data: {{{{
                             labels: poolNames.map(p => p.split('_')[0]),
-                            datasets: [{
+                            datasets: [{{{{
                                 label: 'Pool Status',
                                 data: poolValues,
                                 backgroundColor: poolValues.map(v => v === 1 ? '#10b981' : (v === 0.5 ? '#f59e0b' : '#ef4444'))
-                            }]
-                        },
-                        options: {
+                            }}}}]
+                        }}}},
+                        options: {{{{
                             responsive: true,
-                            scales: {
-                                y: { min: 0, max: 1, ticks: { display: false } }
-                            },
-                            plugins: {
-                                legend: { display: false },
-                                title: { display: true, text: 'Provider Pool Status' }
-                            }
-                        }
-                    });
-                }
-            })
+                            scales: {{{{
+                                y: {{{{ min: 0, max: 1, ticks: {{{{ display: false }}}} }}}}
+                            }}}},
+                            plugins: {{{{
+                                legend: {{{{ display: false }}}},
+                                title: {{{{ display: true, text: 'Provider Pool Status' }}}}
+                            }}}}
+                        }}}}
+                    }}}});
+                }}}}
+            }}}})
             .catch(err => console.error('Failed to load metrics:', err));
+        }}}}
+
+        // Initialize charts when page loads
+        document.addEventListener('DOMContentLoaded', initCharts);
+        // Refresh charts every 30 seconds
+        setInterval(() => {{{{
+            fetch('/metrics')
+                .then(r => r.json())
+                .then(data => {{{{
+                    const jev = data.jev || {{{{}}}};
+                    const pools = data.provider_pools || {{{{}}}};
+                    
+                    // Update completion chart
+                    if (charts.completion) {{{{
+                        charts.completion.data.datasets[0].data = [Math.min(100, jev.completion_rate || 0)];
+                        charts.completion.update();
+                    }}}}
+                    
+                    // Update error chart
+                    if (charts.error) {{{{
+                        charts.error.data.datasets[0].data = [Math.min(100, jev.error_rate || 0)];
+                        charts.error.update();
+                    }}}}
+                }}}})
+                .catch(() => {{{{}}}});
+        }}}}, 30000);
+    </script>
+
+    <script>
+        // Chart.js charts
+        const charts = {};
+
+        function initCharts() {
+            fetch('/metrics')
+                .then(r => r.json())
+                .then(data => {
+                    const jev = data.jev || {};
+                    const pools = data.provider_pools || {};
+
+                    // Completion rate chart
+                    const completionCtx = document.getElementById('costChart');
+                    if (completionCtx && !charts.completion) {
+                        charts.completion = new Chart(completionCtx.getContext('2d'), {
+                            type: 'gauge',
+                            data: {
+                                labels: ['Completion Rate'],
+                                datasets: [{
+                                    data: [Math.min(100, jev.completion_rate || 0)],
+                                    backgroundColor: '#10b981',
+                                    borderColor: '#ffffff',
+                                    borderWidth: 2
+                                ]
+                            },
+                            options: {
+                                responsive: true,
+                                maintainAspectRatio: false,
+                                plugins: {
+                                    legend: { display: false },
+                                    title: { display: true, text: 'Task Completion Rate (%)' }
+                                },
+                                scales: {
+                                    y: { min: 0, max: 100 }
+                                }
+                            }
+                        });
+                    }
+
+                    // Error rate chart
+                    const errorCtx = document.getElementById('errorChart');
+                    if (errorCtx && !charts.error) {
+                        charts.error = new Chart(errorCtx.getContext('2d'), {
+                            type: 'gauge',
+                            data: {
+                                labels: ['Error Rate (%)'],
+                                datasets: [{
+                                    data: [Math.min(100, jev.error_rate || 0)],
+                                    backgroundColor: '#ef4444',
+                                    borderColor: '#ffffff',
+                                    borderWidth: 2
+                                ]
+                            },
+                            options: {
+                                responsive: true,
+                                maintainAspectRatio: false,
+                                plugins: {
+                                    legend: { display: false },
+                                    title: { display: true, text: 'Error Rate (%)' }
+                                },
+                                scales: {
+                                    y: { min: 0, max: 100 }
+                                }
+                            }
+                        });
+                    }
+
+                    // Pool status chart
+                    const poolCtx = document.getElementById('poolChart');
+                    if (poolCtx && pools && !charts.pools) {
+                        const poolNames = Object.keys(pools);
+                        const poolValues = pools.map(p => p.available ? 1 : (p.cooldown_remaining > 0 ? 0.5 : 0));
+                        charts.pools = new Chart(poolCtx.getContext('2d'), {
+                            type: 'bar',
+                            data: {
+                                labels: poolNames.map(p => p.split('_')[0]),
+                                datasets: [{
+                                    label: 'Pool Status',
+                                    data: poolValues,
+                                    backgroundColor: poolValues.map(v => v === 1 ? '#10b981' : (v === 0.5 ? '#f59e0b' : '#ef4444'))
+                                }]
+                            },
+                            options: {
+                                responsive: true,
+                                scales: {
+                                    y: { min: 0, max: 1, ticks: { display: false } }
+                                },
+                                plugins: {
+                                    legend: { display: false },
+                                    title: { display: true, text: 'Provider Pool Status' }
+                                }
+                            }
+                        });
+                    }
+                })
+                .catch(err => console.error('Failed to load metrics:', err));
         }
 
         // Initialize charts when page loads
@@ -296,19 +420,535 @@ LOGIN_TEMPLATE = """<!DOCTYPE html>
                     const jev = data.jev || {};
                     const pools = data.provider_pools || {};
                     
-                    // Update completion chart
                     if (charts.completion) {
                         charts.completion.data.datasets[0].data = [Math.min(100, jev.completion_rate || 0)];
                         charts.completion.update();
                     }
                     
-                    // Update error chart
                     if (charts.error) {
                         charts.error.data.datasets[0].data = [Math.min(100, jev.error_rate || 0)];
                         charts.error.update();
                     }
+                    
+                    if (charts.pools && pools) {
+                        const poolValues = pools.map(p => p.available ? 1 : (p.cooldown_remaining > 0 ? 0.5 : 0));
+                        charts.pools.data.datasets[0].data = poolValues;
+                        charts.pools.update();
+                    }
                 })
-                .catch(() => {});
+                .catch(err => console.error('Failed to load metrics:', err));
+        }, 30000);
+    </script>
+
+    <script>
+        // Chart.js charts
+        const charts = {};
+
+        function initCharts() {
+            fetch('/metrics')
+                .then(r => r.json())
+                .then(data => {
+                    const jev = data.jev || {};
+                    const pools = data.provider_pools || {};
+
+                    // Completion rate chart
+                    const completionCtx = document.getElementById('costChart');
+                    if (completionCtx && !charts.completion) {
+                        charts.completion = new Chart(completionCtx.getContext('2d'), {
+                            type: 'gauge',
+                            data: {
+                                labels: ['Completion Rate'],
+                                datasets: [{
+                                    data: [Math.min(100, jev.completion_rate || 0)],
+                                    backgroundColor: '#10b981',
+                                    borderColor: '#ffffff',
+                                    borderWidth: 2
+                                ]
+                            },
+                            options: {
+                                responsive: true,
+                                maintainAspectRatio: false,
+                                plugins: {
+                                    legend: { display: false },
+                                    title: { display: true, text: 'Task Completion Rate (%)' }
+                                },
+                                scales: {
+                                    y: { min: 0, max: 100 }
+                                }
+                            }
+                        });
+                    }
+
+                    // Error rate chart
+                    const errorCtx = document.getElementById('errorChart');
+                    if (errorCtx && !charts.error) {
+                        charts.error = new Chart(errorCtx.getContext('2d'), {
+                            type: 'gauge',
+                            data: {
+                                labels: ['Error Rate (%)'],
+                                datasets: [{
+                                    data: [Math.min(100, jev.error_rate || 0)],
+                                    backgroundColor: '#ef4444',
+                                    borderColor: '#ffffff',
+                                    borderWidth: 2
+                                ]
+                            },
+                            options: {
+                                responsive: true,
+                                maintainAspectRatio: false,
+                                plugins: {
+                                    legend: { display: false },
+                                    title: { display: true, text: 'Error Rate (%)' }
+                                },
+                                scales: {
+                                    y: { min: 0, max: 100 }
+                                }
+                            }
+                        });
+                    }
+
+                    // Pool status chart
+                    const poolCtx = document.getElementById('poolChart');
+                    if (poolCtx && pools && !charts.pools) {
+                        const poolNames = Object.keys(pools);
+                        const poolValues = pools.map(p => p.available ? 1 : (p.cooldown_remaining > 0 ? 0.5 : 0));
+                        charts.pools = new Chart(poolCtx.getContext('2d'), {
+                            type: 'bar',
+                            data: {
+                                labels: poolNames.map(p => p.split('_')[0]),
+                                datasets: [{
+                                    label: 'Pool Status',
+                                    data: poolValues,
+                                    backgroundColor: poolValues.map(v => v === 1 ? '#10b981' : (v === 0.5 ? '#f59e0b' : '#ef4444'))
+                                }]
+                            },
+                            options: {
+                                responsive: true,
+                                scales: {
+                                    y: { min: 0, max: 1, ticks: { display: false } }
+                                },
+                                plugins: {
+                                    legend: { display: false },
+                                    title: { display: true, text: 'Provider Pool Status' }
+                                }
+                            }
+                        });
+                    }
+                })
+                .catch(err => console.error('Failed to load metrics:', err));
+        }
+
+        // Initialize charts when page loads
+        document.addEventListener('DOMContentLoaded', initCharts);
+        // Refresh charts every 30 seconds
+        setInterval(() => {
+            fetch('/metrics')
+                .then(r => r.json())
+                .then(data => {
+                    const jev = data.jev || {};
+                    const pools = data.provider_pools || {};
+
+                    if (charts.completion) {
+                        charts.completion.data.datasets[0].data = [Math.min(100, jev.completion_rate || 0)];
+                        charts.completion.update();
+                    }
+
+                    if (charts.error) {
+                        charts.error.data.datasets[0].data = [Math.min(100, jev.error_rate || 0)];
+                        charts.error.update();
+                    }
+
+                    if (charts.pools && pools) {
+                        const poolValues = pools.map(p => p.available ? 1 : (p.cooldown_remaining > 0 ? 0.5 : 0));
+                        charts.pools.data.datasets[0].data = poolValues;
+                        charts.pools.update();
+                    }
+                })
+                .catch(err => console.error('Failed to load metrics:', err));
+        }, 30000);
+    </script>
+
+    <script>
+        // Chart.js charts
+        const charts = {};
+
+        function initCharts() {
+            fetch('/metrics')
+                .then(r => r.json())
+                .then(data => {
+                    const jev = data.jev || {};
+                    const pools = data.provider_pools || {};
+
+                    // Completion rate chart
+                    const completionCtx = document.getElementById('costChart');
+                    if (completionCtx && !charts.completion) {
+                        charts.completion = new Chart(completionCtx.getContext('2d'), {
+                            type: 'gauge',
+                            data: {
+                                labels: ['Completion Rate'],
+                                datasets: [{
+                                    data: [Math.min(100, jev.completion_rate || 0)],
+                                    backgroundColor: '#10b981',
+                                    borderColor: '#ffffff',
+                                    borderWidth: 2
+                                ]
+                            },
+                            options: {
+                                responsive: true,
+                                maintainAspectRatio: false,
+                                plugins: {
+                                    legend: { display: false },
+                                    title: { display: true, text: 'Task Completion Rate (%)' }
+                                },
+                                scales: {
+                                    y: { min: 0, max: 100 }
+                                }
+                            }
+                        });
+                    }
+
+                    // Error rate chart
+                    const errorCtx = document.getElementById('errorChart');
+                    if (errorCtx && !charts.error) {
+                        charts.error = new Chart(errorCtx.getContext('2d'), {
+                            type: 'gauge',
+                            data: {
+                                labels: ['Error Rate (%)'],
+                                datasets: [{
+                                    data: [Math.min(100, jev.error_rate || 0)],
+                                    backgroundColor: '#ef4444',
+                                    borderColor: '#ffffff',
+                                    borderWidth: 2
+                                ]
+                            },
+                            options: {
+                                responsive: true,
+                                maintainAspectRatio: false,
+                                plugins: {
+                                    legend: { display: false },
+                                    title: { display: true, text: 'Error Rate (%)' }
+                                },
+                                scales: {
+                                    y: { min: 0, max: 100 }
+                                }
+                            }
+                        });
+                    }
+
+                    // Pool status chart
+                    const poolCtx = document.getElementById('poolChart');
+                    if (poolCtx && pools && !charts.pools) {
+                        const poolNames = Object.keys(pools);
+                        const poolValues = pools.map(p => p.available ? 1 : (p.cooldown_remaining > 0 ? 0.5 : 0));
+                        charts.pools = new Chart(poolCtx.getContext('2d'), {
+                            type: 'bar',
+                            data: {
+                                labels: poolNames.map(p => p.split('_')[0]),
+                                datasets: [{
+                                    label: 'Pool Status',
+                                    data: poolValues,
+                                    backgroundColor: poolValues.map(v => v === 1 ? '#10b981' : (v === 0.5 ? '#f59e0b' : '#ef4444'))
+                                }]
+                            },
+                            options: {
+                                responsive: true,
+                                scales: {
+                                    y: { min: 0, max: 1, ticks: { display: false } }
+                                },
+                                plugins: {
+                                    legend: { display: false },
+                                    title: { display: true, text: 'Provider Pool Status' }
+                                }
+                            }
+                        });
+                    }
+                })
+                .catch(err => console.error('Failed to load metrics:', err));
+        }
+
+        // Initialize charts when page loads
+        document.addEventListener('DOMContentLoaded', initCharts);
+        // Refresh charts every 30 seconds
+        setInterval(() => {
+            fetch('/metrics')
+                .then(r => r.json())
+                .then(data => {
+                    const jev = data.jev || {};
+                    const pools = data.provider_pools || {};
+
+                    if (charts.completion) {
+                        charts.completion.data.datasets[0].data = [Math.min(100, jev.completion_rate || 0)];
+                        charts.completion.update();
+                    }
+
+                    if (charts.error) {
+                        charts.error.data.datasets[0].data = [Math.min(100, jev.error_rate || 0)];
+                        charts.error.update();
+                    }
+
+                    if (charts.pools && pools) {
+                        const poolValues = pools.map(p => p.available ? 1 : (p.cooldown_remaining > 0 ? 0.5 : 0));
+                        charts.pools.data.datasets[0].data = poolValues;
+                        charts.pools.update();
+                    }
+                })
+                .catch(err => console.error('Failed to load metrics:', err));
+        }, 30000);
+    </script>
+
+    <script>
+        // Chart.js charts
+        const charts = {};
+
+        function initCharts() {
+            fetch('/metrics')
+                .then(r => r.json())
+                .then(data => {
+                    const jev = data.jev || {};
+                    const pools = data.provider_pools || {};
+
+                    // Completion rate chart
+                    const completionCtx = document.getElementById('costChart');
+                    if (completionCtx && !charts.completion) {
+                        charts.completion = new Chart(completionCtx.getContext('2d'), {
+                            type: 'gauge',
+                            data: {
+                                labels: ['Completion Rate'],
+                                datasets: [{
+                                    data: [Math.min(100, jev.completion_rate || 0)],
+                                    backgroundColor: '#10b981',
+                                    borderColor: '#ffffff',
+                                    borderWidth: 2
+                                ]
+                            },
+                            options: {
+                                responsive: true,
+                                maintainAspectRatio: false,
+                                plugins: {
+                                    legend: { display: false },
+                                    title: { display: true, text: 'Task Completion Rate (%)' }
+                                },
+                                scales: {
+                                    y: { min: 0, max: 100 }
+                                }
+                            }
+                        });
+                    }
+
+                    // Error rate chart
+                    const errorCtx = document.getElementById('errorChart');
+                    if (errorCtx && !charts.error) {
+                        charts.error = new Chart(errorCtx.getContext('2d'), {
+                            type: 'gauge',
+                            data: {
+                                labels: ['Error Rate (%)'],
+                                datasets: [{
+                                    data: [Math.min(100, jev.error_rate || 0)],
+                                    backgroundColor: '#ef4444',
+                                    borderColor: '#ffffff',
+                                    borderWidth: 2
+                                ]
+                            },
+                            options: {
+                                responsive: true,
+                                maintainAspectRatio: false,
+                                plugins: {
+                                    legend: { display: false },
+                                    title: { display: true, text: 'Error Rate (%)' }
+                                },
+                                scales: {
+                                    y: { min: 0, max: 100 }
+                                }
+                            }
+                        });
+                    }
+
+                    // Pool status chart
+                    const poolCtx = document.getElementById('poolChart');
+                    if (poolCtx && pools && !charts.pools) {
+                        const poolNames = Object.keys(pools);
+                        const poolValues = pools.map(p => p.available ? 1 : (p.cooldown_remaining > 0 ? 0.5 : 0));
+                        charts.pools = new Chart(poolCtx.getContext('2d'), {
+                            type: 'bar',
+                            data: {
+                                labels: poolNames.map(p => p.split('_')[0]),
+                                datasets: [{
+                                    label: 'Pool Status',
+                                    data: poolValues,
+                                    backgroundColor: poolValues.map(v => v === 1 ? '#10b981' : (v === 0.5 ? '#f59e0b' : '#ef4444'))
+                                }]
+                            },
+                            options: {
+                                responsive: true,
+                                scales: {
+                                    y: { min: 0, max: 1, ticks: { display: false } }
+                                },
+                                plugins: {
+                                    legend: { display: false },
+                                    title: { display: true, text: 'Provider Pool Status' }
+                                }
+                            }
+                        });
+                    }
+                })
+                .catch(err => console.error('Failed to load metrics:', err));
+        }
+
+        // Initialize charts when page loads
+        document.addEventListener('DOMContentLoaded', initCharts);
+        // Refresh charts every 30 seconds
+        setInterval(() => {
+            fetch('/metrics')
+                .then(r => r.json())
+                .then(data => {
+                    const jev = data.jev || {};
+                    const pools = data.provider_pools || {};
+
+                    if (charts.completion) {
+                        charts.completion.data.datasets[0].data = [Math.min(100, jev.completion_rate || 0)];
+                        charts.completion.update();
+                    }
+
+                    if (charts.error) {
+                        charts.error.data.datasets[0].data = [Math.min(100, jev.error_rate || 0)];
+                        charts.error.update();
+                    }
+
+                    if (charts.pools && pools) {
+                        const poolValues = pools.map(p => p.available ? 1 : (p.cooldown_remaining > 0 ? 0.5 : 0));
+                        charts.pools.data.datasets[0].data = poolValues;
+                        charts.pools.update();
+                    }
+                })
+                .catch(err => console.error('Failed to load metrics:', err));
+        }, 30000);
+    </script>
+
+    <script>
+        // Chart.js charts
+        const charts = {};
+
+        function initCharts() {
+            fetch('/metrics')
+                .then(r => r.json())
+                .then(data => {
+                    const jev = data.jev || {};
+                    const pools = data.provider_pools || {};
+
+                    // Completion rate chart
+                    const completionCtx = document.getElementById('costChart');
+                    if (completionCtx && !charts.completion) {
+                        charts.completion = new Chart(completionCtx.getContext('2d'), {
+                            type: 'gauge',
+                            data: {
+                                labels: ['Completion Rate'],
+                                datasets: [{
+                                    data: [Math.min(100, jev.completion_rate || 0)],
+                                    backgroundColor: '#10b981',
+                                    borderColor: '#ffffff',
+                                    borderWidth: 2
+                                ]
+                            },
+                            options: {
+                                responsive: true,
+                                maintainAspectRatio: false,
+                                plugins: {
+                                    legend: { display: false },
+                                    title: { display: true, text: 'Task Completion Rate (%)' }
+                                },
+                                scales: {
+                                    y: { min: 0, max: 100 }
+                                }
+                            }
+                        });
+                    }
+
+                    // Error rate chart
+                    const errorCtx = document.getElementById('errorChart');
+                    if (errorCtx && !charts.error) {
+                        charts.error = new Chart(errorCtx.getContext('2d'), {
+                            type: 'gauge',
+                            data: {
+                                labels: ['Error Rate (%)'],
+                                datasets: [{
+                                    data: [Math.min(100, jev.error_rate || 0)],
+                                    backgroundColor: '#ef4444',
+                                    borderColor: '#ffffff',
+                                    borderWidth: 2
+                                ]
+                            },
+                            options: {
+                                responsive: true,
+                                maintainAspectRatio: false,
+                                plugins: {
+                                    legend: { display: false },
+                                    title: { display: true, text: 'Error Rate (%)' }
+                                },
+                                scales: {
+                                    y: { min: 0, max: 100 }
+                                }
+                            }
+                        });
+                    }
+
+                    // Pool status chart
+                    const poolCtx = document.getElementById('poolChart');
+                    if (poolCtx && pools && !charts.pools) {
+                        const poolNames = Object.keys(pools);
+                        const poolValues = pools.map(p => p.available ? 1 : (p.cooldown_remaining > 0 ? 0.5 : 0));
+                        charts.pools = new Chart(poolCtx.getContext('2d'), {
+                            type: 'bar',
+                            data: {
+                                labels: poolNames.map(p => p.split('_')[0]),
+                                datasets: [{
+                                    label: 'Pool Status',
+                                    data: poolValues,
+                                    backgroundColor: poolValues.map(v => v === 1 ? '#10b981' : (v === 0.5 ? '#f59e0b' : '#ef4444'))
+                                }]
+                            },
+                            options: {
+                                responsive: true,
+                                scales: {
+                                    y: { min: 0, max: 1, ticks: { display: false } }
+                                },
+                                plugins: {
+                                    legend: { display: false },
+                                    title: { display: true, text: 'Provider Pool Status' }
+                                }
+                            }
+                        });
+                    }
+                })
+                .catch(err => console.error('Failed to load metrics:', err));
+        }
+
+        // Initialize charts when page loads
+        document.addEventListener('DOMContentLoaded', initCharts);
+        // Refresh charts every 30 seconds
+        setInterval(() => {
+            fetch('/metrics')
+                .then(r => r.json())
+                .then(data => {
+                    const jev = data.jev || {};
+                    const pools = data.provider_pools || {};
+
+                    if (charts.completion) {
+                        charts.completion.data.datasets[0].data = [Math.min(100, jev.completion_rate || 0)];
+                        charts.completion.update();
+                    }
+
+                    if (charts.error) {
+                        charts.error.data.datasets[0].data = [Math.min(100, jev.error_rate || 0)];
+                        charts.error.update();
+                    }
+
+                    if (charts.pools && pools) {
+                        const poolValues = pools.map(p => p.available ? 1 : (p.cooldown_remaining > 0 ? 0.5 : 0));
+                        charts.pools.data.datasets[0].data = poolValues;
+                        charts.pools.update();
+                    }
+                })
+                .catch(err => console.error('Failed to load metrics:', err));
         }, 30000);
     </script>
 </body>
@@ -773,16 +1413,29 @@ DASHBOARD_PUBLIC_TEMPLATE = """<!DOCTYPE html>
         </div>
     </div>
 
-    <div class="card">
-        <h3>🏥 Provider Health</h3>
-        <div class="sparkline">{sparkline_html}</div>
-        <div class="small">Green = up · Red = down/cooling · Dim = idle</div>
-    </div>
-
-    <div class="card">
-        <h3>🧩 Recent Dost Tasks (last 10)</h3>
-        {dost_rows}
-    </div>
+        <div class="card">
+            <h3>🏥 Provider Health</h3>
+            <div class="sparkline">{sparkline_html}</div>
+            <div class="small">Green = up · Red = down/cooling · Dim = idle</div>
+        </div>
+        <div class="card">
+            <h3>📊 Cost Trend</h3>
+            <div class="chart-container">
+                <div class="chart-title">Daily Cost Units</div>
+                <div class="chart-canvas"><canvas id="costChart"></canvas></div>
+            </div>
+        </div>
+        <div class="card">
+            <h3>📊 Task Completion Trend</h3>
+            <div class="chart-container">
+                <div class="chart-title">Tasks Completed Over Time</div>
+                <div class="chart-canvas"><canvas id="taskChart"></canvas></div>
+            </div>
+        </div>
+        <div class="card">
+            <h3>🧩 Recent Dost Tasks (last 10)</h3>
+            {dost_rows}
+        </div>
 
     <div class="card">
         <h3>📡 Activity Feed</h3>
@@ -829,6 +1482,134 @@ DASHBOARD_PUBLIC_TEMPLATE = """<!DOCTYPE html>
                 resultDiv.style.color = '#ef4444';
             }}
         }});
+    </script>
+
+    <script>
+        // Chart.js charts
+        const charts = {};
+
+        function initCharts() {
+            fetch('/metrics')
+                .then(r => r.json())
+                .then(data => {
+                    const jev = data.jev || {};
+                    const pools = data.provider_pools || {};
+
+                    // Completion rate chart
+                    const completionCtx = document.getElementById('costChart');
+                    if (completionCtx && !charts.completion) {
+                        charts.completion = new Chart(completionCtx.getContext('2d'), {
+                            type: 'gauge',
+                            data: {
+                                labels: ['Completion Rate'],
+                                datasets: [{
+                                    data: [Math.min(100, jev.completion_rate || 0)],
+                                    backgroundColor: '#10b981',
+                                    borderColor: '#ffffff',
+                                    borderWidth: 2
+                                ]
+                            },
+                            options: {
+                                responsive: true,
+                                maintainAspectRatio: false,
+                                plugins: {
+                                    legend: { display: false },
+                                    title: { display: true, text: 'Task Completion Rate (%)' }
+                                },
+                                scales: {
+                                    y: { min: 0, max: 100 }
+                                }
+                            }
+                        });
+                    }
+
+                    // Error rate chart
+                    const errorCtx = document.getElementById('errorChart');
+                    if (errorCtx && !charts.error) {
+                        charts.error = new Chart(errorCtx.getContext('2d'), {
+                            type: 'gauge',
+                            data: {
+                                labels: ['Error Rate (%)'],
+                                datasets: [{
+                                    data: [Math.min(100, jev.error_rate || 0)],
+                                    backgroundColor: '#ef4444',
+                                    borderColor: '#ffffff',
+                                    borderWidth: 2
+                                ]
+                            },
+                            options: {
+                                responsive: true,
+                                maintainAspectRatio: false,
+                                plugins: {
+                                    legend: { display: false },
+                                    title: { display: true, text: 'Error Rate (%)' }
+                                },
+                                scales: {
+                                    y: { min: 0, max: 100 }
+                                }
+                            }
+                        });
+                    }
+
+                    // Pool status chart
+                    const poolCtx = document.getElementById('poolChart');
+                    if (poolCtx && pools && !charts.pools) {
+                        const poolNames = Object.keys(pools);
+                        const poolValues = pools.map(p => p.available ? 1 : (p.cooldown_remaining > 0 ? 0.5 : 0));
+                        charts.pools = new Chart(poolCtx.getContext('2d'), {
+                            type: 'bar',
+                            data: {
+                                labels: poolNames.map(p => p.split('_')[0]),
+                                datasets: [{
+                                    label: 'Pool Status',
+                                    data: poolValues,
+                                    backgroundColor: poolValues.map(v => v === 1 ? '#10b981' : (v === 0.5 ? '#f59e0b' : '#ef4444'))
+                                }]
+                            },
+                            options: {
+                                responsive: true,
+                                scales: {
+                                    y: { min: 0, max: 1, ticks: { display: false } }
+                                },
+                                plugins: {
+                                    legend: { display: false },
+                                    title: { display: true, text: 'Provider Pool Status' }
+                                }
+                            }
+                        });
+                    }
+                })
+                .catch(err => console.error('Failed to load metrics:', err));
+        }
+
+        // Initialize charts when page loads
+        document.addEventListener('DOMContentLoaded', initCharts);
+        // Refresh charts every 30 seconds
+        setInterval(() => {
+            fetch('/metrics')
+                .then(r => r.json())
+                .then(data => {
+                    const jev = data.jev || {};
+                    const pools = data.provider_pools || {};
+
+                    if (charts.completion) {
+                        charts.completion.data.datasets[0].data = [Math.min(100, jev.completion_rate || 0)];
+                        charts.completion.update();
+                    }
+
+                    if (charts.error) {
+                        charts.error.data.datasets[0].data = [Math.min(100, jev.error_rate || 0)];
+                        charts.error.update();
+                    }
+
+                    if (charts.pools && pools) {
+                        const poolValues = pools.map(p => p.available ? 1 : (p.cooldown_remaining > 0 ? 0.5 : 0));
+                        charts.pools.data.datasets[0].data = poolValues;
+                        charts.pools.update();
+                    }
+                })
+                .catch(err => console.error('Failed to load metrics:', err));
+        }, 30000);
     </script>
 </body>
 </html>"""
