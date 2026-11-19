@@ -66,6 +66,36 @@ from .cross_sectional_microstructure import (
     OrderFlowToxicityFactor,
     LiquidityFactor,
 )
+# New factors (2026-11-16)
+from .cross_asset_momentum import (
+    CrossAssetConfig,
+    CrossAssetMomentumFactor,
+    MultiHorizonCrossAssetMomentum,
+    create_cross_asset_momentum,
+)
+from .ml_alpha import (
+    MLModelConfig,
+    MLAlphaFactor,
+    LightGBMModel,
+    XGBoostModel,
+    EnsembleModel,
+    BaseMLModel,
+    create_ml_alpha_factor,
+)
+from .pairs_arbitrage import (
+    PairsConfig,
+    PairsArbitrageFactor,
+    KalmanFilterHedge,
+    PairSignal,
+    create_pairs_arbitrage,
+)
+from .option_greeks import (
+    OptionConfig,
+    OptionFactor,
+    BSMEngine,
+    SVIModel,
+    create_option_factor,
+)
 
 __all__ = [
     'FactorBase',
@@ -124,4 +154,30 @@ __all__ = [
     'VPINFactor',
     'OrderFlowToxicityFactor',
     'LiquidityFactor',
+    # New factors (2026-11-16)
+    # Cross-Asset Momentum
+    'CrossAssetConfig',
+    'CrossAssetMomentumFactor',
+    'MultiHorizonCrossAssetMomentum',
+    'create_cross_asset_momentum',
+    # ML Alpha
+    'MLModelConfig',
+    'MLAlphaFactor',
+    'LightGBMModel',
+    'XGBoostModel',
+    'EnsembleModel',
+    'BaseMLModel',
+    'create_ml_alpha_factor',
+    # Pairs Arbitrage
+    'PairsConfig',
+    'PairsArbitrageFactor',
+    'KalmanFilterHedge',
+    'PairSignal',
+    'create_pairs_arbitrage',
+    # Option Greeks
+    'OptionConfig',
+    'OptionFactor',
+    'BSMEngine',
+    'SVIModel',
+    'create_option_factor',
 ]

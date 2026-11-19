@@ -6,6 +6,7 @@ import asyncio
 import logging
 import sys
 import signal
+import time
 from pathlib import Path
 from typing import Optional
 import yaml
@@ -147,16 +148,60 @@ class AlphaSystem:
         self.running = True
         logger.info("Starting Alpha Trading System...")
         
-        # Start WebSocket connections
-        await self.ws_manager.start_all()
+        # Start WebSocket providers with indefinite auto-reconnect + health supervision (24/7)
+        self._tasks.append(asyncio.create_task(self.ws_manager.start_all_supervised()))
         
         # Start trading bot
         await self.trading_bot.start()
         
-        # Start monitoring
+        # Start monitoring loop
         self._tasks.append(asyncio.create_task(self._monitor_loop()))
         
+        # Start supervisor loop: restarts crashed components, keeps system alive 24/7
+        self._tasks.append(asyncio.create_task(self._supervisor_loop()))
+        
         logger.info("Alpha Trading System started successfully")
+
+    async def _supervisor_loop(self):
+        """Supervisor loop (24/7): monitors component health and restarts anything that dies.
+
+        Runs until self.running is False. Checks WebSocket provider connectivity
+        and TradingBot liveness, restarting components that have stopped
+        unexpectedly. Does NOT restart providers themselves — each provider's
+        own supervise() task handles reconnection; this loop handles whole
+        component crashes.
+        """
+        check_interval = self.config.get('supervisor', {}).get('check_interval', 30)
+        while self.running:
+            try:
+                await asyncio.sleep(check_interval)
+                if not self.running:
+                    break
+
+                # WebSocket providers: log health, let their own supervise() reconnect
+                if self.ws_manager:
+                    for p in self.ws_manager.providers:
+                        status = p.get_status()
+                        if not status.get("connected"):
+                            logger.warning(
+                                f"WS provider unhealthy: {status['provider']} "
+                                f"(reconnects={status['reconnect_count']}, "
+                                f"last_msg={status['last_message_age']:.0f}s ago)"
+                            )
+
+                # Trading bot: restart if it stopped unexpectedly
+                if self.trading_bot and not self.trading_bot.running and self.running:
+                    logger.warning("Trading bot not running, restarting...")
+                    try:
+                        await self.trading_bot.start()
+                    except Exception as e:
+                        logger.error(f"Failed to restart trading bot: {e}")
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Supervisor loop error: {e}")
+                await asyncio.sleep(5)
     
     async def stop(self):
         """Stop the trading system"""
