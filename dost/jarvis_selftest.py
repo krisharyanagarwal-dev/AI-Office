@@ -12,6 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import jarvis  # noqa: E402  (needed to stub dispatch below)
 from jarvis import route, execute, ToolCall, build_cached_context, resolve_pending, store_pending
 
+import proactive_monitor  # noqa: E402
+
 # Stub fleet dispatch so this selftest can never write to HIVE_DIR.
 # Mimics the unconfirmed path: restates intent, asks for "yes", writes nothing.
 def _stub_dispatch(text, confirmed, dry_run):
@@ -20,6 +22,17 @@ def _stub_dispatch(text, confirmed, dry_run):
     return "Stubbed dispatch: {0}".format(text[:50])
 
 jarvis.dispatch = _stub_dispatch
+
+# Stub iMessage delivery so the selftest never sends a real message.
+# Respects IMSG_PATH so the degraded test can simulate a missing binary.
+_SENT = []
+def _stub_send_imsg(text: str) -> bool:
+    if proactive_monitor.IMSG_PATH == "/nonexistent/imsg":
+        return False
+    _SENT.append(text)
+    return True
+
+proactive_monitor._send_imsg = _stub_send_imsg
 
 FAILS = 0
 
@@ -134,6 +147,55 @@ def test_resolve_pending():
     print("PASS resolve expired ->", out[:90])
 
 
+def test_notify_coalesce_and_dedup():
+    print("--- monitor notify: coalesce + dedupe ---")
+    # reset dedup + sent state
+    proactive_monitor.DEDUP_STATE.write_text("{}")
+    proactive_monitor.ALERTS_LOG.write_text("")
+    _SENT.clear()
+
+    # six pool-down alerts -> one iMessage
+    alerts = [
+        {"severity": "critical", "message": f"Pool nvidia_key{k} is down", "metric": f"pool_down_nvidia_key{k}"}
+        for k in range(1, 7)
+    ]
+    n = proactive_monitor.notify(alerts)
+    assert n == 6, n
+    assert len(_SENT) == 1, f"expected 1 iMessage, got {len(_SENT)}"
+    assert "Pool nvidia_key1 is down" in _SENT[0]
+    assert "Pool nvidia_key6 is down" in _SENT[0]
+    print("PASS coalesce -> 1 iMessage for 6 alerts")
+
+    # second cycle: same metrics -> deduped, silent
+    proactive_monitor.DEDUP_STATE.write_text("{}")
+    proactive_monitor.ALERTS_LOG.write_text("")
+    _SENT.clear()
+    # backdate dedup so alerts look recent
+    import json, time
+    state = {a["metric"]: time.time() - 100 for a in alerts}
+    proactive_monitor.DEDUP_STATE.write_text(json.dumps(state))
+    n = proactive_monitor.notify(alerts)
+    assert n == 0, n
+    assert len(_SENT) == 0
+    print("PASS dedupe -> 0 iMessages on repeat cycle")
+
+    # degraded: no imsg binary -> log-only, no crash
+    proactive_monitor.DEDUP_STATE.write_text("{}")
+    proactive_monitor.ALERTS_LOG.write_text("")
+    _SENT.clear()
+    real = proactive_monitor.IMSG_PATH
+    proactive_monitor.IMSG_PATH = "/nonexistent/imsg"
+    try:
+        n = proactive_monitor.notify(alerts)
+        assert n == 0, n
+        assert len(_SENT) == 0
+        # JSONL still written
+        assert proactive_monitor.ALERTS_LOG.exists()
+        print("PASS degrade -> no crash, history logged")
+    finally:
+        proactive_monitor.IMSG_PATH = real
+
+
 def test_context_packet():
     print("--- context packet ---")
     ctx = build_cached_context()
@@ -149,6 +211,7 @@ if __name__ == "__main__":
     test_execute_read_tools()
     test_execute_action_unconfirmed()
     test_resolve_pending()
+    test_notify_coalesce_and_dedup()
     test_context_packet()
     print()
     if FAILS:
