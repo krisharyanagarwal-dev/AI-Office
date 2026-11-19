@@ -61,9 +61,20 @@ def test_router_negative():
         "audit the system",
         "audit",
         "my cup of tea",
+        # imperative "remember X" is a memory WRITE — must fall through to plain chat
+        "remember I prefer oolong",
+        "remember this",
     ]
     for phrase in negative:
         check("negative: " + phrase, route(phrase), None)
+
+
+def test_router_remember():
+    print("--- router: remember split ---")
+    # question forms read conversation history -> recall
+    check("recall: do you remember", route("do you remember oolong"), ToolCall("recall"))
+    check("recall: what did we say", route("what did we say last time"), ToolCall("recall"))
+    check("recall: we talked about", route("we talked about this before"), ToolCall("recall"))
 
 
 def test_router_action_tools():
@@ -110,6 +121,17 @@ def test_resolve_pending():
     out = resolve_pending("maybe")
     assert out is None, out
     print("PASS resolve maybe -> None")
+    # expired offer: a stale "yes" must NOT fire an old dispatch
+    store_pending("run audit docs", ToolCall("dispatch", {"task": "run audit docs"}, confirmed=False, dry_run=True))
+    import json, time
+    with open(jarvis.PENDING_FILE) as f:
+        pending = json.load(f)
+    pending[-1]["ts"] = time.time() - 400  # older than PENDING_TTL (300s)
+    with open(jarvis.PENDING_FILE, "w") as f:
+        json.dump(pending, f)
+    out = resolve_pending("yes")
+    assert out and "expired" in out.lower(), out
+    print("PASS resolve expired ->", out[:90])
 
 
 def test_context_packet():
@@ -122,6 +144,7 @@ def test_context_packet():
 if __name__ == "__main__":
     test_router_read_tools()
     test_router_negative()
+    test_router_remember()
     test_router_action_tools()
     test_execute_read_tools()
     test_execute_action_unconfirmed()

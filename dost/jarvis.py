@@ -47,6 +47,7 @@ JARVIS_DIR.mkdir(parents=True, exist_ok=True)
 PENDING_FILE = JARVIS_DIR / "pending_actions.json"
 
 CACHE_TTL = 60  # seconds — live context is cached this long
+PENDING_TTL = 300  # seconds — a pending offer expires if not answered
 _ctx_cache = {"ts": 0.0, "text": ""}
 
 
@@ -83,7 +84,7 @@ def route(text: str) -> Optional[ToolCall]:
         return ToolCall("recent_tasks")
     if re.search(r"\b(alerts?|anything wrong|problems|fleet health|health check)\b", tl):
         return ToolCall("alerts")
-    if re.search(r"\b(remember|last time|we talked about|what did (i|we) say)\b", tl):
+    if re.search(r"\b(do you remember|did you remember|what did (i|we) say|we talked about|last time)\b", tl):
         return ToolCall("recall")
 
     return None
@@ -232,7 +233,9 @@ def execute(call: ToolCall, confirmed: bool = False) -> str:
 def store_pending(text: str, call: ToolCall) -> None:
     """Remember an unconfirmed action so a follow-up "yes" can resolve it."""
     pending = _load_pending()
-    pending.append({"text": text, "call": {"name": call.name, "args": call.args, "dry_run": call.dry_run}, "ts": time.time()})
+    now = time.time()
+    pending = [p for p in pending if now - p.get("ts", 0) < PENDING_TTL]
+    pending.append({"text": text, "call": {"name": call.name, "args": call.args, "dry_run": call.dry_run}, "ts": now})
     pending = pending[-20:]
     with open(PENDING_FILE, "w") as f:
         json.dump(pending, f, indent=2)
@@ -243,6 +246,13 @@ def resolve_pending(text: str) -> Optional[str]:
     pending = _load_pending()
     if not pending:
         return None
+    now = time.time()
+    fresh = [p for p in pending if now - p.get("ts", 0) < PENDING_TTL]
+    if len(fresh) != len(pending):
+        _save_pending(fresh)
+    pending = fresh
+    if not pending:
+        return "That offer expired — ask me again if you still want it."
     tl = text.strip().lower()
     if tl in ("yes", "y", "confirm", "do it", "send it", "go"):
         last = pending[-1]
