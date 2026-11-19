@@ -9,7 +9,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import jarvis  # noqa: E402  (needed to stub dispatch below)
 from jarvis import route, execute, ToolCall, build_cached_context, resolve_pending, store_pending
+
+# Stub fleet dispatch so this selftest can never write to HIVE_DIR.
+# Mimics the unconfirmed path: restates intent, asks for "yes", writes nothing.
+def _stub_dispatch(text, confirmed, dry_run):
+    if not confirmed and dry_run:
+        return 'I\'d dispatch this to the assistant department as "{0}". Say "yes" to confirm.'.format(text[:70])
+    return "Stubbed dispatch: {0}".format(text[:50])
+
+jarvis.dispatch = _stub_dispatch
 
 FAILS = 0
 
