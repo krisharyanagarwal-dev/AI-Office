@@ -53,3 +53,5 @@ Pictures/
 dost/history.jsonl
 dost/briefings/
 dost/jarvis_memory/
+dost/conversation.json
+dost/exports/
