@@ -39,13 +39,37 @@ def test_router_read_tools():
     check("recent tasks", route("recent tasks"), ToolCall("recent_tasks"))
     check("alerts", route("any alerts?"), ToolCall("alerts"))
     check("recall", route("what did we say last time"), ToolCall("recall"))
+    check("system health", route("system health"), ToolCall("fleet_status"))
     check("plain chat", route("hey how are you"), None)
     check("plain chat 2", route("write me a python script"), None)
 
 
+def test_router_negative():
+    print("--- router: negative (plain chat, must not dispatch) ---")
+    negative = [
+        "do you like tea",
+        "do you know what time it is",
+        "start over",
+        "run with it",
+        "check out this song",
+        "execute order 66",
+        "start fresh",
+        "what should I do",
+        "is everything ok",
+        "check the system",
+        "run an audit",
+        "audit the system",
+        "audit",
+        "my cup of tea",
+    ]
+    for phrase in negative:
+        check("negative: " + phrase, route(phrase), None)
+
+
 def test_router_action_tools():
     print("--- router: action tools ---")
-    check("run audit", route("run an audit on the docs"), ToolCall("dispatch", {"task": "run an audit on the docs"}, confirmed=False, dry_run=True))
+    check("dispatch audit", route("dispatch an audit on the docs"), ToolCall("dispatch", {"task": "dispatch an audit on the docs"}, confirmed=False, dry_run=True))
+    check("dispatch generic", route("dispatch this to the fleet"), ToolCall("dispatch", {"task": "dispatch this to the fleet"}, confirmed=False, dry_run=True))
     check("start task", route("start a debate on the model"), ToolCall("debate", {"prompt": "start a debate on the model"}, confirmed=False, dry_run=True))
     check("debate keyword", route("debate qwen vs nemotron"), ToolCall("debate", {"prompt": "debate qwen vs nemotron"}, confirmed=False, dry_run=True))
 
@@ -97,6 +121,7 @@ def test_context_packet():
 
 if __name__ == "__main__":
     test_router_read_tools()
+    test_router_negative()
     test_router_action_tools()
     test_execute_read_tools()
     test_execute_action_unconfirmed()

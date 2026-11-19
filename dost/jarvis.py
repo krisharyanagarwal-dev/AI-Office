@@ -64,6 +64,18 @@ def route(text: str) -> Optional[ToolCall]:
     t = text.strip()
     tl = t.lower()
 
+    # ----- action tools (require confirm) — checked first, explicit intent -----
+    if re.search(r"\b(debate|compare (agents|models))\b", tl):
+        return ToolCall("debate", {"prompt": text}, confirmed=False, dry_run=True)
+    if tl.startswith("dispatch "):
+        return ToolCall("dispatch", {"task": text}, confirmed=False, dry_run=True)
+
+    # ----- audit falls through to the read-only wants_audit() path -----
+    # Audit is surveillance, not an action to dispatch. Dispatch an audit
+    # explicitly: "dispatch an audit on the docs".
+    if re.search(r"\baudit\b", tl):
+        return None
+
     # ----- read-only tools (run unattended) -----
     if re.search(r"\b(fleet|dispatcher|how.?s the fleet|tasks? running|systems? )\b", tl):
         return ToolCall("fleet_status")
@@ -73,12 +85,6 @@ def route(text: str) -> Optional[ToolCall]:
         return ToolCall("alerts")
     if re.search(r"\b(remember|last time|we talked about|what did (i|we) say)\b", tl):
         return ToolCall("recall")
-
-    # ----- action tools (require confirm) -----
-    if re.search(r"\b(debate|compare (agents|models))\b", tl):
-        return ToolCall("debate", {"prompt": text}, confirmed=False, dry_run=True)
-    if tl.startswith(("run ", "start ", "dispatch ", "audit ", "check out ", "execute ", "do ")):
-        return ToolCall("dispatch", {"task": text}, confirmed=False, dry_run=True)
 
     return None
 
