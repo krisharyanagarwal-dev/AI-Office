@@ -5,6 +5,10 @@ Runs: python3 dost/jarvis_selftest.py
 from __future__ import annotations
 
 import sys
+import shutil
+import json
+import time
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -149,51 +153,52 @@ def test_resolve_pending():
 
 def test_notify_coalesce_and_dedup():
     print("--- monitor notify: coalesce + dedupe ---")
-    # reset dedup + sent state
+    # Isolate state in a temp dir so production jarvis_memory/ is untouched.
+    tmpdir = Path(tempfile.mkdtemp())
+    proactive_monitor.ALERTS_LOG = tmpdir / "alerts.jsonl"
+    proactive_monitor.DEDUP_STATE = tmpdir / "alerts_dedup.json"
     proactive_monitor.DEDUP_STATE.write_text("{}")
     proactive_monitor.ALERTS_LOG.write_text("")
     _SENT.clear()
 
-    # six pool-down alerts -> one iMessage
     alerts = [
         {"severity": "critical", "message": f"Pool nvidia_key{k} is down", "metric": f"pool_down_nvidia_key{k}"}
         for k in range(1, 7)
     ]
-    n = proactive_monitor.notify(alerts)
-    assert n == 6, n
+
+    # six pool-down alerts -> one iMessage
+    sent, present = proactive_monitor.notify(alerts)
+    assert sent == 6 and present == 6, (sent, present)
     assert len(_SENT) == 1, f"expected 1 iMessage, got {len(_SENT)}"
     assert "Pool nvidia_key1 is down" in _SENT[0]
     assert "Pool nvidia_key6 is down" in _SENT[0]
     print("PASS coalesce -> 1 iMessage for 6 alerts")
 
-    # second cycle: same metrics -> deduped, silent
-    proactive_monitor.DEDUP_STATE.write_text("{}")
-    proactive_monitor.ALERTS_LOG.write_text("")
+    # second cycle: same metrics -> deduped, silent (0 sent, 6 present)
     _SENT.clear()
-    # backdate dedup so alerts look recent
-    import json, time
     state = {a["metric"]: time.time() - 100 for a in alerts}
     proactive_monitor.DEDUP_STATE.write_text(json.dumps(state))
-    n = proactive_monitor.notify(alerts)
-    assert n == 0, n
+    sent, present = proactive_monitor.notify(alerts)
+    assert sent == 0 and present == 6, (sent, present)
     assert len(_SENT) == 0
-    print("PASS dedupe -> 0 iMessages on repeat cycle")
+    print("PASS dedupe -> 0 sent / 6 present on repeat cycle")
 
-    # degraded: no imsg binary -> log-only, no crash
+    # degraded: no imsg binary -> 0 sent, history still logged
+    _SENT.clear()
     proactive_monitor.DEDUP_STATE.write_text("{}")
     proactive_monitor.ALERTS_LOG.write_text("")
-    _SENT.clear()
     real = proactive_monitor.IMSG_PATH
     proactive_monitor.IMSG_PATH = "/nonexistent/imsg"
     try:
-        n = proactive_monitor.notify(alerts)
-        assert n == 0, n
+        sent, present = proactive_monitor.notify(alerts)
+        assert sent == 0 and present == 6, (sent, present)
         assert len(_SENT) == 0
-        # JSONL still written
         assert proactive_monitor.ALERTS_LOG.exists()
-        print("PASS degrade -> no crash, history logged")
+        print("PASS degrade -> 0 sent / 6 present, history logged, no crash")
     finally:
         proactive_monitor.IMSG_PATH = real
+
+    shutil.rmtree(tmpdir)
 
 
 def test_context_packet():

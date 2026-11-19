@@ -199,14 +199,15 @@ def _send_imsg(text: str) -> bool:
         return False
 
 
-def notify(alerts: list[dict]) -> int:
+def notify(alerts: list[dict]) -> tuple[int, int]:
     """Coalesce + dedupe + notify.
 
-    Returns the number of distinct alerts sent via iMessage.
-    All alerts (sent or not) are appended to the JSONL history.
+    Returns (sent_count, present_count) — present is every alert this cycle,
+    sent is how many were actually pushed via iMessage. All alerts are
+    appended to the JSONL history regardless of delivery.
     """
     if not alerts:
-        return 0
+        return 0, 0
     state = _load_dedup()
     now = time.time()
     fresh = [a for a in alerts if now - state.get(a["metric"], 0) > DEDUP_TTL]
@@ -217,7 +218,7 @@ def notify(alerts: list[dict]) -> int:
     _append_alerts(alerts)
 
     if not fresh:
-        return 0
+        return 0, len(alerts)
 
     # Coalesce every fresh alert into a single iMessage.
     lines = []
@@ -227,19 +228,23 @@ def notify(alerts: list[dict]) -> int:
     body = "Fleet alert(s):\n" + "\n".join(lines)
 
     if _send_imsg(body):
-        return len(fresh)
-    return 0
+        return len(fresh), len(alerts)
+    return 0, len(alerts)
 
 
 def run_monitor_once() -> list[dict]:
-    """Run one monitoring cycle. Returns list of alerts notified via iMessage."""
+    """Run one monitoring cycle. Returns the full list of alerts present."""
     alerts = check_fleet_health()
-    notified = notify(alerts)
-    if notified:
-        print(f"Notified {notified} alert(s) via iMessage")
-    else:
+    sent, present = notify(alerts)
+    if present == 0:
         print("All systems normal")
-    return alerts[:notified] if notified else []
+    elif sent == present:
+        print(f"Notified {sent} alert(s) via iMessage")
+    elif sent == 0:
+        print(f"{present} alert(s) present but iMessage delivery failed — see {ALERTS_LOG}")
+    else:
+        print(f"Sent {sent}/{present} alert(s) via iMessage — rest already notified this hour")
+    return alerts
 
 
 def speak_alert(text: str) -> bool:
