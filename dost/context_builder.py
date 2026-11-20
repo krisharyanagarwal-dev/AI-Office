@@ -231,6 +231,53 @@ def memory_section() -> str:
     return "\n".join(lines)
 
 
+def alerts_section() -> str:
+    """Summarize recent open alerts from the proactive monitor's JSONL log.
+
+    Reads jarvis_memory/alerts.jsonl and surfaces unique alerts from the
+    last 24 hours, deduped by metric so a repeating failure shows once.
+    """
+    lines = ["RECENT ALERTS:"]
+    alerts_log = Path("/Users/aryanagarwal/AI-Office/dost/jarvis_memory/alerts.jsonl")
+    if not alerts_log.exists():
+        lines.append("  No alerts recorded.")
+        return "\n".join(lines)
+
+    try:
+        with open(alerts_log) as f:
+            entries = [json.loads(line) for line in f if line.strip()]
+    except (OSError, ValueError):
+        lines.append("  Could not read alerts log.")
+        return "\n".join(lines)
+
+    if not entries:
+        lines.append("  No alerts recorded.")
+        return "\n".join(lines)
+
+    # Last 24 hours, deduped by metric (most recent per metric wins)
+    now = time.time()
+    day_ago = now - 86400
+    seen_metrics = {}
+    for e in reversed(entries):
+        ts = e.get("ts", 0)
+        if ts < day_ago:
+            continue
+        metric = e.get("metric", "unknown")
+        if metric not in seen_metrics:
+            seen_metrics[metric] = e
+
+    if not seen_metrics:
+        lines.append("  No alerts in the last 24 hours.")
+        return "\n".join(lines)
+
+    for metric, e in list(seen_metrics.items())[:8]:
+        sev = e.get("severity", "unknown").upper()
+        msg = e.get("message", "Unknown alert")
+        lines.append(f"  [{sev}] {msg}")
+
+    return "\n".join(lines)
+
+
 def build_context() -> str:
     """Build the full context string injected into the LLM system prompt."""
     sections = [
@@ -243,6 +290,8 @@ def build_context() -> str:
         fleet_section(),
         "",
         provider_section(),
+        "",
+        alerts_section(),
         "",
         memory_section(),
     ]
