@@ -55,3 +55,22 @@ dost/briefings/
 dost/jarvis_memory/
 dost/conversation.json
 dost/exports/
+
+# Archived packages — 17GB / 171k untracked files. Walking these made
+# opencode/git snapshots saturate the disk (8k IOPS) and peg fseventsd.
+packages/_archive/
+
+# Vendored sibling project — src/openalice-fleet is its own git repo (481MB,
+# ~30k files incl. node_modules). Committing it would embed a broken gitlink.
+src/
+
+# Runtime artifacts, not source
+packages/office-core/pids/
+packages/office-core/*.db-shm
+packages/office-core/*.db-wal
+reports/
+.all_stocks_checkpoint.json
+all_stocks_summary_*.csv
+
+# Compiled Swift/Mach-O helper, rebuilt from mac_app sources
+dost/mac_app/DostBinary
