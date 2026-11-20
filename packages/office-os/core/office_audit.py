@@ -201,23 +201,66 @@ def pools() -> dict:
 
 # ---------- cadence: did the autopilot actually run? ----------
 def _round_events():
-    """Count autopilot round lifecycle events. A round that starts and neither
-    finishes nor fails is a HANG, which is invisible in the round files alone."""
+    """Autopilot round outcomes for the CURRENT orchestrator process.
+
+    A round that starts and neither finishes nor fails is a HANG, invisible in the
+    round files alone. But events.jsonl is append-only, so judging lifetime totals
+    would keep reporting a hang that a restart has already fixed. The log also
+    records orchestrator_started, so the honest window is the rounds started since
+    the last one: that is the behaviour of the code running right now.
+    """
     counts = {"started": 0, "finished": 0, "failed": 0}
+    outcome, order = {}, []          # this process only
     try:
         for line in EVENTS_PATH.read_text().splitlines():
-            if "autopilot_round" not in line:
+            if "orchestrator_started" not in line and "autopilot_round" not in line:
                 continue
             try:
-                event = json.loads(line).get("event", "")
+                doc = json.loads(line)
             except json.JSONDecodeError:
+                continue
+            event, rnd = doc.get("event", ""), doc.get("round")
+            if event == "orchestrator_started":
+                outcome, order = {}, []   # new process: previous rounds are history
                 continue
             for key in counts:
                 if event == f"autopilot_round_{key}":
                     counts[key] += 1
+                    if not rnd:
+                        continue
+                    if key == "started":
+                        if rnd not in outcome:
+                            outcome[rnd] = None
+                            order.append(rnd)
+                    else:
+                        outcome[rnd] = key
     except OSError:
         return None
+
+    # The newest round may legitimately still be running; everything before it
+    # should have settled one way or the other.
+    newest = order[-1] if order else None
+    in_flight = newest if newest and outcome.get(newest) is None else None
+    settled = [r for r in order if r != in_flight]
+    counts.update({
+        "this_process": len(order),
+        "settled": len(settled),
+        "lost": sum(1 for r in settled if outcome.get(r) is None),
+        "newest_round": newest,
+        "newest_outcome": outcome.get(newest) if newest else None,
+        "in_flight": in_flight,
+        "in_flight_age_min": _round_id_age_min(in_flight) if in_flight else None,
+    })
     return counts
+
+
+def _round_id_age_min(round_id):
+    """Rounds are stamped %Y%m%d-%H%M%S, so the id itself dates an in-flight round."""
+    try:
+        return round((time.time() - time.mktime(
+            time.strptime(round_id, "%Y%m%d-%H%M%S"))) / 60.0, 1)
+    except (ValueError, TypeError):
+        return None
 
 
 def cadence() -> dict:

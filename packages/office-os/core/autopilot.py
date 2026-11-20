@@ -224,8 +224,15 @@ class Autopilot:
             lines.append("Recently failed tasks:")
             lines += [f"- {t['title']}: {str(t.get('error'))[:200]}" for t in failed]
         lines.append(self._org_digest())
+        # Only a genuinely recent round-up is "previous". The office carried a
+        # 5-day-old summary (written under a different department set) into every
+        # round as context, which steered both the questions and the answers:
+        # backtest-auditor answered as a blockchain security auditor about a
+        # deadline that had long passed. An undated or stale summary is dropped.
         prev = self.state.get("last_summary")
-        if prev:
+        prev_at = self.state.get("last_summary_at")
+        max_age_sec = 4 * 60 * (self.cfg.get("interval_min") or 30)
+        if prev and prev_at and (time.time() - prev_at) < max_age_sec:
             lines.append("Previous round-up (do not repeat it, build on it):")
             lines.append(prev[:1200])
         return "\n".join(lines)
@@ -402,6 +409,7 @@ class Autopilot:
         (ROUNDS_DIR / f"round-{stamp}.md").write_text("\n".join(out))
         if summary:
             self.state["last_summary"] = summary
+            self.state["last_summary_at"] = time.time()   # so staleness is knowable
             self._save_state()
 
     def _load_state(self):

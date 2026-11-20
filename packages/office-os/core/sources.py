@@ -419,28 +419,32 @@ def office_cadence():
         summary = "autopilot disabled in config"
         return _result(name, True, age, summary, [])
     ev = r.get("events")
-    hung = ev and ev["started"] > 0 and (ev["finished"] + ev["failed"]) == 0
-    if hung:
-        # A round that starts and neither finishes nor fails did not fail to run:
-        # it ran and blocked. Saying "never ran" would send the reader to the wrong
-        # place, so name the shape and point at the event log.
+    if ev is None:
+        problems.append(f"cannot read the event log at {r['events_path']} - cadence unverifiable")
+    elif ev["settled"] and ev["lost"] == ev["settled"]:
         problems.append(
-            f"{ev['started']} rounds STARTED, {ev['finished']} finished, {ev['failed']} failed - "
-            f"every round blocks mid-round and writes nothing (see {r['events_path']})"
+            f"all {ev['settled']} settled rounds of the running orchestrator STARTED and never "
+            f"finished or failed - every round blocks mid-round (see {r['events_path']})"
+        )
+    elif ev["lost"]:
+        problems.append(
+            f"{ev['lost']} of {ev['settled']} settled rounds in the running orchestrator started "
+            "without finishing or failing - rounds are being lost, not completed"
         )
     elif not r["rounds_dir_exists"] or r["round_files"] == 0:
         problems.append(
             f"autopilot is enabled (every {interval} min) but has written no round file to "
             f"{r['rounds_dir']} - enabled is not running"
         )
-    elif ev and ev["finished"] + ev["failed"] < ev["started"] - 1:
+    if ev and ev["in_flight"] and (ev["in_flight_age_min"] or 0) > 2 * interval:
         problems.append(
-            f"{ev['started'] - ev['finished'] - ev['failed']} rounds started without finishing "
-            "or failing - rounds are being lost, not completed"
+            f"round {ev['in_flight']} has been in flight {ev['in_flight_age_min']} min, over "
+            f"2x the {interval} min interval - it is stalled, not slow"
         )
-    if age is not None and age > 3 * interval and not hung:
-        problems.append(f"newest round is {age} min old, over 3x the {interval} min interval")
-    ev_bit = f"; events {ev['started']}/{ev['finished']}/{ev['failed']} started/finished/failed" if ev else ""
+    if age is not None and age > 3 * interval and not problems:
+        problems.append(f"newest round file is {age} min old, over 3x the {interval} min interval")
+    ev_bit = (f"; {ev['started']}/{ev['finished']}/{ev['failed']} started/finished/failed all-time, "
+              f"this process {ev['this_process']}, last round {ev['newest_outcome'] or 'in flight'}") if ev else ""
     summary = f"{r['round_files']} round files; newest {'none' if age is None else str(age) + ' min'} old{ev_bit}"
     return _result(name, not problems, age, summary, problems)
 
