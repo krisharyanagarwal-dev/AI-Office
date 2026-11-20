@@ -23,7 +23,15 @@ from core.router import ProviderRouter
 from agents.god_agent import GodAgent
 
 sys.path.insert(0, "/Users/aryanagarwal/AI-Office/dost")
-from workspace import (
+# `workspace` and `activity_feed` moved into the `collab` subpackage in
+# ec37280d ("group 36 modules into 7 subpackages"). The bare imports below
+# stopped resolving, so this module died at import time with
+# "ModuleNotFoundError: No module named 'workspace'" and the launchd job
+# crash-looped (109 runs, exit 1) instead of serving anything. The sibling
+# callers were updated in the same refactor -- dost/dost.py and
+# dost/setup_wizard.py both use `from collab.workspace import ...` -- and this
+# one was missed.
+from collab.workspace import (
     workspace_exists,
     get_workspace,
     can_access_workspace,
@@ -38,7 +46,7 @@ from billing.meter import get_usage_summary, get_current_month_cost, workspace_p
 from billing.plans import get_plan, calculate_monthly_cost
 
 sys.path.insert(0, "/Users/aryanagarwal/AI-Office/dost")
-from activity_feed import get_activity_feed
+from collab.activity_feed import get_activity_feed
 
 OFFICE_ROOT = Path("/Users/aryanagarwal/AI-Office/packages/office-os")
 CONFIG_DIR = OFFICE_ROOT / "config"
