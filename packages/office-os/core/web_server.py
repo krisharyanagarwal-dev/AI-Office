@@ -2470,6 +2470,7 @@ class OfficeHandler(BaseHTTPRequestHandler):
                 "available": ollama_ok,
                 "model": "hauhaucs/qwen3.5-9b-uncensored-aggressive",
             },
+            "stocks": stocks_metrics,
             "provider_pools": pool_status,
             "free_ceiling": {
                 "calls_per_day_ceiling": 288000,
