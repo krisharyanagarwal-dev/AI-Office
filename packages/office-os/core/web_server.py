@@ -5,13 +5,15 @@ User-based: login required, each user sees only their own tasks.
 """
 import glob
 import json
+import logging
 import os
 import sys
 import uuid
 import time
+import threading
 import urllib.request
 from datetime import datetime, timedelta, timezone
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
@@ -54,6 +56,9 @@ HIVE_DIR = str(OFFICE_ROOT / "tasks")
 # JEV dispatcher log & kill switch (used by the public /dashboard route)
 JEV_LOG = "/Users/aryanagarwal/.openclaw/jev-dispatcher.log"
 KILL_SWITCH_PATH = "/Users/aryanagarwal/AI-Office/packages/_archive/openalice-fleet/state/trader_killswitch_status.json"
+
+# Stock bot metrics file (written by all_stocks_bot.py after each run)
+STOCKS_METRICS_FILE = Path("/Users/aryanagarwal/.openclaw/stocks_metrics.json")
 
 # Load users
 with open(CONFIG_DIR / "users.json") as f:
@@ -1738,6 +1743,8 @@ class OfficeHandler(BaseHTTPRequestHandler):
             self._serve_dashboard_task()
         elif parsed.path == "/api/workspaces":
             self._create_api_workspace()
+        elif parsed.path == "/api/stocks":
+            self._serve_stocks_metrics()
         else:
             self.send_error(404)
 
@@ -1778,6 +1785,29 @@ class OfficeHandler(BaseHTTPRequestHandler):
         self.send_response(302)
         self.send_header("Location", "/login")
         self.end_headers()
+
+    # ---------- stock bot metrics ----------
+    def _serve_stocks_metrics(self):
+        """Receive stock bot run results and persist them to STOCKS_METRICS_FILE."""
+        content_length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(content_length).decode("utf-8")
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError:
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "invalid json"}).encode("utf-8"))
+            return
+
+        STOCKS_METRICS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(STOCKS_METRICS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"status": "ok"}).encode("utf-8"))
 
     # ---------- workspace auth context ----------
     def _workspace_context(self):
@@ -2410,6 +2440,15 @@ class OfficeHandler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
+        # Stock bot metrics: last run results from all_stocks_bot.py
+        stocks_metrics = {}
+        try:
+            if STOCKS_METRICS_FILE.exists():
+                with open(STOCKS_METRICS_FILE) as f:
+                    stocks_metrics = json.load(f)
+        except Exception:
+            pass
+
         return {
             "service": "office-web-metrics",
             "status": "ok",
@@ -2441,7 +2480,29 @@ class OfficeHandler(BaseHTTPRequestHandler):
 
     def _serve_metrics(self):
         """System metrics endpoint - aggregates Qwen, JEV, and Ollama health."""
-        payload = self._build_metrics_payload()
+        result = {}
+
+        def _build():
+            result["payload"] = self._build_metrics_payload()
+
+        t = threading.Thread(target=_build, daemon=True)
+        t.start()
+        t.join(timeout=8)
+        if t.is_alive():
+            payload = {
+                "service": "office-web-metrics",
+                "status": "degraded",
+                "error": "metrics build timed out",
+            }
+        else:
+            payload = result.get(
+                "payload",
+                {
+                    "service": "office-web-metrics",
+                    "status": "error",
+                    "error": "metrics build failed",
+                },
+            )
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -3584,7 +3645,7 @@ def run(port=8083):
         print("[web_server] Another instance is already running. Exiting.")
         return
     try:
-        server = HTTPServer(("127.0.0.1", port), OfficeHandler)
+        server = ThreadingHTTPServer(("127.0.0.1", port), OfficeHandler)
         print(f"Office OS web server running at http://localhost:{port}")
         print("Users: aryan (owner), demo (user)")
         print("Press Ctrl+C to stop")
