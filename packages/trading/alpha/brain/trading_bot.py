@@ -6,6 +6,8 @@ import logging
 import time
 from typing import Dict, List, Optional
 
+from alpha.data.stock_metrics import load_stock_metrics, symbol_fundamentals
+
 logger = logging.getLogger(__name__)
 
 
@@ -39,6 +41,12 @@ class TradingBot:
 
         # Latest market prices (symbol -> price) for mark-to-market
         self._market_prices: Dict[str, float] = {}
+
+        # Latest fundamental context per symbol (from all_stocks_bot metrics).
+        # Factual flags only (valuation, leverage, liquidity, profitability,
+        # ROE, momentum) — context/metadata, never a directional signal.
+        self._fundamentals: Dict[str, dict] = {}
+        self._fundamentals_ts: float = 0.0
         
     async def initialize(self):
         logger.info("TradingBot initialized")
@@ -50,10 +58,21 @@ class TradingBot:
             self._market_prices[bar.symbol] = float(bar.close)
         except Exception:
             pass
+
+        # Build decision context: price + fundamental context (metadata only,
+        # never a directional signal). ChartBrain context is a stub today, so
+        # we assemble what we have and let the decision brain consume it.
+        context = self.chart_brain.get_chart_context(bar.symbol) or {}
+        if not isinstance(context, dict):
+            context = {}
+        context["symbol"] = bar.symbol
+        context["price"] = self._market_prices.get(bar.symbol)
+        fundamentals = self.get_symbol_fundamentals(bar.symbol)
+        if fundamentals:
+            context["fundamentals"] = fundamentals
         await self.chart_brain.on_bar(bar)
-        
+
         # Generate signals
-        context = self.chart_brain.get_chart_context(bar.symbol)
         if context:
             signals = await self.decision_brain.generate_signals(context)
             # Process signals through risk manager
@@ -120,6 +139,10 @@ class TradingBot:
             "last_heartbeat_age": (time.time() - self._last_heartbeat) if self._last_heartbeat else None,
             "loop_error_count": self._loop_error_count,
             "loop_interval": self._loop_interval,
+            "fundamentals": {
+                "symbols": len(self._fundamentals),
+                "loaded_at": self._fundamentals_ts,
+            },
         }
     
     async def _execution_loop(self):
@@ -141,6 +164,9 @@ class TradingBot:
                 
                 # Mark-to-market open positions with latest prices
                 await self._mark_to_market()
+                
+                # Refresh fundamental context from all_stocks_bot metrics
+                self._refresh_fundamentals()
                 
                 # Persist execution state (positions/orders/balances) each tick
                 await self._persist_state()
@@ -215,6 +241,30 @@ class TradingBot:
                 await updater(dict(self._market_prices))
             except Exception as e:
                 logger.debug(f"mark to market: {e}")
+
+    def _refresh_fundamentals(self):
+        """Load the latest all_stocks_bot metrics and index per-symbol fundamentals.
+
+        Fails silently — a missing or unreadable metrics file leaves the
+        previous (possibly empty) fundamentals in place and never blocks the
+        execution loop. The flags are factual context only, not signals.
+        """
+        try:
+            metrics = load_stock_metrics()
+            if not metrics:
+                return
+            top = metrics.get("top_by_market_cap") or {}
+            if isinstance(top, list):
+                self._fundamentals = {
+                    entry.get("symbol"): entry for entry in top if entry.get("symbol")
+                }
+            self._fundamentals_ts = time.time()
+        except Exception:  # never crash the execution loop on metrics
+            pass
+
+    def get_symbol_fundamentals(self, symbol: str) -> Optional[dict]:
+        """Return the latest fundamental block for a symbol, or None."""
+        return self._fundamentals.get(symbol)
 
     async def _persist_execution_state(self):
         """Persist positions/orders/balances to StateStore each tick."""
