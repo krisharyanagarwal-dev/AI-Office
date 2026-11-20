@@ -418,14 +418,30 @@ def office_cadence():
     if not r["enabled"]:
         summary = "autopilot disabled in config"
         return _result(name, True, age, summary, [])
-    if not r["rounds_dir_exists"] or r["round_files"] == 0:
+    ev = r.get("events")
+    hung = ev and ev["started"] > 0 and (ev["finished"] + ev["failed"]) == 0
+    if hung:
+        # A round that starts and neither finishes nor fails did not fail to run:
+        # it ran and blocked. Saying "never ran" would send the reader to the wrong
+        # place, so name the shape and point at the event log.
+        problems.append(
+            f"{ev['started']} rounds STARTED, {ev['finished']} finished, {ev['failed']} failed - "
+            f"every round blocks mid-round and writes nothing (see {r['events_path']})"
+        )
+    elif not r["rounds_dir_exists"] or r["round_files"] == 0:
         problems.append(
             f"autopilot is enabled (every {interval} min) but has written no round file to "
             f"{r['rounds_dir']} - enabled is not running"
         )
-    elif age is not None and age > 3 * interval:
+    elif ev and ev["finished"] + ev["failed"] < ev["started"] - 1:
+        problems.append(
+            f"{ev['started'] - ev['finished'] - ev['failed']} rounds started without finishing "
+            "or failing - rounds are being lost, not completed"
+        )
+    if age is not None and age > 3 * interval and not hung:
         problems.append(f"newest round is {age} min old, over 3x the {interval} min interval")
-    summary = f"{r['round_files']} rounds; newest {'none' if age is None else str(age) + ' min'} old"
+    ev_bit = f"; events {ev['started']}/{ev['finished']}/{ev['failed']} started/finished/failed" if ev else ""
+    summary = f"{r['round_files']} round files; newest {'none' if age is None else str(age) + ' min'} old{ev_bit}"
     return _result(name, not problems, age, summary, problems)
 
 

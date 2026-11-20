@@ -20,7 +20,10 @@ class ProviderRouter:
         # Per-pool state: cooldown until timestamp, task count for round-robin
         self.cooldowns = {name: 0 for name in self.pools}
         self.task_counts = self._load_task_counts()
-        self._lock = threading.Lock()
+        # RLock, not Lock: select_provider() holds this while calling is_available()
+        # and _round_robin_model(), which re-acquire it. With a plain Lock that is a
+        # self-deadlock on the same thread, and it silently hung every autopilot round.
+        self._lock = threading.RLock()
 
     def _load_task_counts(self):
         """Load persisted task counts for round-robin across CLI invocations."""

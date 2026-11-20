@@ -9,7 +9,7 @@ pool) and departments citing survey sources that no collector produces any more.
   registry()  agents in config vs tiers vs persona prompt files on disk
   wiring()    each department's leads and sources vs what actually exists
   pools()     provider pools and the fallback chain vs keys PRESENT (never read)
-  cadence()   autopilot round files vs the configured interval
+  cadence()   autopilot round files and round lifecycle events vs the interval
 
 Rules (same as sources.py / ops_probes.py):
   * Read-only. Nothing is started, written, deleted or sent anywhere.
@@ -28,6 +28,7 @@ HOME = Path.home()
 CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "office.json"
 AGENT_DIR = HOME / ".config" / "opencode" / "agent"
 ROUNDS_DIR = HOME / "office-os" / "logs" / "autopilot"
+EVENTS_PATH = HOME / "office-os" / "logs" / "events.jsonl"
 ENV_FILE = HOME / ".env"
 
 # A persona shorter than this is a stub: autopilot would send almost no role.
@@ -199,6 +200,26 @@ def pools() -> dict:
 
 
 # ---------- cadence: did the autopilot actually run? ----------
+def _round_events():
+    """Count autopilot round lifecycle events. A round that starts and neither
+    finishes nor fails is a HANG, which is invisible in the round files alone."""
+    counts = {"started": 0, "finished": 0, "failed": 0}
+    try:
+        for line in EVENTS_PATH.read_text().splitlines():
+            if "autopilot_round" not in line:
+                continue
+            try:
+                event = json.loads(line).get("event", "")
+            except json.JSONDecodeError:
+                continue
+            for key in counts:
+                if event == f"autopilot_round_{key}":
+                    counts[key] += 1
+    except OSError:
+        return None
+    return counts
+
+
 def cadence() -> dict:
     cfg, err = _config()
     if err:
@@ -219,6 +240,8 @@ def cadence() -> dict:
     return {
         "enabled": bool(ap.get("enabled")),
         "interval_min": ap.get("interval_min"),
+        "events": _round_events(),
+        "events_path": str(EVENTS_PATH),
         "rounds_dir": str(ROUNDS_DIR),
         "rounds_dir_exists": dir_exists,
         "round_files": len(rounds),
