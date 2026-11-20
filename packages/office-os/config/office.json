@@ -294,6 +294,50 @@
         "live_orders_allowed stays false",
         "kill switch must remain LOCKED"
       ]
+    },
+    {
+      "id": "infrastructure-reliability",
+      "leads": [
+        "ops-health-auditor",
+        "launchd-janitor",
+        "mini-deploy-steward",
+        "model-stack-warden"
+      ],
+      "sources": [
+        "office-hud",
+        "laptop-jobs",
+        "mini-office",
+        "ops-mini-services",
+        "ops-mini-jobs",
+        "ops-market-data"
+      ],
+      "brief": "Keep the laptop and Mac mini healthy from evidence. Every recommendation cites a survey line and states how to verify the fix. Advisory only: propose exact commands, never run them. Unknown or unreachable is not ok.",
+      "guardrails": [
+        "advisory only: no start/stop/restart/delete/deploy",
+        "cite the survey line for every claim",
+        "two-machines rule: surgical, add-only changes on the mini",
+        "never copy keys between machines",
+        "never touch trading or kill-switch jobs"
+      ]
+    },
+    {
+      "id": "security-governance",
+      "leads": [
+        "paper-safety-sentinel",
+        "repo-safety-guard"
+      ],
+      "sources": [
+        "ops-paper-safety",
+        "ops-repo-safety"
+      ],
+      "brief": "Independently verify the PAPER-only boundary and git/secret hygiene. Fail closed: anything unverifiable is reported as NOT-VERIFIED, never as safe. Cannot grant itself access or approve its own findings.",
+      "guardrails": [
+        "paper/testnet only",
+        "never unlock or edit kill switches, keys or bot config",
+        "fail closed on unknown",
+        "no commits containing secret-like strings",
+        "advisory only"
+      ]
     }
   ]
 }

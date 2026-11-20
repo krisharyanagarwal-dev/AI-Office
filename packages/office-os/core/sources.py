@@ -205,10 +205,115 @@ def mini_office():
     return _result(name, not problems, 0.0, summary, problems)
 
 
+# ---------- Ops department (facts from core/ops_probes.py; one ssh call per round) ----------
+def _probes():
+    """Import ops_probes whether sources is loaded as core.sources or plain sources (Dost's audit)."""
+    try:
+        from core import ops_probes
+    except ImportError:
+        import ops_probes
+    return ops_probes
+
+
+def _mini():
+    return _probes().mini_probe()
+
+
+def ops_mini_services():
+    name = "ops-mini-services"
+    m = _mini()
+    if "error" in m:
+        return _result(name, False, None, "mini unreachable", [m["error"]])
+    down = [f"{k}={v}" for k, v in m.get("services", {}).items() if v != 200]
+    sick = [k for k, v in (m.get("router_backends") or {}).items() if v is not True]
+    problems = []
+    if down:
+        problems.append("services not answering: " + ", ".join(down))
+    if sick:
+        problems.append("model-router backends unhealthy: " + ", ".join(sick))
+    disk = m.get("disk_free_gb")
+    if isinstance(disk, (int, float)) and disk < 15:
+        problems.append(f"mini disk low: {disk} GB free")
+    return _result(name, not problems, 0.0,
+                   f"{sum(1 for v in m.get('services', {}).values() if v == 200)}/{len(m.get('services', {}))} services up; "
+                   f"disk {disk} GB free; via {m.get('route')}", problems)
+
+
+def ops_mini_jobs():
+    name = "ops-mini-jobs"
+    m = _mini()
+    if "error" in m:
+        return _result(name, False, None, "mini unreachable", [m["error"]])
+    j = m.get("jobs", {})
+    failing = j.get("failing", [])
+    kinds = {}
+    for f in failing:
+        kinds.setdefault(f["kind"], []).append(f["label"].replace("com.aryan.", "").replace("com.user.", "u."))
+    problems = [f"{len(v)} {k}: " + ", ".join(v[:8]) for k, v in sorted(kinds.items())]
+    return _result(name, not failing, 0.0,
+                   f"{j.get('running')} running / {j.get('total')} jobs; {len(failing)} failing", problems)
+
+
+def ops_paper_safety():
+    """PAPER-only invariant. Any doubt is a problem (fail closed)."""
+    name = "ops-paper-safety"
+    m = _mini()
+    if "error" in m:
+        return _result(name, False, None, "cannot verify (mini unreachable)", [m["error"]])
+    s = m.get("paper_safety", {})
+    problems = []
+    if s.get("trader_killswitch") != "LOCKED":
+        problems.append(f"trader kill switch is {s.get('trader_killswitch')!r}, expected 'LOCKED'")
+    if s.get("bot_sandbox") is not True:
+        problems.append(f"trading-bot sandbox is {s.get('bot_sandbox')!r}, expected True")
+    if s.get("bot_exchange_keys_present") is not False:
+        problems.append(f"exchange keys present: {s.get('bot_exchange_keys_present')!r} (must be False)")
+    return _result(name, not problems, 0.0,
+                   f"killswitch={s.get('trader_killswitch')} sandbox={s.get('bot_sandbox')} "
+                   f"keys={s.get('bot_exchange_keys_present')} fleet_paused={s.get('fleet_paused')}", problems)
+
+
+def ops_market_data():
+    name = "ops-market-data"
+    m = _mini()
+    if "error" in m:
+        return _result(name, False, None, "mini unreachable", [m["error"]])
+    md = m.get("market_data", {})
+    problems = []
+    if md.get("data-api.binance.vision") != 200:
+        problems.append(f"Binance public data mirror not reachable from mini: {md.get('data-api.binance.vision')}")
+    note = "main API blocked on this network (expected; jobs use the mirror)" if md.get("api.binance.com") != 200 else "main API reachable"
+    return _result(name, not problems, 0.0, note, problems)
+
+
+def ops_repo_safety():
+    name = "ops-repo-safety"
+    try:
+        repos = _probes().repo_probe()
+    except Exception as e:
+        return _result(name, False, None, "repo probe crashed", [str(e)[:160]])
+    problems = []
+    for repo, info in repos.items():
+        if info.get("secret_like_in_staged"):
+            problems.append(f"{repo}: secret-like string in STAGED changes - do not commit")
+        if info.get("index_lock_age_min", 0) > 10:
+            problems.append(f"{repo}: git index.lock is {info['index_lock_age_min']} min old (possibly stale)")
+        if repo == "~" and info.get("home_lock_intact") is False:
+            problems.append("home-folder repo no longer ignores: " + ", ".join(info.get("unignored_sensitive_paths", [])))
+        if (info.get("unpushed_commits") or 0) > 0:
+            problems.append(f"{repo}: {info['unpushed_commits']} unpushed commit(s) on {info.get('branch')}")
+    return _result(name, not problems, 0.0, f"{len(repos)} repos checked", problems)
+
+
 COLLECTORS = [
     office_hud,
     laptop_jobs,
     mini_office,
+    ops_mini_services,
+    ops_mini_jobs,
+    ops_paper_safety,
+    ops_market_data,
+    ops_repo_safety,
 ]
 # Not polled any more (kept above in case they come back):
 #   office_manager  - packages/office-manager moved to _archive; its collect job is retired.
