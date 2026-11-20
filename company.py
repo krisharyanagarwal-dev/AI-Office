@@ -19,9 +19,20 @@ from pathlib import Path
 
 COMPANY_DIR = Path(__file__).resolve().parent
 DISPATCHER = COMPANY_DIR / "company_dispatcher.py"
+
+
+def _fmt_money(v) -> str:
+    """Format a large market-cap number with commas; '—' if missing."""
+    if v is None:
+        return "—"
+    try:
+        return f"{float(v):,.0f}"
+    except (TypeError, ValueError):
+        return "—"
 UPGRADE = COMPANY_DIR / "upgrade_system.py"
 DOST = COMPANY_DIR / "dost.py"
 STOCKS_BOT = COMPANY_DIR / "scripts" / "all_stocks_bot.py"
+STOCKS_METRICS_FILE = Path("/Users/aryanagarwal/.openclaw/stocks_metrics.json")
 PNL_FILE = Path("/Users/aryanagarwal/.openclaw/office_pnl.json")
 METRICS_URL = "http://127.0.0.1:8083/metrics"
 
@@ -94,6 +105,8 @@ def cmd_stocks(args) -> None:
         cmd += ["--file", args.file]
     if args.limit is not None:
         cmd += ["--limit", str(args.limit)]
+    if args.market:
+        cmd += ["--market", args.market]
     if args.outdir:
         cmd += ["--outdir", args.outdir]
     if args.resume:
@@ -103,6 +116,16 @@ def cmd_stocks(args) -> None:
     subprocess.run(cmd)
 
 
+def cmd_stock_metrics() -> None:
+    """Show the last stock analysis run pushed to the metrics endpoint."""
+    if not STOCKS_METRICS_FILE.exists():
+        print("No stock metrics found. Run a stock analysis first:")
+        print(f"  python company.py stocks --limit 10")
+        print(f"Expected metrics at: {STOCKS_METRICS_FILE}")
+        return
+    print(STOCKS_METRICS_FILE.read_text())
+
+
 def cmd_status() -> None:
     print("=== THE CLAUDE COMPANY — Status ===")
     print()
@@ -110,6 +133,24 @@ def cmd_status() -> None:
     # Dispatcher
     print("--- Fleet Dispatcher ---")
     subprocess.run([sys.executable, str(UPGRADE), "--test"])
+
+    # Stocks
+    print("\n--- Stocks (last run) ---")
+    if STOCKS_METRICS_FILE.exists():
+        try:
+            sm = json.loads(STOCKS_METRICS_FILE.read_text())
+            print(f"Service: {sm.get('service')}  Market: {sm.get('market')}  Status: {sm.get('status')}")
+            print(f"Symbols analyzed: {sm.get('symbols_analyzed')}  Errors: {sm.get('errors')}")
+            print(f"Analyzed at: {sm.get('analyzed_at')}")
+            top = sm.get("top_by_market_cap") or []
+            if top:
+                print("Top by market cap:")
+                for t in top[:5]:
+                    print(f"  {t.get('symbol')} — {t.get('name')} — {_fmt_money(t.get('market_cap'))} — {t.get('valuation_flag')}")
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"Could not read stock metrics: {e}")
+    else:
+        print("No stock metrics found. Run: python company.py stocks --limit 10")
 
     # P&L
     print("\n--- Office P&L ---")
@@ -153,9 +194,12 @@ def main() -> None:
 
     sub.add_parser("pnl", help="Show office P&L")
     sub.add_parser("metrics", help="Show dashboard metrics")
+    sub.add_parser("stock-metrics", help="Show last stock analysis metrics")
     p_stocks = sub.add_parser("stocks", help="Run all-listed-stocks fundamental analysis bot")
     p_stocks.add_argument("--file", help="Path to a file with one symbol per line")
     p_stocks.add_argument("--limit", type=int, help="Max symbols to analyze (for testing)")
+    p_stocks.add_argument("--market", choices=["nse", "us", "both"], default="nse",
+                          help="Market universe: nse (default), us, or both")
     p_stocks.add_argument("--outdir", default="reports", help="Output directory (default: reports/)")
     p_stocks.add_argument("--resume", action="store_true", help="Resume from last checkpoint")
     p_stocks.add_argument("--rate-limit", type=float, default=0.5, help="Seconds between yfinance calls")
@@ -176,6 +220,8 @@ def main() -> None:
         cmd_metrics()
     elif args.command == "stocks":
         cmd_stocks(args)
+    elif args.command == "stock-metrics":
+        cmd_stock_metrics()
     elif args.command == "status":
         cmd_status()
     else:

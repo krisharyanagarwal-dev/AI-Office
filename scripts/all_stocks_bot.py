@@ -64,9 +64,10 @@ METRICS_URL = "http://127.0.0.1:8083/api/stocks"
 
 
 # ---------------------------------------------------------------------------
-# Default fallback: NIFTY 50 (only used if auto-discovery fails)
+# Default fallback universes
 # ---------------------------------------------------------------------------
-DEFAULT_UNIVERSE = [
+# NSE NIFTY 50 (only used if NSE auto-discovery fails)
+DEFAULT_NSE_UNIVERSE = [
     "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "BHARTIARTL.NS", "ICICIBANK.NS",
     "INFY.NS", "ITC.NS", "SBIN.NS", "BAJFINANCE.NS", "HINDUNILVR.NS",
     "LT.NS", "AXISBANK.NS", "KOTAKBANK.NS", "HCLTECH.NS", "SUNPHARMA.NS",
@@ -77,6 +78,16 @@ DEFAULT_UNIVERSE = [
     "BAJAJ-AUTO.NS", "BRITANNIA.NS", "CIPLA.NS", "DRREDDY.NS", "EICHERMOT.NS",
     "HEROMOTOCO.NS", "BPCL.NS", "HDFCLIFE.NS", "SBILIFE.NS", "TATACONSUM.NS",
     "DIVISLAB.NS", "APOLLOHOSP.NS", "TATAPOWER.NS", "ADANIPORTS.NS", "M&M.NS",
+]
+
+# US equities — liquid, widely covered names (no exchange suffix needed for yfinance)
+DEFAULT_US_UNIVERSE = [
+    "AAPL", "MSFT", "GOOGL", "GOOG", "AMZN", "NVDA", "TSLA", "META", "BRK-B",
+    "UNH", "JNJ", "XOM", "JPM", "V", "PG", "MA", "HD", "CVX", "MRK", "ABBV",
+    "PEP", "KO", "AVGO", "COST", "WMT", "DIS", "NFLX", "ADBE", "CRM", "CSCO",
+    "ACN", "VZ", "TXN", "INTU", "QCOM", "AMD", "HON", "LOW", "ISRG", "UBER",
+    "AMGN", "GS", "MM", "NKE", "CAT", "BA", "LMT", "UNH", "PFE", "TMO",
+    "DHR", "SPGI", "COP", "SLB", "MCD", "SBUX", "NKE", "ICE", "PLD", "GILD",
 ]
 
 
@@ -130,10 +141,14 @@ def discover_nse_symbols() -> list[str]:
     return symbols
 
 
-def load_universe(path: Optional[str], limit: Optional[int]) -> list[str]:
+def load_universe(path: Optional[str], limit: Optional[int], market: str = "nse") -> list[str]:
     if path:
         with open(path, "r", encoding="utf-8") as f:
             symbols = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+    elif market == "us":
+        symbols = list(DEFAULT_US_UNIVERSE)
+    elif market == "both":
+        symbols = discover_nse_symbols() + list(DEFAULT_US_UNIVERSE)
     else:
         symbols = discover_nse_symbols()
 
@@ -424,24 +439,52 @@ def write_outputs(results: list[dict], outdir: str) -> None:
     print(f"  Per-symbol JSON: {len(results)} files")
 
 
-def push_metrics(results: list[dict]) -> None:
-    """Push stock run results to the Office OS metrics endpoint.
+def push_metrics(results: list[dict], market: str = "nse") -> None:
+    """Push a compact stock run summary to the Office OS metrics endpoint.
 
     POSTs to 127.0.0.1:8083/api/stocks so the /metrics dashboard
     shows the last stock analysis run. Fails silently — never
-    blocks the bot run itself.
+    blocks the bot run itself. Full per-symbol results remain on disk
+    in the outdir; only a summary is sent over the wire.
     """
     try:
+        flag_fields = (
+            "valuation_flag", "leverage_flag", "liquidity_flag",
+            "profitability_flag", "roe_flag", "momentum_flag",
+        )
+        flag_counts: dict[str, dict[str, int]] = {f: {} for f in flag_fields}
+        top_by_cap: list[dict] = []
+        errors = 0
+
+        for r in results:
+            if r.get("error"):
+                errors += 1
+                continue
+            for f in flag_fields:
+                v = r.get(f) or "—"
+                flag_counts[f][v] = flag_counts[f].get(v, 0) + 1
+            top_by_cap.append({
+                "symbol": r.get("symbol"),
+                "name": r.get("name"),
+                "market_cap": r.get("market_cap"),
+                "valuation_flag": r.get("valuation_flag"),
+            })
+        top_by_cap.sort(key=lambda x: (x.get("market_cap") or 0), reverse=True)
+        top_by_cap = top_by_cap[:10]
+
         payload = {
             "service": "all-stocks-bot",
             "status": "ok",
+            "market": market,
             "symbols_analyzed": len(results),
+            "errors": errors,
             "analyzed_at": datetime.now(timezone.utc).isoformat(),
-            "results": results,
+            "flag_counts": flag_counts,
+            "top_by_market_cap": top_by_cap,
         }
         resp = requests.post(METRICS_URL, json=payload, timeout=10)
         if resp.status_code == 200:
-            print(f"[metrics] Stock results pushed to {METRICS_URL}")
+            print(f"[metrics] Stock summary pushed to {METRICS_URL} ({len(results)} symbols)")
         else:
             print(f"[warn] Metrics endpoint returned {resp.status_code}")
     except Exception as exc:  # noqa: BLE001
@@ -454,13 +497,15 @@ def main() -> None:
     )
     parser.add_argument("--file", help="Path to a file with one symbol per line")
     parser.add_argument("--limit", type=int, help="Max symbols to analyze (for testing)")
+    parser.add_argument("--market", choices=["nse", "us", "both"], default="nse",
+                        help="Market universe: nse (default), us, or both")
     parser.add_argument("--outdir", default="reports", help="Output directory (default: reports/)")
     parser.add_argument("--resume", action="store_true", help="Resume from last checkpoint")
     parser.add_argument("--rate-limit", type=float, default=0.5,
                         help="Seconds to wait between yfinance calls (default: 0.5)")
     args = parser.parse_args()
 
-    universe = load_universe(args.file, args.limit)
+    universe = load_universe(args.file, args.limit, args.market)
     print(f"Universe size: {len(universe)} symbols (auto-discovered from NSE EQUITY_L.csv)")
 
     # Resume support
@@ -507,7 +552,7 @@ def main() -> None:
         # Merge with any prior results from checkpoint run
         print_report(results)
         write_outputs(results, args.outdir)
-        push_metrics(results)
+        push_metrics(results, args.market)
         save_checkpoint(sorted(completed), results)
         print(f"\nCheckpoint saved: {len(completed)} total symbols completed.")
 

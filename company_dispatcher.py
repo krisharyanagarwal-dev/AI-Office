@@ -113,16 +113,17 @@ def route_department(task: str) -> str:
 # Department handlers
 # ---------------------------------------------------------------------------
 
-def run_all_stocks_bot(task: str) -> dict:
+def run_all_stocks_bot(task: str, market: str = "nse") -> dict:
     """Execute the all-listed-stocks fundamental analysis bot.
 
-    Runs all_stocks_bot.py with defaults (full NSE universe, reports/ outdir).
+    Runs all_stocks_bot.py with the detected market universe.
     Factual metrics only — no stock-timing or directional calls.
     """
-    log(f"STOCKS: running all_stocks_bot.py for: {task[:80]}")
+    log(f"STOCKS: running all_stocks_bot.py (market={market}) for: {task[:80]}")
     try:
+        cmd = [sys.executable, str(STOCKS_BOT), "--market", market]
         result = subprocess.run(
-            [sys.executable, str(STOCKS_BOT)],
+            cmd,
             capture_output=True, text=True, timeout=3600,
         )
         output = result.stdout or ""
@@ -131,6 +132,7 @@ def run_all_stocks_bot(task: str) -> dict:
             "department": "stocks",
             "handled_by": "all_stocks_bot",
             "task": task,
+            "market": market,
             "status": "COMPLETE" if result.returncode == 0 else "FAILED",
             "returncode": result.returncode,
             "output": tail,
@@ -141,6 +143,7 @@ def run_all_stocks_bot(task: str) -> dict:
             "department": "stocks",
             "handled_by": "all_stocks_bot",
             "task": task,
+            "market": market,
             "status": "FAILED",
             "error": "timeout",
             "note": "all_stocks_bot.py timed out",
@@ -150,6 +153,7 @@ def run_all_stocks_bot(task: str) -> dict:
             "department": "stocks",
             "handled_by": "all_stocks_bot",
             "task": task,
+            "market": market,
             "status": "FAILED",
             "error": str(exc),
         }
@@ -188,7 +192,14 @@ def handle_trading(task: str) -> dict:
         "bhavcopy",
     ))
     if is_stock_analysis and not is_pure_trading:
-        return run_all_stocks_bot(task)
+        t = task.lower()
+        if "both" in t:
+            market = "both"
+        elif any(k in t for k in ("us ", "us.", "america", "united states", " nasdaq", " nyse")):
+            market = "us"
+        else:
+            market = "nse"
+        return run_all_stocks_bot(task, market=market)
 
     log(f"TRADING: {task[:80]}")
     return {
