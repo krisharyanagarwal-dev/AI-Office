@@ -52,8 +52,8 @@ class ProviderClient:
     Supported providers and their endpoints:
     - nvidia_key1:  https://integrate.api.nvidia.com/v1/chat/completions (key: NVIDIA_API_KEY)
     - nvidia_key2:  same endpoint (key: NVIDIA_API_KEY_FALLBACK)
-    - nvidia_key3:  same endpoint (key: NVIDIA_API_KEY_FALLBACK3)
-    - nvidia_key4:  same endpoint (key: NVIDIA_API_KEY_FALLBACK4)
+    - nvidia_key3:  same endpoint (key: NVIDIA_API_KEY_FALLBACK2)
+    - nvidia_key4:  same endpoint (key: NVIDIA_API_KEY_FALLBACK3)
     - google:       https://generativelanguage.googleapis.com/v1beta/openai/chat/completions (key: GEMINI_API_KEY)
     - openrouter:   https://openrouter.ai/api/v1/chat/completions (key: OPENROUTER_API_KEY)
     """

@@ -305,6 +305,130 @@ def ops_repo_safety():
     return _result(name, not problems, 0.0, f"{len(repos)} repos checked", problems)
 
 
+# ---------- office self-audit (facts from core/office_audit.py; local, keyless) ----------
+def _audit():
+    """Import office_audit whether sources is loaded as core.sources or plain sources."""
+    try:
+        from core import office_audit
+    except ImportError:
+        import office_audit
+    return office_audit
+
+
+def office_registry():
+    """Agents in config vs their tier vs their persona file on disk."""
+    name = "office-registry"
+    try:
+        r = _audit().registry()
+    except Exception as e:
+        return _result(name, False, None, "registry probe crashed", [str(e)[:160]])
+    if "error" in r:
+        return _result(name, False, None, "config unreadable", [r["error"]])
+    problems = []
+    if not r["agent_dir_ok"]:
+        problems.append(f"persona dir unreadable: {r['agent_dir']} - every agent falls back to a generic role")
+    leads_no_persona = [a for a in r["no_persona"] if r["agents"][a]["leads_of"]]
+    if r["untiered_leads"]:
+        problems.append(
+            "department leads with no agent_tiers entry (routed to the weakest 'general' pool): "
+            + ", ".join(r["untiered_leads"])
+        )
+    if leads_no_persona:
+        problems.append(
+            "department leads with no persona file (autopilot sends 'a helpful specialist'): "
+            + ", ".join(leads_no_persona)
+        )
+    if r["stub_persona"]:
+        problems.append("persona under 200 bytes (a stub, not a role): " + ", ".join(r["stub_persona"]))
+    if r["multi_tiered"]:
+        problems.append("agent listed in more than one tier (first match wins silently): "
+                        + ", ".join(r["multi_tiered"]))
+    summary = (f"{len(r['agents'])} agents; {len(r['no_persona'])} without a persona, "
+               f"{len(r['unassigned_agents'])} in no department")
+    return _result(name, not problems, 0.0, summary, problems)
+
+
+def office_wiring():
+    """Each department's cited survey sources vs the collectors that actually run."""
+    name = "office-wiring"
+    try:
+        r = _audit().wiring()
+    except Exception as e:
+        return _result(name, False, None, "wiring probe crashed", [str(e)[:160]])
+    if "error" in r:
+        return _result(name, False, None, "config unreadable", [r["error"]])
+    problems = []
+    blind = [d["id"] for d in r["departments"] if d["blind"]]
+    if blind:
+        problems.append(
+            "departments whose every cited source is dead - they answer from no evidence at all: "
+            + ", ".join(blind)
+        )
+    for d in r["departments"]:
+        if d["unknown_sources"] and not d["blind"]:
+            problems.append(f"{d['id']}: cites dead source(s) " + ", ".join(d["unknown_sources"]))
+        if d["no_guardrails"]:
+            problems.append(f"{d['id']}: no guardrails listed")
+        if not d["leads"]:
+            problems.append(f"{d['id']}: no leads, so the autopilot skips it")
+    if r["unread_collectors"]:
+        problems.append("collectors nothing reads (wasted poll): " + ", ".join(r["unread_collectors"]))
+    summary = f"{len(r['departments'])} departments over {len(r['live_collectors'])} live collectors"
+    return _result(name, not problems, 0.0, summary, problems)
+
+
+def office_pools():
+    """Provider pools and the fallback chain vs which keys are PRESENT (never read)."""
+    name = "office-pools"
+    try:
+        r = _audit().pools()
+    except Exception as e:
+        return _result(name, False, None, "pool probe crashed", [str(e)[:160]])
+    if "error" in r:
+        return _result(name, False, None, "config unreadable", [r["error"]])
+    problems = []
+    if r["unknown_in_chain"]:
+        problems.append("fallback_chain names pools that do not exist: " + ", ".join(r["unknown_in_chain"]))
+    unknown_key = sorted(n for n, v in r["pools"].items() if not v["key_known"])
+    if unknown_key:
+        problems.append("pools with no env var mapped in provider_client: " + ", ".join(unknown_key))
+    if r["keyless_pools"]:
+        problems.append("pools whose key is absent from the environment and ~/.env: "
+                        + ", ".join(r["keyless_pools"]))
+    for tier in ("pro", "general", "lite"):
+        if tier not in r["tiers_served"]:
+            problems.append(f"no keyed pool serves tier '{tier}' - those agents cannot answer")
+    summary = (f"{len(r['pools'])} pools, {len(r['pools']) - len(r['keyless_pools'])} keyed; "
+               f"chain {' -> '.join(r['fallback_chain']) or 'empty'}")
+    return _result(name, not problems, 0.0, summary, problems)
+
+
+def office_cadence():
+    """Did the autopilot actually produce rounds, or is it only configured to?"""
+    name = "office-cadence"
+    try:
+        r = _audit().cadence()
+    except Exception as e:
+        return _result(name, False, None, "cadence probe crashed", [str(e)[:160]])
+    if "error" in r:
+        return _result(name, False, None, "config unreadable", [r["error"]])
+    interval = r["interval_min"] or 30
+    problems = []
+    age = r["latest_age_min"]
+    if not r["enabled"]:
+        summary = "autopilot disabled in config"
+        return _result(name, True, age, summary, [])
+    if not r["rounds_dir_exists"] or r["round_files"] == 0:
+        problems.append(
+            f"autopilot is enabled (every {interval} min) but has written no round file to "
+            f"{r['rounds_dir']} - enabled is not running"
+        )
+    elif age is not None and age > 3 * interval:
+        problems.append(f"newest round is {age} min old, over 3x the {interval} min interval")
+    summary = f"{r['round_files']} rounds; newest {'none' if age is None else str(age) + ' min'} old"
+    return _result(name, not problems, age, summary, problems)
+
+
 COLLECTORS = [
     office_hud,
     laptop_jobs,
@@ -314,6 +438,10 @@ COLLECTORS = [
     ops_paper_safety,
     ops_market_data,
     ops_repo_safety,
+    office_registry,
+    office_wiring,
+    office_pools,
+    office_cadence,
 ]
 # Not polled any more (kept above in case they come back):
 #   office_manager  - packages/office-manager moved to _archive; its collect job is retired.

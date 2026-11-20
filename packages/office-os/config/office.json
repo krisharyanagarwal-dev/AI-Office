@@ -109,7 +109,14 @@
       "liquidation-heatmap",
       "perp-funding-analyst",
       "signal-analyst",
-      "event-driven-researcher"
+      "event-driven-researcher",
+      "ops-health-auditor",
+      "mini-deploy-steward",
+      "model-stack-warden",
+      "paper-safety-sentinel",
+      "repo-safety-guard",
+      "office-registry-auditor",
+      "source-truth-auditor"
     ],
     "lite": [
       "data-feed-monitor",
@@ -118,7 +125,10 @@
       "market-data-analyst",
       "compliance-checker",
       "research-archivist",
-      "trade-log-archivist"
+      "trade-log-archivist",
+      "launchd-janitor",
+      "autopilot-cadence-watch",
+      "provider-pool-warden"
     ]
   },
   "default_model": "google/gemini-3.5-flash",
@@ -337,6 +347,30 @@
         "fail closed on unknown",
         "no commits containing secret-like strings",
         "advisory only"
+      ]
+    },
+    {
+      "id": "office-integrity",
+      "leads": [
+        "office-registry-auditor",
+        "source-truth-auditor",
+        "autopilot-cadence-watch",
+        "provider-pool-warden"
+      ],
+      "sources": [
+        "office-registry",
+        "office-wiring",
+        "office-cadence",
+        "office-pools"
+      ],
+      "brief": "Audit the office itself. Every other department looks outward; this one checks the office's own wiring: agents that have no tier or no persona, departments citing survey sources no collector produces, provider pools whose key is absent, and an autopilot that is enabled but has produced no rounds. Configured is not running, and enabled is not working. Report the defect, the config line, and the exact check that would prove it fixed.",
+      "guardrails": [
+        "advisory only: never edit config/office.json, plists, keys or bot config",
+        "cite the survey line for every claim",
+        "presence-only on keys: never read, print or copy a key value",
+        "a producer never verifies its own work: name the independent check",
+        "fail closed: unverifiable is NOT-VERIFIED, never 'fine'",
+        "paper/testnet only; never touch kill switches or order paths"
       ]
     }
   ]
