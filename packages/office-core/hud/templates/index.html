@@ -1,0 +1,422 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="grid">
+    <!-- Tasks -->
+    <div class="card">
+        <div class="card-header">
+            <h2>Tasks</h2>
+            <button class="btn-refresh" hx-get="/api/tasks" hx-target="#tasks-body" hx-swap="innerHTML" hx-trigger="click, metrics-update">
+                <span class="loading" style="display:none"></span> Refresh
+            </button>
+        </div>
+        <div class="card-body" style="max-height: 400px; overflow:auto;">
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th><th>Title</th><th>Status</th><th>Priority</th><th>Assignee</th>
+                    </tr>
+                </thead>
+                <tbody id="tasks-body" hx-get="/api/tasks" hx-trigger="load, metrics-update" hx-target="this" hx-swap="innerHTML">
+                    <tr><td colspan="5" class="empty">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+        <div class="card-footer">Auto-refreshes on metrics update</div>
+    </div>
+
+    <!-- Agents -->
+    <div class="card">
+        <div class="card-header">
+            <h2>Agents</h2>
+            <button class="btn-refresh" hx-get="/api/agents" hx-target="#agents-body" hx-swap="innerHTML" hx-trigger="click, metrics-update">
+                <span class="loading" style="display:none"></span> Refresh
+            </button>
+        </div>
+        <div class="card-body" style="max-height: 400px; overflow:auto;">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Name</th><th>Type</th><th>Model</th><th>Status</th>
+                    </tr>
+                </thead>
+                <tbody id="agents-body" hx-get="/api/agents" hx-trigger="load, metrics-update" hx-target="this" hx-swap="innerHTML">
+                    <tr><td colspan="4" class="empty">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+        <div class="card-footer">Enabled agents only</div>
+    </div>
+
+    <!-- Models -->
+    <div class="card">
+        <div class="card-header">
+            <h2>Model Routes</h2>
+            <button class="btn-refresh" hx-get="/api/models" hx-target="#models-body" hx-swap="innerHTML" hx-trigger="click, metrics-update">
+                <span class="loading" style="display:none"></span> Refresh
+            </button>
+        </div>
+        <div class="card-body" style="max-height: 400px; overflow:auto;">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Name</th><th>Backend</th><th>Endpoint</th><th>Models</th><th>Status</th>
+                    </tr>
+                </thead>
+                <tbody id="models-body" hx-get="/api/models" hx-trigger="load, metrics-update" hx-target="this" hx-swap="innerHTML">
+                    <tr><td colspan="5" class="empty">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+        <div class="card-footer">Enabled routes only</div>
+    </div>
+
+    <!-- Launchd Jobs -->
+    <div class="card">
+        <div class="card-header">
+            <h2>Launchd Jobs</h2>
+            <button class="btn-refresh" hx-get="/api/launchd" hx-target="#launchd-body" hx-swap="innerHTML" hx-trigger="click, metrics-update">
+                <span class="loading" style="display:none"></span> Refresh
+            </button>
+        </div>
+        <div class="card-body" style="max-height: 400px; overflow:auto;">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Label</th><th>Agent</th><th>Schedule</th><th>Status</th>
+                    </tr>
+                </thead>
+                <tbody id="launchd-body" hx-get="/api/launchd" hx-trigger="load, metrics-update" hx-target="this" hx-swap="innerHTML">
+                    <tr><td colspan="4" class="empty">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+        <div class="card-footer">Enabled jobs only</div>
+    </div>
+
+    <!-- System Health -->
+    <div class="card grid-2">
+        <div class="card-header">
+            <h2>System Health</h2>
+            <button class="btn-refresh" hx-get="/api/health" hx-target="#health-body" hx-swap="innerHTML" hx-trigger="click, metrics-update">
+                <span class="loading" style="display:none"></span> Refresh
+            </button>
+        </div>
+        <div class="card-body" style="max-height: 400px; overflow:auto;">
+            <div id="health-body" hx-get="/api/health" hx-trigger="load, metrics-update" hx-target="this" hx-swap="innerHTML">
+                <div class="empty">Loading...</div>
+            </div>
+        </div>
+        <div class="card-footer">Local system + office-core API health</div>
+    </div>
+
+    <!-- Disk & Memory -->
+    <div class="card grid-2">
+        <div class="card-header">
+            <h2>Disk & Memory</h2>
+        </div>
+        <div class="card-body" style="max-height: 400px; overflow:auto;">
+            <div id="disk-memory-body" hx-get="/api/health" hx-trigger="load, metrics-update" hx-target="this" hx-swap="innerHTML">
+                <div class="empty">Loading...</div>
+            </div>
+        </div>
+        <div class="card-footer">Real-time via Prometheus /metrics</div>
+    </div>
+
+    <!-- Git Status -->
+    <div class="card grid-2">
+        <div class="card-header">
+            <h2>Git Repositories</h2>
+        </div>
+        <div class="card-body" style="max-height: 400px; overflow:auto;">
+            <div id="git-body" hx-get="/api/health" hx-trigger="load, metrics-update" hx-target="this" hx-swap="innerHTML">
+                <div class="empty">Loading...</div>
+            </div>
+        </div>
+        <div class="card-footer">Tracked via system metrics</div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Custom rendering for different endpoints
+    document.body.addEventListener('htmx:afterSwap', (evt) => {
+        const target = evt.target;
+        
+        // Tasks rendering
+        if (target.id === 'tasks-body') {
+            try {
+                const data = JSON.parse(target.innerText);
+                renderTasks(target, data.tasks || []);
+            } catch (e) {}
+        }
+        
+        // Agents rendering
+        if (target.id === 'agents-body') {
+            try {
+                const data = JSON.parse(target.innerText);
+                renderAgents(target, data.agents || []);
+            } catch (e) {}
+        }
+        
+        // Models rendering
+        if (target.id === 'models-body') {
+            try {
+                const data = JSON.parse(target.innerText);
+                renderModels(target, data.routes || []);
+            } catch (e) {}
+        }
+        
+        // Launchd rendering
+        if (target.id === 'launchd-body') {
+            try {
+                const data = JSON.parse(target.innerText);
+                renderLaunchd(target, data.jobs || []);
+            } catch (e) {}
+        }
+        
+        // Health rendering
+        if (target.id === 'health-body') {
+            try {
+                const data = JSON.parse(target.innerText);
+                renderHealth(target, data);
+            } catch (e) {}
+        }
+        
+        // Disk/Memory rendering
+        if (target.id === 'disk-memory-body') {
+            try {
+                const data = JSON.parse(target.innerText);
+                renderDiskMemory(target, data.system);
+            } catch (e) {}
+        }
+        
+        // Git rendering
+        if (target.id === 'git-body') {
+            // Git status comes from Prometheus metrics, not health endpoint
+            // We'll fetch it separately
+        }
+    });
+
+    function renderTasks(tbody, tasks) {
+        if (!tasks.length) {
+            tbody.innerHTML = '<tr><td colspan="5" class="empty">No tasks</td></tr>';
+            return;
+        }
+        tbody.innerHTML = tasks.map(t => `
+            <tr>
+                <td><code>${escapeHtml(t.id)}</code></td>
+                <td class="truncate" title="${escapeHtml(t.title)}">${escapeHtml(t.title)}</td>
+                <td><span class="badge badge-${t.status}">${escapeHtml(t.status)}</span></td>
+                <td>${t.priority}</td>
+                <td>${escapeHtml(t.assignee || '-')}</td>
+            </tr>
+        `).join('');
+    }
+
+    function renderAgents(tbody, agents) {
+        if (!agents.length) {
+            tbody.innerHTML = '<tr><td colspan="4" class="empty">No agents</td></tr>';
+            return;
+        }
+        tbody.innerHTML = agents.filter(a => a.enabled).map(a => `
+            <tr>
+                <td><code>${escapeHtml(a.name)}</code></td>
+                <td>${escapeHtml(a.type)}</td>
+                <td class="truncate" title="${escapeHtml(a.model || 'none')}">${escapeHtml(a.model || 'none')}</td>
+                <td><span class="badge badge-enabled">enabled</span></td>
+            </tr>
+        `).join('');
+    }
+
+    function renderModels(tbody, routes) {
+        if (!routes.length) {
+            tbody.innerHTML = '<tr><td colspan="5" class="empty">No model routes</td></tr>';
+            return;
+        }
+        tbody.innerHTML = routes.filter(r => r.enabled).map(r => {
+            const models = JSON.parse(r.models || '[]');
+            return `
+                <tr>
+                    <td><code>${escapeHtml(r.name)}</code></td>
+                    <td>${escapeHtml(r.backend)}</td>
+                    <td class="truncate" title="${escapeHtml(r.endpoint)}">${escapeHtml(r.endpoint)}</td>
+                    <td>${models.length} model${models.length !== 1 ? 's' : ''}</td>
+                    <td><span class="badge badge-enabled">enabled</span></td>
+                </tr>
+            `;
+        }).join('');
+    }
+
+    function renderLaunchd(tbody, jobs) {
+        if (!jobs.length) {
+            tbody.innerHTML = '<tr><td colspan="4" class="empty">No launchd jobs</td></tr>';
+            return;
+        }
+        tbody.innerHTML = jobs.filter(j => j.enabled).map(j => {
+            const schedule = j.start_calendar_interval ? 'Calendar' : (j.keep_alive ? 'Daemon' : 'On Demand');
+            return `
+                <tr>
+                    <td><code>${escapeHtml(j.label)}</code></td>
+                    <td>${escapeHtml(j.agent_name)}</td>
+                    <td>${escapeHtml(schedule)}</td>
+                    <td><span class="badge badge-enabled">enabled</span></td>
+                </tr>
+            `;
+        }).join('');
+    }
+
+    function renderHealth(container, data) {
+        const sys = data.system || {};
+        const oc = data.office_core || {};
+        const mem = sys.memory || {};
+        const disk = sys.disk || {};
+        
+        const memPercent = mem.percent || 0;
+        const diskPercent = disk.percent || 0;
+        const cpuPercent = sys.cpu_percent || 0;
+        
+        const memClass = memPercent > 90 ? 'critical' : memPercent > 75 ? 'warning' : 'ok';
+        const diskClass = diskPercent > 90 ? 'critical' : diskPercent > 75 ? 'warning' : 'ok';
+        const cpuClass = cpuPercent > 90 ? 'critical' : cpuPercent > 75 ? 'warning' : 'ok';
+        
+        container.innerHTML = `
+            <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px;">
+                <div>
+                    <h3 style="color:#8b949e; font-size:0.75rem; text-transform:uppercase; margin-bottom:8px;">office-core API</h3>
+                    <div class="metric-row">
+                        <span class="metric-label">Status</span>
+                        <span class="metric-value ${oc.status === 'ok' ? 'ok' : 'critical'}">${escapeHtml(oc.status)}</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">Service</span>
+                        <span class="metric-value">${escapeHtml(oc.service || 'unknown')}</span>
+                    </div>
+                </div>
+                <div>
+                    <h3 style="color:#8b949e; font-size:0.75rem; text-transform:uppercase; margin-bottom:8px;">CPU</h3>
+                    <div class="metric-row">
+                        <span class="metric-label">Usage</span>
+                        <span class="metric-value ${cpuClass}">${cpuPercent.toFixed(1)}%</span>
+                    </div>
+                    <div class="progress-bar"><div class="progress-fill ${cpuClass}" style="width:${Math.min(cpuPercent, 100)}%"></div></div>
+                </div>
+                <div>
+                    <h3 style="color:#8b949e; font-size:0.75rem; text-transform:uppercase; margin-bottom:8px;">Memory</h3>
+                    <div class="metric-row">
+                        <span class="metric-label">Used</span>
+                        <span class="metric-value ${memClass}">${formatBytes(mem.used)} / ${formatBytes(mem.total)}</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">Percent</span>
+                        <span class="metric-value ${memClass}">${memPercent.toFixed(1)}%</span>
+                    </div>
+                    <div class="progress-bar"><div class="progress-fill ${memClass}" style="width:${Math.min(memPercent, 100)}%"></div></div>
+                </div>
+                <div>
+                    <h3 style="color:#8b949e; font-size:0.75rem; text-transform:uppercase; margin-bottom:8px;">Disk (/)</h3>
+                    <div class="metric-row">
+                        <span class="metric-label">Used</span>
+                        <span class="metric-value ${diskClass}">${formatBytes(disk.used)} / ${formatBytes(disk.total)}</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">Percent</span>
+                        <span class="metric-value ${diskClass}">${diskPercent.toFixed(1)}%</span>
+                    </div>
+                    <div class="progress-bar"><div class="progress-fill ${diskClass}" style="width:${Math.min(diskPercent, 100)}%"></div></div>
+                </div>
+            </div>
+        `;
+    }
+
+    function renderDiskMemory(container, sys) {
+        if (!sys) {
+            container.innerHTML = '<div class="empty">No system data</div>';
+            return;
+        }
+        const mem = sys.memory || {};
+        const disk = sys.disk || {};
+        
+        container.innerHTML = `
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                <div>
+                    <h3 style="color:#8b949e; font-size:0.75rem; text-transform:uppercase; margin-bottom:12px;">Memory</h3>
+                    <div class="metric-row"><span class="metric-label">Total</span><span class="metric-value">${formatBytes(mem.total)}</span></div>
+                    <div class="metric-row"><span class="metric-label">Available</span><span class="metric-value">${formatBytes(mem.available)}</span></div>
+                    <div class="metric-row"><span class="metric-label">Used</span><span class="metric-value">${formatBytes(mem.used)}</span></div>
+                    <div class="metric-row"><span class="metric-label">Percent</span><span class="metric-value">${(mem.percent||0).toFixed(1)}%</span></div>
+                    <div class="progress-bar" style="margin-top:8px;"><div class="progress-fill ${(mem.percent||0)>90?'critical':(mem.percent||0)>75?'warning':'ok'}" style="width:${Math.min(mem.percent||0, 100)}%"></div></div>
+                </div>
+                <div>
+                    <h3 style="color:#8b949e; font-size:0.75rem; text-transform:uppercase; margin-bottom:12px;">Disk (/)</h3>
+                    <div class="metric-row"><span class="metric-label">Total</span><span class="metric-value">${formatBytes(disk.total)}</span></div>
+                    <div class="metric-row"><span class="metric-label">Free</span><span class="metric-value">${formatBytes(disk.free)}</span></div>
+                    <div class="metric-row"><span class="metric-label">Used</span><span class="metric-value">${formatBytes(disk.used)}</span></div>
+                    <div class="metric-row"><span class="metric-label">Percent</span><span class="metric-value">${(disk.percent||0).toFixed(1)}%</span></div>
+                    <div class="progress-bar" style="margin-top:8px;"><div class="progress-fill ${(disk.percent||0)>90?'critical':(disk.percent||0)>75?'warning':'ok'}" style="width:${Math.min(disk.percent||0, 100)}%"></div></div>
+                </div>
+            </div>
+        `;
+    }
+
+    // Fetch git status from Prometheus metrics
+    async function fetchGitStatus() {
+        try {
+            const resp = await fetch('/metrics');
+            const text = await resp.text();
+            const lines = text.split('\n');
+            const gitData = {};
+            lines.forEach(line => {
+                if (line.startsWith('hud_git_status{')) {
+                    const match = line.match(/hud_git_status\{repo="([^"]+)",status="([^"]+)"\} (\d+)/);
+                    if (match) {
+                        const [, repo, status, value] = match;
+                        if (!gitData[repo]) gitData[repo] = {};
+                        gitData[repo][status] = parseInt(value);
+                    }
+                }
+            });
+            renderGitStatus(document.getElementById('git-body'), gitData);
+        } catch (e) {
+            document.getElementById('git-body').innerHTML = '<div class="empty">Failed to load git status</div>';
+        }
+    }
+
+    function renderGitStatus(container, data) {
+        if (!Object.keys(data).length) {
+            container.innerHTML = '<div class="empty">No git data</div>';
+            return;
+        }
+        container.innerHTML = Object.entries(data).map(([repo, statuses]) => `
+            <div class="git-repo">
+                <span class="git-repo-name">${escapeHtml(repo)}</span>
+                <div class="git-status">
+                    <span class="git-dot ${statuses.clean ? 'clean' : 'dirty'}"></span>
+                    <span style="font-size:0.75rem; color:${statuses.clean ? '#3fb950' : '#d29922'}">
+                        ${statuses.clean ? 'Clean' : `${statuses.changes || 0} changes`}
+                    </span>
+                </div>
+            </div>
+        `).join('');
+    }
+
+    // Initial fetch and periodic refresh
+    fetchGitStatus();
+    setInterval(fetchGitStatus, 30000);
+
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    function formatBytes(bytes) {
+        if (!bytes) return '0 B';
+        const k = 1024;
+        const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    }
+</script>
+{% endblock %}

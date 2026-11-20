@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HUD_HOST</key>
+		<string>127.0.0.1</string>
+		<key>HUD_PORT</key>
+		<string>4752</string>
+		<key>OFFICE_CORE_API</key>
+		<string>http://127.0.0.1:8080</string>
+		<key>PATH</key>
+		<string>/Users/aryanagarwal/AI-Office/packages/office-core/hud/.venv/bin:/usr/local/bin:/usr/bin:/bin</string>
+	</dict>
+	<key>KeepAlive</key>
+	<true/>
+	<key>Label</key>
+	<string>com.aryan.office-hud-v2</string>
+	<key>Nice</key>
+	<integer>10</integer>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/aryanagarwal/AI-Office/packages/office-core/hud/.venv/bin/python</string>
+		<string>-m</string>
+		<string>uvicorn</string>
+		<string>main:app</string>
+		<string>--host</string>
+		<string>127.0.0.1</string>
+		<string>--port</string>
+		<string>4752</string>
+		<string>--log-level</string>
+		<string>info</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Users/aryanagarwal/Library/Logs/office-hud-v2.err.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/aryanagarwal/Library/Logs/office-hud-v2.log</string>
+	<key>ThrottleInterval</key>
+	<integer>30</integer>
+	<key>WorkingDirectory</key>
+	<string>/Users/aryanagarwal/AI-Office/packages/office-core/hud</string>
+</dict>
+</plist>

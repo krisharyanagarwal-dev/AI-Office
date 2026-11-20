@@ -1,0 +1,71 @@
+# Prometheus configuration for office-core observability stack
+# Scrapes metrics from office-core API, model router, HUD, and workers
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'office-core'
+    environment: 'development'
+
+# Alertmanager configuration (optional)
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets: ['alertmanager:9093']
+
+# Rule files (optional)
+# rule_files:
+#   - 'rules/*.yml'
+
+scrape_configs:
+  # office-core API server (:8080)
+  - job_name: 'office-core-api'
+    static_configs:
+      - targets: ['127.0.0.1:8080']
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+
+  # Model Router (:8081)
+  - job_name: 'model-router'
+    static_configs:
+      - targets: ['127.0.0.1:8081']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  # HUD v2 Dashboard (:4747)
+  - job_name: 'hud-v2'
+    static_configs:
+      - targets: ['127.0.0.1:4747']
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+
+  # MLX Server (:11435) - if it exposes metrics
+  - job_name: 'mlx-server'
+    static_configs:
+      - targets: ['127.0.0.1:11435']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+    # Note: MLX/Ollama may not expose /metrics by default
+
+  # NIM Proxy (:4200) - if it exposes metrics
+  - job_name: 'nim-proxy'
+    static_configs:
+      - targets: ['127.0.0.1:4200']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+    # Note: NIM may not expose /metrics by default
+
+  # Node Exporter for system metrics (if running)
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['127.0.0.1:9100']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  # Self-monitoring Prometheus
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['127.0.0.1:9090']
+    metrics_path: '/metrics'
+    scrape_interval: 30s

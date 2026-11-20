@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}HUD v2 - office-core Dashboard{% endblock %}</title>
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <script src="https://unpkg.com/htmx.org@1.9.10/dist/ext/sse.js"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: #0d1117;
+            color: #e6edf3;
+            line-height: 1.5;
+            min-height: 100vh;
+        }
+        .container { max-width: 1600px; margin: 0 auto; padding: 16px; }
+        
+        /* Header */
+        header {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 12px 16px; background: #161b22; border: 1px solid #30363d;
+            border-radius: 6px; margin-bottom: 16px;
+        }
+        header h1 { font-size: 1.25rem; font-weight: 600; color: #f0f6fc; }
+        .status-indicator {
+            display: flex; align-items: center; gap: 8px; font-size: 0.875rem;
+        }
+        .status-dot {
+            width: 8px; height: 8px; border-radius: 50%;
+            background: #3fb950; box-shadow: 0 0 8px #3fb950;
+        }
+        .status-dot.degraded { background: #d29922; box-shadow: 0 0 8px #d29922; }
+        .status-dot.down { background: #f85149; box-shadow: 0 0 8px #f85149; }
+        
+        /* Grid Layout */
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 16px; }
+        .grid-2 { grid-column: span 2; }
+        @media (max-width: 900px) { .grid-2 { grid-column: span 1; } }
+        
+        /* Cards */
+        .card {
+            background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+            overflow: hidden; display: flex; flex-direction: column;
+        }
+        .card-header {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 12px 16px; background: #21262d; border-bottom: 1px solid #30363d;
+        }
+        .card-header h2 { font-size: 0.875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: #8b949e; }
+        .card-body { padding: 16px; flex: 1; overflow: auto; }
+        .card-footer { padding: 8px 16px; background: #21262d; border-top: 1px solid #30363d; font-size: 0.75rem; color: #8b949e; }
+        
+        /* Tables */
+        table { width: 100%; border-collapse: collapse; font-size: 0.8125rem; }
+        th { text-align: left; padding: 8px 12px; font-weight: 600; color: #8b949e; border-bottom: 1px solid #30363d; white-space: nowrap; }
+        td { padding: 8px 12px; border-bottom: 1px solid #21262d; }
+        tr:hover td { background: #1c2128; }
+        .truncate { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        
+        /* Status badges */
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.6875rem; font-weight: 600; text-transform: uppercase; }
+        .badge-pending { background: #2d3d4a; color: #79b8ff; }
+        .badge-in_progress { background: #2d3d4a; color: #d29922; }
+        .badge-completed { background: #1e3a2e; color: #3fb950; }
+        .badge-failed { background: #4c1a1a; color: #f85149; }
+        .badge-cancelled { background: #2d2d2d; color: #8b949e; }
+        .badge-blocked { background: #3d2e1f; color: #d29922; }
+        .badge-enabled { background: #1e3a2e; color: #3fb950; }
+        .badge-disabled { background: #4c1a1a; color: #f85149; }
+        
+        /* Metrics */
+        .metric-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #21262d; }
+        .metric-row:last-child { border-bottom: none; }
+        .metric-label { color: #8b949e; }
+        .metric-value { font-weight: 600; font-variant-numeric: tabular-nums; }
+        .metric-value.warning { color: #d29922; }
+        .metric-value.critical { color: #f85149; }
+        .metric-value.ok { color: #3fb950; }
+        
+        /* Progress bars */
+        .progress-bar { height: 6px; background: #21262d; border-radius: 3px; overflow: hidden; }
+        .progress-fill { height: 100%; border-radius: 3px; transition: width 0.3s ease; }
+        .progress-fill.ok { background: #3fb950; }
+        .progress-fill.warning { background: #d29922; }
+        .progress-fill.critical { background: #f85149; }
+        
+        /* Git status */
+        .git-repo { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; }
+        .git-repo-name { font-family: monospace; font-size: 0.8125rem; }
+        .git-status { display: flex; gap: 8px; align-items: center; }
+        .git-dot { width: 8px; height: 8px; border-radius: 50%; }
+        .git-dot.clean { background: #3fb950; }
+        .git-dot.dirty { background: #d29922; }
+        
+        /* SSE connection status */
+        .sse-status { font-size: 0.75rem; color: #8b949e; }
+        .sse-status.connected { color: #3fb950; }
+        .sse-status.disconnected { color: #f85149; }
+        
+        /* Empty state */
+        .empty { text-align: center; padding: 32px; color: #8b949e; font-size: 0.875rem; }
+        
+        /* Refresh button */
+        .btn-refresh {
+            background: #238636; border: none; color: white; padding: 6px 12px;
+            border-radius: 6px; font-size: 0.75rem; cursor: pointer;
+            display: flex; align-items: center; gap: 6px;
+        }
+        .btn-refresh:hover { background: #2ea043; }
+        .btn-refresh:disabled { opacity: 0.5; cursor: not-allowed; }
+        
+        /* Loading */
+        .loading { display: inline-block; width: 16px; height: 16px; border: 2px solid #30363d; border-top-color: #58a6ff; border-radius: 50%; animation: spin 1s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #0d1117; }
+        ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #484f58; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>HUD v2 — office-core Dashboard</h1>
+            <div class="status-indicator">
+                <span id="api-status" class="status-dot"></span>
+                <span id="api-status-text">Checking...</span>
+                <span class="sse-status" id="sse-status">SSE: Connecting...</span>
+            </div>
+        </header>
+        
+        {% block content %}{% endblock %}
+    </div>
+
+    <script>
+        // SSE Connection
+        const evtSource = new EventSource('/events');
+        const sseStatus = document.getElementById('sse-status');
+        
+        evtSource.onopen = () => {
+            sseStatus.textContent = 'SSE: Connected';
+            sseStatus.className = 'sse-status connected';
+        };
+        evtSource.onerror = () => {
+            sseStatus.textContent = 'SSE: Disconnected (reconnecting...)';
+            sseStatus.className = 'sse-status disconnected';
+        };
+        evtSource.addEventListener('heartbeat', () => {
+            if (sseStatus.classList.contains('connected')) {
+                sseStatus.textContent = `SSE: Connected (${new Date().toLocaleTimeString()})`;
+            }
+        });
+        evtSource.addEventListener('metrics', (e) => {
+            // Trigger HTMX refresh of metric cards
+            document.body.dispatchEvent(new CustomEvent('metrics-update', { detail: JSON.parse(e.data) }));
+        });
+
+        // Periodic health check
+        async function checkHealth() {
+            try {
+                const resp = await fetch('/api/health');
+                const data = await resp.json();
+                const dot = document.getElementById('api-status');
+                const text = document.getElementById('api-status-text');
+                
+                if (data.office_core?.status === 'ok') {
+                    dot.className = 'status-dot';
+                    text.textContent = 'office-core: OK';
+                } else {
+                    dot.className = 'status-dot degraded';
+                    text.textContent = 'office-core: Degraded';
+                }
+            } catch {
+                const dot = document.getElementById('api-status');
+                const text = document.getElementById('api-status-text');
+                dot.className = 'status-dot down';
+                text.textContent = 'office-core: Down';
+            }
+        }
+        checkHealth();
+        setInterval(checkHealth, 10000);
+
+        // Auto-refresh trigger
+        document.body.addEventListener('metrics-update', () => {
+            document.querySelectorAll('[hx-trigger="metrics-update"]').forEach(el => {
+                htmx.trigger(el, 'refresh');
+            });
+        });
+    </script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>
