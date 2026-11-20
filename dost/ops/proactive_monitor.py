@@ -34,7 +34,20 @@ HEADROOM_CRITICAL = 20  # %
 DEDUP_TTL = 3600  # seconds — same metric notifies at most once per hour
 IMSG_TO = "+918449447444"
 
-JARVIS_DIR = Path(__file__).resolve().parent / "jarvis_memory"
+# The runtime state directory is dost/jarvis_memory/ -- ONE directory for the
+# whole package, not one per subpackage.
+#
+# This module used to live at dost/proactive_monitor.py, where
+# `Path(__file__).resolve().parent / "jarvis_memory"` happened to land on the
+# right place. The subpackage refactor moved the module to dost/ops/ without
+# moving the state directory, so the same expression silently resolved to a
+# NEW empty dost/ops/jarvis_memory/ and every alert was written where nobody
+# reads it -- the reader (context_builder.alerts_section) still reads
+# dost/jarvis_memory/alerts.jsonl.
+#
+# Two parents is the package root (dost/), which is where the state lives.
+DOST_DIR = Path(__file__).resolve().parent.parent
+JARVIS_DIR = DOST_DIR / "jarvis_memory"
 JARVIS_DIR.mkdir(parents=True, exist_ok=True)
 ALERTS_LOG = JARVIS_DIR / "alerts.jsonl"
 DEDUP_STATE = JARVIS_DIR / "alerts_dedup.json"

@@ -1476,6 +1476,18 @@ def companion_respond(task: str) -> str:
     if wants_audit(task):
         return audit_reply()
     context = build_context()
+
+    # Surface critical alerts proactively so the pet never hides a problem.
+    try:
+        from ops.proactive_monitor import check_fleet_health
+        live_alerts = check_fleet_health()
+        critical = [a for a in live_alerts if a.get("severity") == "critical"]
+        alert_prefix = ""
+        if critical:
+            alert_prefix = "⚠️ " + "; ".join(a.get("message", "")[:80] for a in critical[:3]) + ". "
+    except Exception:  # pragma: no cover - defensive
+        alert_prefix = ""
+
     decision = llm_decide(task, context, style=COMPANION_STYLE)
 
     if decision and decision.startswith("COMMAND:"):
@@ -1494,11 +1506,11 @@ def companion_respond(task: str) -> str:
 
     if decision and not decision.startswith("COMMAND:"):
         MEMORY.add_interaction(task, route_department(task), "Conversational response")
-        return decision
+        return alert_prefix + decision
 
     response = fallback_converse(task, context)
     MEMORY.add_interaction(task, route_department(task), "Conversational response (fallback)")
-    return response
+    return alert_prefix + response
 
 
 def generate_daily_briefing():

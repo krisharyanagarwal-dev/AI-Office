@@ -42,7 +42,16 @@ except ImportError:  # pragma: no cover - older dost.py without it
     def list_recent_dost_tasks(*a, **k):  # type: ignore[no-redef]
         return []
 
-JARVIS_DIR = Path(__file__).resolve().parent / "jarvis_memory"
+# One state directory for the whole package: dost/jarvis_memory/.
+#
+# This module used to live at dost/jarvis.py, where
+# `Path(__file__).resolve().parent / "jarvis_memory"` landed on the canonical
+# directory. The subpackage refactor moved it to dost/memory_pkg/ and the
+# expression silently began creating a NEW empty dost/memory_pkg/jarvis_memory/,
+# so pending_actions.json was written where no reader looks. Two parents is
+# the package root (dost/), matching ops/proactive_monitor.py.
+DOST_DIR = Path(__file__).resolve().parent.parent
+JARVIS_DIR = DOST_DIR / "jarvis_memory"
 JARVIS_DIR.mkdir(parents=True, exist_ok=True)
 PENDING_FILE = JARVIS_DIR / "pending_actions.json"
 
