@@ -12,7 +12,6 @@ from typing import Dict, List, Optional, Callable, Any
 from collections import defaultdict
 from datetime import datetime
 import logging
-from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +127,7 @@ class BaseBroker(ABC):
         self.paper_trading = paper_trading
         self.orders: Dict[str, Order] = {}
         self.fills: List = []
-        self.positions: Dict[str, Position] = defaultdict(Position)
+        self.positions: Dict[str, Position] = {}
         
         # Callbacks
         self.on_order_update: Optional[Callable[[Order], None]] = None
@@ -191,7 +190,10 @@ class BaseBroker(ABC):
         await self._update_order(order)
         
         # Update position
-        pos = self.positions[fill.symbol]
+        pos = self.positions.get(fill.symbol)
+        if pos is None:
+            pos = Position(symbol=fill.symbol)
+            self.positions[fill.symbol] = pos
         side_mult = 1 if fill.side == OrderSide.BUY else -1
         prev_qty = pos.quantity
         pos.quantity += side_mult * fill.quantity
@@ -384,6 +386,14 @@ class ExecutionEngine:
         self.default_broker: Optional[str] = None
         self.order_router: Optional[Callable[[Order], str]] = None
         
+        # Persistence (StateStore-like: set/get/get_all)
+        self.state_store: Any = None
+        self.persistence_category: str = "execution"
+        
+        # Drawdown tracking (peak equity)
+        self._peak_equity: float = 0.0
+        self._max_drawdown: float = 0.0
+        
         # Risk checks
         self.pre_trade_checks: List[Callable[[Order], bool]] = []
         
@@ -391,6 +401,18 @@ class ExecutionEngine:
         self.on_order_update: Optional[Callable[[Order], None]] = None
         self.on_fill: Optional[Callable[[Fill], None]] = None
         self.on_position_update: Optional[Callable[[Position], None]] = None
+        
+        # OpenClaw snapshot path (optional shared location)
+        self.openclaw_snapshot_path: Optional[str] = None
+
+    def set_state_store(self, state_store: Any, category: str = "execution") -> None:
+        """Attach a StateStore-like object for persisting positions/orders/balances."""
+        self.state_store = state_store
+        self.persistence_category = category
+
+    def set_openclaw_snapshot_path(self, path: str) -> None:
+        """Set a path to write a portfolio snapshot that OpenClaw can read."""
+        self.openclaw_snapshot_path = path
     
     def add_broker(self, name: str, broker: BaseBroker, is_default: bool = False):
         self.brokers[name] = broker
@@ -464,6 +486,293 @@ class ExecutionEngine:
     def _on_position_update(self, position: Position):
         if self.on_position_update:
             self.on_position_update(position)
+
+    # ------------------------------------------------------------------
+    # Serialization helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _order_to_dict(order: Order) -> dict:
+        return {
+            "symbol": order.symbol,
+            "side": order.side.value,
+            "order_type": order.order_type.value,
+            "quantity": order.quantity,
+            "price": order.price,
+            "stop_price": order.stop_price,
+            "time_in_force": order.time_in_force.value,
+            "client_order_id": order.client_order_id,
+            "exchange_order_id": order.exchange_order_id,
+            "status": order.status.value,
+            "filled_qty": order.filled_qty,
+            "avg_fill_price": order.avg_fill_price,
+            "commission": order.commission,
+            "created_at": order.created_at,
+            "updated_at": order.updated_at,
+            "metadata": order.metadata,
+        }
+
+    @staticmethod
+    def _order_from_dict(d: dict) -> Order:
+        return Order(
+            symbol=d["symbol"],
+            side=OrderSide(d["side"]),
+            order_type=OrderType(d["order_type"]),
+            quantity=d.get("quantity", 0.0),
+            price=d.get("price"),
+            stop_price=d.get("stop_price"),
+            time_in_force=TimeInForce(d.get("time_in_force", TimeInForce.GTC.value)),
+            client_order_id=d.get("client_order_id") or str(uuid.uuid4()),
+            exchange_order_id=d.get("exchange_order_id"),
+            status=OrderStatus(d["status"]),
+            filled_qty=d.get("filled_qty", 0.0),
+            avg_fill_price=d.get("avg_fill_price", 0.0),
+            commission=d.get("commission", 0.0),
+            created_at=d.get("created_at", time.time()),
+            updated_at=d.get("updated_at", time.time()),
+            metadata=d.get("metadata", {}),
+        )
+
+    @staticmethod
+    def _position_to_dict(pos: Position) -> dict:
+        return {
+            "symbol": pos.symbol,
+            "quantity": pos.quantity,
+            "avg_entry_price": pos.avg_entry_price,
+            "unrealized_pnl": pos.unrealized_pnl,
+            "realized_pnl": pos.realized_pnl,
+            "updated_at": pos.updated_at,
+        }
+
+    @staticmethod
+    def _position_from_dict(d: dict) -> Position:
+        return Position(
+            symbol=d["symbol"],
+            quantity=d.get("quantity", 0.0),
+            avg_entry_price=d.get("avg_entry_price", 0.0),
+            unrealized_pnl=d.get("unrealized_pnl", 0.0),
+            realized_pnl=d.get("realized_pnl", 0.0),
+            updated_at=d.get("updated_at", time.time()),
+        )
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+    async def save_state(self, broker_name: Optional[str] = None) -> None:
+        """Persist positions, active orders, and balances to the StateStore.
+
+        Called on each fill and on each execution-loop tick so state survives
+        restarts. Only active (non-terminal) orders are persisted.
+        """
+        if not self.state_store:
+            return
+        broker_name = broker_name or self.default_broker
+        broker = self.brokers.get(broker_name)
+        if not broker:
+            return
+        try:
+            positions = broker.positions if hasattr(broker, "positions") else await broker.get_positions()
+            balances = broker.balances if hasattr(broker, "balances") else await broker.get_balances()
+            active_orders = {oid: o for oid, o in broker.orders.items() if o.is_active}
+
+            # Refresh drawdown tracking from current equity so it survives restarts
+            self.get_portfolio_summary(broker_name)
+
+            payload = {
+                "broker": broker_name,
+                "positions": {sym: self._position_to_dict(p) for sym, p in positions.items()},
+                "orders": {oid: self._order_to_dict(o) for oid, o in active_orders.items()},
+                "balances": balances,
+                "saved_at": time.time(),
+                "peak_equity": self._peak_equity,
+                "max_drawdown": self._max_drawdown,
+            }
+            self.state_store.set("execution_state", payload, category=self.persistence_category)
+        except Exception as e:
+            logger.error(f"save_state failed: {e}")
+
+    async def load_state(self, broker_name: Optional[str] = None) -> bool:
+        """Restore positions, active orders, and balances from the StateStore.
+
+        Returns True if state was restored, False if nothing was stored.
+        """
+        if not self.state_store:
+            return False
+        broker_name = broker_name or self.default_broker
+        broker = self.brokers.get(broker_name)
+        if not broker:
+            return False
+        try:
+            data = self.state_store.get("execution_state", default=None, category=self.persistence_category)
+            if not data:
+                return False
+
+            # Restore balances
+            balances = data.get("balances", {})
+            if hasattr(broker, "balances") and isinstance(balances, dict):
+                broker.balances = dict(balances)
+
+            # Restore positions
+            positions = data.get("positions", {})
+            for sym, pdict in positions.items():
+                broker.positions[sym] = self._position_from_dict(pdict)
+
+            # Restore active orders
+            orders = data.get("orders", {})
+            for oid, odict in orders.items():
+                broker.orders[oid] = self._order_from_dict(odict)
+
+            self._peak_equity = float(data.get("peak_equity", 0.0))
+            self._max_drawdown = float(data.get("max_drawdown", 0.0))
+
+            logger.info(
+                f"Restored execution state: {len(positions)} positions, "
+                f"{len(orders)} active orders, equity_peak={self._peak_equity:.2f}"
+            )
+            return True
+        except Exception as e:
+            logger.error(f"load_state failed: {e}")
+            return False
+
+    # ------------------------------------------------------------------
+    # Mark-to-market
+    # ------------------------------------------------------------------
+    async def update_mark_prices(self, market_prices: Dict[str, float],
+                                 broker_name: Optional[str] = None) -> None:
+        """Mark-to-market: refresh unrealized P&L for all open positions.
+
+        `market_prices` maps symbol -> latest mid/trade price.
+        """
+        broker_name = broker_name or self.default_broker
+        broker = self.brokers.get(broker_name)
+        if not broker:
+            return
+        positions = broker.positions if hasattr(broker, "positions") else await broker.get_positions()
+        for sym, pos in positions.items():
+            if pos.quantity == 0:
+                continue
+            price = market_prices.get(sym) or market_prices.get(sym.upper())
+            if price is None:
+                continue
+            if hasattr(broker, "update_mark_price"):
+                broker.update_mark_price(sym, price)
+            else:
+                pos.unrealized_pnl = (price - pos.avg_entry_price) * pos.quantity
+                pos.updated_at = time.time()
+
+    # ------------------------------------------------------------------
+    # Pending order processing (limit orders that become executable)
+    # ------------------------------------------------------------------
+    async def process_pending_orders(self, broker_name: Optional[str] = None) -> int:
+        """Process pending limit orders against the latest market prices.
+
+        Returns the number of orders filled.
+        """
+        broker_name = broker_name or self.default_broker
+        broker = self.brokers.get(broker_name)
+        if not broker:
+            return 0
+        market_data = getattr(broker, "_market_data", {})
+        count = 0
+        for oid, order in list(broker.orders.items()):
+            if not order.is_active or order.order_type != OrderType.LIMIT:
+                continue
+            if not order.price or order.remaining_qty <= 0:
+                continue
+            price = market_data.get(order.symbol.upper())
+            if price is None:
+                continue
+            can_fill = (
+                (order.side == OrderSide.BUY and price <= order.price)
+                or (order.side == OrderSide.SELL and price >= order.price)
+            )
+            if not can_fill:
+                continue
+            market_order = Order(
+                symbol=order.symbol,
+                side=order.side,
+                order_type=OrderType.MARKET,
+                quantity=order.remaining_qty,
+                price=order.price,
+                client_order_id=order.client_order_id,
+            )
+            await broker.submit_order(market_order)
+            count += 1
+        return count
+
+    # ------------------------------------------------------------------
+    # Portfolio summary
+    # ------------------------------------------------------------------
+    def get_portfolio_summary(self, broker_name: Optional[str] = None) -> dict:
+        """Compute portfolio summary: equity, realized+unrealized P&L, drawdown."""
+        broker_name = broker_name or self.default_broker
+        broker = self.brokers.get(broker_name)
+        if not broker:
+            return {}
+
+        positions = broker.positions if hasattr(broker, "positions") else {}
+        balances = broker.balances if hasattr(broker, "balances") else {}
+
+        cash = float(balances.get("USDT", 0.0))
+        market_value = 0.0
+        total_realized = 0.0
+        total_unrealized = 0.0
+        position_summaries = {}
+
+        for sym, pos in positions.items():
+            total_realized += float(pos.realized_pnl)
+            total_unrealized += float(pos.unrealized_pnl)
+            mark = None
+            if hasattr(broker, "get_market_price"):
+                mark = broker.get_market_price(sym)
+            if mark is None:
+                # No live mark price: value at avg entry (no unrealized P&L)
+                mark = float(pos.avg_entry_price) if pos.quantity != 0 else 0.0
+            if pos.quantity != 0:
+                market_value += float(pos.quantity) * float(mark)
+            position_summaries[sym] = {
+                "quantity": float(pos.quantity),
+                "avg_entry_price": float(pos.avg_entry_price),
+                "unrealized_pnl": float(pos.unrealized_pnl),
+                "realized_pnl": float(pos.realized_pnl),
+                "mark_price": float(mark),
+            }
+
+        equity = cash + market_value
+        total_pnl = total_realized + total_unrealized
+
+        if equity > self._peak_equity:
+            self._peak_equity = equity
+        drawdown = self._peak_equity - equity
+        if drawdown > self._max_drawdown:
+            self._max_drawdown = drawdown
+
+        snapshot = {
+            "broker": broker_name,
+            "cash": cash,
+            "market_value": market_value,
+            "equity": equity,
+            "realized_pnl": total_realized,
+            "unrealized_pnl": total_unrealized,
+            "total_pnl": total_pnl,
+            "peak_equity": self._peak_equity,
+            "max_drawdown": self._max_drawdown,
+            "drawdown": drawdown,
+            "positions": position_summaries,
+            "timestamp": time.time(),
+        }
+
+        # Optional OpenClaw shared snapshot
+        if self.openclaw_snapshot_path:
+            try:
+                from pathlib import Path
+                import json
+                Path(self.openclaw_snapshot_path).parent.mkdir(parents=True, exist_ok=True)
+                with open(self.openclaw_snapshot_path, "w") as f:
+                    json.dump(snapshot, f, indent=2)
+            except Exception as e:
+                logger.debug(f"OpenClaw snapshot write failed: {e}")
+
+        return snapshot
 
 
 # Risk check functions

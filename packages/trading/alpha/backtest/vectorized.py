@@ -36,9 +36,15 @@ class VectorizedBacktester:
         Initialize vectorized backtester
         
         Args:
-            config_path: Path to configuration file (default: config/settings.yaml)
+            config_path: Path to configuration file (default: config/settings.yaml relative to package)
         """
-        self.config_path = config_path or "/Users/aryanagarwal/alpha-system/config/settings.yaml"
+        if config_path is None:
+            # Find config relative to this file's location
+            # File is at: trading/alpha/backtest/vectorized.py
+            # Want: trading/config/settings.yaml
+            base = Path(__file__).resolve().parents[2]  # trading/alpha -> trading/
+            config_path = base / "config" / "settings.yaml"
+        self.config_path = str(config_path)
         self.config = self._load_config()
         self._setup_universe()
         self._setup_providers()

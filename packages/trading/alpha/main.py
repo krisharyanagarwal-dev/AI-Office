@@ -4,6 +4,7 @@ Orchestrates the three-brain architecture: ChartBrain, DecisionBrain, LearningBr
 """
 import asyncio
 import logging
+import os
 import sys
 import signal
 import time
@@ -88,6 +89,12 @@ class AlphaSystem:
         self.execution_engine.add_pre_trade_check(max_notional_check(50000))
         self.execution_engine.add_pre_trade_check(
             daily_loss_limit_check(20000, lambda: self.risk_manager._daily_pnl)
+        )
+        
+        # Wire persistence: StateStore + OpenClaw shared snapshot
+        self.execution_engine.set_state_store(self.state_store)
+        self.execution_engine.set_openclaw_snapshot_path(
+            os.path.expanduser("~/.openclaw/portfolio.json")
         )
         
         # Initialize brains

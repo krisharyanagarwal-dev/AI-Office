@@ -36,12 +36,20 @@ class TradingBot:
         exec_cfg = config.get('execution', {}) if isinstance(config, dict) else {}
         self._loop_interval = exec_cfg.get('loop_interval', 1.0)  # seconds between ticks
         self._stale_threshold = exec_cfg.get('stale_threshold', 30.0)  # seconds before considered dead
+
+        # Latest market prices (symbol -> price) for mark-to-market
+        self._market_prices: Dict[str, float] = {}
         
     async def initialize(self):
         logger.info("TradingBot initialized")
     
     async def on_bar(self, bar):
         """Handle incoming bar data"""
+        # Track latest close price for mark-to-market
+        try:
+            self._market_prices[bar.symbol] = float(bar.close)
+        except Exception:
+            pass
         await self.chart_brain.on_bar(bar)
         
         # Generate signals
@@ -56,12 +64,21 @@ class TradingBot:
     
     async def on_trade(self, trade):
         await self.chart_brain.on_trade(trade)
+        # Track latest trade price for mark-to-market
+        try:
+            self._market_prices[trade.symbol] = float(trade.price)
+        except Exception:
+            pass
     
     async def start(self):
         """Start the TradingBot and its 24/7 execution loop."""
         if self.running:
             logger.warning("TradingBot already running")
             return
+        
+        # Restore persistent state (positions/orders/balances) before starting
+        # so the bot resumes where it left off after a restart.
+        await self._restore_execution_state()
         
         self.running = True
         self._last_heartbeat = time.time()
@@ -122,7 +139,10 @@ class TradingBot:
                 # Enforce risk checks on current positions
                 await self._enforce_risk()
                 
-                # Persist state
+                # Mark-to-market open positions with latest prices
+                await self._mark_to_market()
+                
+                # Persist execution state (positions/orders/balances) each tick
                 await self._persist_state()
                 
                 self._last_heartbeat = time.time()
@@ -172,30 +192,62 @@ class TradingBot:
         except Exception as e:
             logger.debug(f"risk get_positions: {e}")
     
+    async def _restore_execution_state(self):
+        """Restore positions/orders/balances from StateStore so they survive restarts."""
+        if not self.execution_engine:
+            return
+        loader = getattr(self.execution_engine, "load_state", None)
+        if loader:
+            try:
+                restored = await loader() if asyncio.iscoroutinefunction(loader) else loader()
+                if restored:
+                    logger.info("Execution state restored from StateStore")
+            except Exception as e:
+                logger.debug(f"restore execution state: {e}")
+
+    async def _mark_to_market(self):
+        """Update unrealized P&L for open positions using latest prices."""
+        if not self.execution_engine:
+            return
+        updater = getattr(self.execution_engine, "update_mark_prices", None)
+        if updater:
+            try:
+                await updater(dict(self._market_prices))
+            except Exception as e:
+                logger.debug(f"mark to market: {e}")
+
+    async def _persist_execution_state(self):
+        """Persist positions/orders/balances to StateStore each tick."""
+        if not self.execution_engine:
+            return
+        saver = getattr(self.execution_engine, "save_state", None)
+        if saver:
+            try:
+                await saver()
+            except Exception as e:
+                logger.debug(f"persist execution state: {e}")
+
     async def _persist_state(self):
-        """Persist bot state to the state store."""
+        """Persist bot state + execution state to the state store each tick."""
         if not self.state_store:
             return
+        # Trading bot meta
         saver = getattr(self.state_store, "save", None)
         if saver:
             try:
+                payload = {
+                    "trading_bot": {
+                        "running": self.running,
+                        "heartbeat": self._last_heartbeat,
+                        "errors": self._loop_error_count,
+                        "timestamp": time.time(),
+                    }
+                }
                 if asyncio.iscoroutinefunction(saver):
-                    await saver({
-                        "trading_bot": {
-                            "running": self.running,
-                            "heartbeat": self._last_heartbeat,
-                            "errors": self._loop_error_count,
-                            "timestamp": time.time(),
-                        }
-                    })
+                    await saver(payload)
                 else:
-                    saver({
-                        "trading_bot": {
-                            "running": self.running,
-                            "heartbeat": self._last_heartbeat,
-                            "errors": self._loop_error_count,
-                            "timestamp": time.time(),
-                        }
-                    })
+                    saver(payload)
             except Exception as e:
                 logger.debug(f"state save: {e}")
+        # Execution engine: positions/orders/balances/drawdown
+        await self._persist_execution_state()
