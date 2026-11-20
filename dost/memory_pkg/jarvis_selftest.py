@@ -1,6 +1,6 @@
 """
-Offline self-test for dost/jarvis.py. No network, no real fleet, no model calls.
-Runs: python3 dost/jarvis_selftest.py
+Offline self-test for dost/memory_pkg/jarvis.py. No network, no real fleet, no model calls.
+Runs: python3 dost/memory_pkg/jarvis_selftest.py
 """
 from __future__ import annotations
 
@@ -11,12 +11,12 @@ import time
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import jarvis  # noqa: E402  (needed to stub dispatch below)
-from jarvis import route, execute, ToolCall, build_cached_context, resolve_pending, store_pending
+from memory_pkg import jarvis  # noqa: E402  (needed to stub dispatch below)
+from memory_pkg.jarvis import route, execute, ToolCall, build_cached_context, resolve_pending, store_pending
 
-import proactive_monitor  # noqa: E402
+from ops import proactive_monitor  # noqa: E402
 
 # Stub fleet dispatch so this selftest can never write to HIVE_DIR.
 # Mimics the unconfirmed path: restates intent, asks for "yes", writes nothing.

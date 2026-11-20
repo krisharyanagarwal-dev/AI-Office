@@ -31,7 +31,7 @@ import models  # noqa: E402
 
 JARVIS = os.environ.get("DOST_JARVIS") == "1"
 if JARVIS:
-    from jarvis import route, execute, resolve_pending, store_pending  # noqa: E402
+    from memory_pkg.jarvis import route, execute, resolve_pending, store_pending  # noqa: E402
 
 MAX_AUDIO = 15 * 1024 * 1024  # 15 MB voice clip limit
 AUDIO_EXT = {

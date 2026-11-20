@@ -4,6 +4,8 @@ THE CLAUDE COMPANY's dost layer: natural language in, natural language out.
 Not a chatbot clone — an action-oriented dost that runs research, trading,
 fleet, ops, upgrade, and assistant departments on your behalf.
 
+**See also:** [`docs/MODULES.md`](docs/MODULES.md) — map of every module in this package.
+
 ## How to Use
 
 ```bash

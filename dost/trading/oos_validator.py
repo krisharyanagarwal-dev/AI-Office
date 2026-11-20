@@ -19,7 +19,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from dost.backtest_engine import (
+from dost.trading.backtest_engine import (
     BACKTEST_DIR,
     BACKTEST_RESULTS_DIR,
     load_backtest_result,
@@ -201,7 +201,7 @@ def run_oos_validation(
 
     # Run the strategy on OOS data
     # Re-run the backtest logic on OOS data
-    from dost.backtest_engine import run_backtest
+    from dost.trading.backtest_engine import run_backtest
 
     oos_result = run_backtest(
         backtest_result,

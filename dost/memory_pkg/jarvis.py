@@ -7,7 +7,7 @@ or file access: the router decides, the model only narrates.
 
 Wire in:
 
-    from jarvis import route, execute, build_context_packet
+    from memory_pkg.jarvis import route, execute, build_context_packet
 
     call = route(user_text)
     if call:
@@ -29,12 +29,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from dost import MEMORY, build_context
 from company_dispatcher import route_department
-from proactive_monitor import run_monitor_once, check_fleet_health
-from persistent_memory import conversation_memory
+from ops.proactive_monitor import run_monitor_once, check_fleet_health
+from memory_pkg.persistent_memory import conversation_memory
 
 try:  # list_recent_dost_tasks lives in dost.py
     from dost import list_recent_dost_tasks

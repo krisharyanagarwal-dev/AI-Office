@@ -29,8 +29,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
-COMPANY_DIR = Path(__file__).resolve().parent.parent
-DOST_DIR = Path(__file__).resolve().parent
+COMPANY_DIR = Path(__file__).resolve().parent.parent.parent
+DOST_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(COMPANY_DIR))
 sys.path.insert(0, str(DOST_DIR))
 

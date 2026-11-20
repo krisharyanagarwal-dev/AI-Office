@@ -22,10 +22,10 @@ from typing import Any, Dict, List, Optional
 sys.path.insert(0, "/Users/aryanagarwal/AI-Office")
 
 from dost.dost import dispatch_prompt_to_fleet
-from dost.strategy_engine import generate_all_signals
-from dost.backtest_engine import run_backtest
-from dost.position_sizer import calculate_position_size
-from dost.oos_validator import run_oos_validation
+from dost.trading.strategy_engine import generate_all_signals
+from dost.trading.backtest_engine import run_backtest
+from dost.trading.position_sizer import calculate_position_size
+from dost.trading.oos_validator import run_oos_validation
 from dost.data_access import generate_synthetic_ohlcv
 
 STRATEGY_DIR = Path("/Users/aryanagarwal/AI-Office/packages/office-os/tasks")

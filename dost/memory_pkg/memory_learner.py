@@ -17,8 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-COMPANY_DIR = Path(__file__).resolve().parent.parent
-DOST_DIR = Path(__file__).resolve().parent
+COMPANY_DIR = Path(__file__).resolve().parent.parent.parent
+DOST_DIR = Path(__file__).resolve().parent.parent
 DOST_MEMORY = DOST_DIR / "memory.json"
 DOST_HISTORY = DOST_DIR / "history.jsonl"
 sys.path.insert(0, str(DOST_DIR))

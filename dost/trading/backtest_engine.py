@@ -27,7 +27,7 @@ from dost.data_access import (
     load_ohlcv_from_csv,
     load_ohlcv_from_directory,
 )
-from dost.strategy_engine import SIGNAL_DIR
+from dost.trading.strategy_engine import SIGNAL_DIR
 
 BACKTEST_DIR = Path(os.path.expanduser("~/.openclaw/backtests"))
 BACKTEST_RESULTS_DIR = BACKTEST_DIR / "results"

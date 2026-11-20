@@ -23,10 +23,10 @@ import threading
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-COMPANY_DIR = Path(__file__).resolve().parent.parent
-DOST_DIR = Path(__file__).resolve().parent
+COMPANY_DIR = Path(__file__).resolve().parent.parent.parent
+DOST_DIR = Path(__file__).resolve().parent.parent
 
 OFFICE_OS = Path("/Users/aryanagarwal/AI-Office/packages/office-os")
 if str(OFFICE_OS) not in sys.path:

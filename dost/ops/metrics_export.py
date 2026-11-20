@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Dict, Any, Optional
 
-from dost.workspace import workspace_pnl_dir
+from dost.collab.workspace import workspace_pnl_dir
 from dost.billing.meter import get_usage_summary, get_current_month_cost
 
 

@@ -23,11 +23,14 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-try:  # workspace.py lives next to this module
-    from workspace import add_user, create_workspace
-except Exception:  # pragma: no cover - fallback when imported standalone
-    add_user = None  # type: ignore[assignment]
-    create_workspace = None  # type: ignore[assignment]
+try:  # workspace.py lives in the collab subpackage
+    from collab.workspace import add_user, create_workspace
+except Exception:  # pragma: no cover - fallback when imported as dost.setup_wizard
+    try:
+        from dost.collab.workspace import add_user, create_workspace
+    except Exception:
+        add_user = None  # type: ignore[assignment]
+        create_workspace = None  # type: ignore[assignment]
 
 SETUP_DIR = Path(os.path.expanduser("~/.openclaw/setup"))
 SETUP_DIR.mkdir(parents=True, exist_ok=True)

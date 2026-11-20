@@ -31,8 +31,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-COMPANY_DIR = Path(__file__).resolve().parent.parent
-DOST_DIR = Path(__file__).resolve().parent
+COMPANY_DIR = Path(__file__).resolve().parent.parent.parent
+DOST_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(COMPANY_DIR))
 
 # Load the inner dost module (dost/dost.py) directly by file path. Importing

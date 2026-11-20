@@ -37,7 +37,7 @@ DEFAULT_WORKSPACE_ID = _dost_module.DEFAULT_WORKSPACE_ID
 _handle_workspace_command = _dost_module._handle_workspace_command
 
 # Strategy pipeline (dispatch → backtest → cost-size → validate)
-_strategy_pipeline_path = Path(__file__).resolve().parent / "dost" / "strategy_pipeline.py"
+_strategy_pipeline_path = Path(__file__).resolve().parent / "dost" / "trading" / "strategy_pipeline.py"
 _strategy_pipeline_spec = importlib.util.spec_from_file_location("strategy_pipeline", _strategy_pipeline_path)
 _strategy_pipeline_module = importlib.util.module_from_spec(_strategy_pipeline_spec)
 _strategy_pipeline_spec.loader.exec_module(_strategy_pipeline_module)

@@ -26,9 +26,9 @@ import tempfile
 import threading
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import voice_cli  # noqa: E402  (mic capture, playback, shared STOP event)
+from voice import voice_cli  # noqa: E402  (mic capture, playback, shared STOP event)
 from dost import dost_respond  # noqa: E402
 from openai_components import speech_to_text, text_to_speech  # noqa: E402
 

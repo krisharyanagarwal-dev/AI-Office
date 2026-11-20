@@ -45,7 +45,7 @@ sys.path.insert(0, str(DOST_DIR))
 from company_dispatcher import dispatch, route_department  # noqa: E402
 from openai_components import chat_completion, provider_health  # noqa: E402
 from context_builder import build_context  # noqa: E402
-from workspace import (  # noqa: E402
+from collab.workspace import (  # noqa: E402
     create_workspace,
     get_workspace,
     list_workspaces,

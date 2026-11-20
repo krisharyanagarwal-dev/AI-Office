@@ -122,20 +122,20 @@ def get_role_hierarchy() -> dict:
 
 def can_access_workspace(workspace_id: str, email: str) -> bool:
     """Check if a user has access to a workspace."""
-    from dost.workspace import get_user_role
+    from dost.collab.workspace import get_user_role
     role = get_user_role(workspace_id, email)
     return role is not None
 
 
 def can_edit_workspace(workspace_id: str, email: str) -> bool:
     """Check if a user can edit in a workspace (admin or editor)."""
-    from dost.workspace import get_user_role
+    from dost.collab.workspace import get_user_role
     role = get_user_role(workspace_id, email)
     return role in ("admin", "pro")
 
 
 def can_admin_workspace(workspace_id: str, email: str) -> bool:
     """Check if a user is admin of a workspace."""
-    from dost.workspace import get_user_role
+    from dost.collab.workspace import get_user_role
     role = get_user_role(workspace_id, email)
     return role == "admin"

@@ -88,7 +88,7 @@ def _workspace_findings(workspace_id: str) -> List[dict]:
 
 
 def _workspace_audit_logs(workspace_id: str) -> List[dict]:
-    from dost.audit_log import get_audit_logs
+    from dost.ops.audit_log import get_audit_logs
     return get_audit_logs(workspace_id)
 
 
@@ -216,7 +216,7 @@ def export_user_data(user_email: str, workspace_ids: List[str]) -> dict:
             f for f in _workspace_findings(workspace_id)
             if f.get("user_email") == user_email or f.get("author") == user_email
         ]
-        from dost.audit_log import get_audit_logs
+        from dost.ops.audit_log import get_audit_logs
         user_audit_logs = [
             r for r in get_audit_logs(workspace_id)
             if r.get("user_email") == user_email
