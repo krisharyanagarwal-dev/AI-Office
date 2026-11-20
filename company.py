@@ -21,6 +21,7 @@ COMPANY_DIR = Path(__file__).resolve().parent
 DISPATCHER = COMPANY_DIR / "company_dispatcher.py"
 UPGRADE = COMPANY_DIR / "upgrade_system.py"
 DOST = COMPANY_DIR / "dost.py"
+STOCKS_BOT = COMPANY_DIR / "scripts" / "all_stocks_bot.py"
 PNL_FILE = Path("/Users/aryanagarwal/.openclaw/office_pnl.json")
 METRICS_URL = "http://127.0.0.1:8083/metrics"
 
@@ -83,6 +84,25 @@ def cmd_metrics() -> None:
         print("Start it: cd /Users/aryanagarwal/AI-Office/packages/office-os && python core/web_server.py")
 
 
+def cmd_stocks(args) -> None:
+    """Run the all-listed-stocks fundamental analysis bot."""
+    if not STOCKS_BOT.exists():
+        print(f"Stocks bot not found at {STOCKS_BOT}")
+        return
+    cmd = [sys.executable, str(STOCKS_BOT)]
+    if args.file:
+        cmd += ["--file", args.file]
+    if args.limit is not None:
+        cmd += ["--limit", str(args.limit)]
+    if args.outdir:
+        cmd += ["--outdir", args.outdir]
+    if args.resume:
+        cmd.append("--resume")
+    if args.rate_limit is not None:
+        cmd += ["--rate-limit", str(args.rate_limit)]
+    subprocess.run(cmd)
+
+
 def cmd_status() -> None:
     print("=== THE CLAUDE COMPANY — Status ===")
     print()
@@ -133,6 +153,12 @@ def main() -> None:
 
     sub.add_parser("pnl", help="Show office P&L")
     sub.add_parser("metrics", help="Show dashboard metrics")
+    p_stocks = sub.add_parser("stocks", help="Run all-listed-stocks fundamental analysis bot")
+    p_stocks.add_argument("--file", help="Path to a file with one symbol per line")
+    p_stocks.add_argument("--limit", type=int, help="Max symbols to analyze (for testing)")
+    p_stocks.add_argument("--outdir", default="reports", help="Output directory (default: reports/)")
+    p_stocks.add_argument("--resume", action="store_true", help="Resume from last checkpoint")
+    p_stocks.add_argument("--rate-limit", type=float, default=0.5, help="Seconds between yfinance calls")
     sub.add_parser("status", help="Full company status")
 
     args = parser.parse_args()
@@ -148,6 +174,8 @@ def main() -> None:
         cmd_pnl()
     elif args.command == "metrics":
         cmd_metrics()
+    elif args.command == "stocks":
+        cmd_stocks(args)
     elif args.command == "status":
         cmd_status()
     else:

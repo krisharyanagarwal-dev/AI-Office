@@ -32,6 +32,8 @@ FLEET_DISPATCHER = "/Users/aryanagarwal/.openclaw/jev-dispatcher.py"
 COMPANY_LOG = Path("/Users/aryanagarwal/AI-Office/logs/company.log")
 COMPANY_LOG.parent.mkdir(parents=True, exist_ok=True)
 
+STOCKS_BOT = COMPANY_DIR / "scripts" / "all_stocks_bot.py"
+
 
 def log(msg: str) -> None:
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -111,6 +113,48 @@ def route_department(task: str) -> str:
 # Department handlers
 # ---------------------------------------------------------------------------
 
+def run_all_stocks_bot(task: str) -> dict:
+    """Execute the all-listed-stocks fundamental analysis bot.
+
+    Runs all_stocks_bot.py with defaults (full NSE universe, reports/ outdir).
+    Factual metrics only — no stock-timing or directional calls.
+    """
+    log(f"STOCKS: running all_stocks_bot.py for: {task[:80]}")
+    try:
+        result = subprocess.run(
+            [sys.executable, str(STOCKS_BOT)],
+            capture_output=True, text=True, timeout=3600,
+        )
+        output = result.stdout or ""
+        tail = "\n".join(output.splitlines()[-25:]) if output else ""
+        return {
+            "department": "stocks",
+            "handled_by": "all_stocks_bot",
+            "task": task,
+            "status": "COMPLETE" if result.returncode == 0 else "FAILED",
+            "returncode": result.returncode,
+            "output": tail,
+            "note": "All-listed-stocks fundamental analysis (factual metrics only — no directional calls)",
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "department": "stocks",
+            "handled_by": "all_stocks_bot",
+            "task": task,
+            "status": "FAILED",
+            "error": "timeout",
+            "note": "all_stocks_bot.py timed out",
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "department": "stocks",
+            "handled_by": "all_stocks_bot",
+            "task": task,
+            "status": "FAILED",
+            "error": str(exc),
+        }
+
+
 def handle_research(task: str) -> dict:
     """Route to NSE research machine."""
     log(f"RESEARCH: {task[:80]}")
@@ -132,7 +176,20 @@ def handle_research(task: str) -> dict:
 
 
 def handle_trading(task: str) -> dict:
-    """Route to paper trading engine."""
+    """Route to paper trading engine, or run all-stocks analysis for fundamental stock tasks."""
+    t = task.lower()
+    is_stock_analysis = (
+        any(k in t for k in ("stock", "nse", "nifty", "equity"))
+        and any(k in t for k in ("all", "list", "analyze", "snapshot", "fundamental", "screen", "universe"))
+    )
+    is_pure_trading = any(k in t for k in (
+        "backtest", "strategy", "option", "trade", "paper", "margin", "stt", "gst",
+        "brokerage", "iv rank", "straddle", "strangle", "condor", "fii", "dii",
+        "bhavcopy",
+    ))
+    if is_stock_analysis and not is_pure_trading:
+        return run_all_stocks_bot(task)
+
     log(f"TRADING: {task[:80]}")
     return {
         "department": "trading",
