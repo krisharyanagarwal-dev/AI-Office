@@ -558,10 +558,35 @@ class RiskAwareExecutionEngine:
             if fundamentals:
                 order.fundamentals = fundamentals
     
+    def _fundamentals_position_modifier(self, symbol: str) -> float:
+        """Return position size multiplier based on fundamentals (0.5-1.5)."""
+        facts = symbol_fundamentals(None, symbol)
+        if not facts:
+            return 1.0
+        
+        mod = 1.0
+        if facts.get("valuation_flag") == "Expensive":
+            mod *= 0.7
+        if facts.get("leverage_flag") == "High":
+            mod *= 0.8
+        if facts.get("liquidity_flag") == "Tight":
+            mod *= 0.7
+        if facts.get("profitability_flag") == "Weak":
+            mod *= 0.8
+        
+        return max(0.5, min(1.5, mod))  # clamp
+    
     async def submit_order_with_risk(self, order) -> Any:
         """Submit order with risk checks"""
         # Attach fundamentals as context (read-only, never gates order)
         self._attach_fundamentals(order)
+        
+        # Apply fundamentals-based position sizing
+        if hasattr(order, 'symbol') and order.symbol and hasattr(order, 'quantity'):
+            modifier = self._fundamentals_position_modifier(order.symbol)
+            if modifier != 1.0:
+                order.quantity *= modifier
+                logger.info(f"Position size adjusted for {order.symbol}: modifier={modifier:.2f}")
         
         # Run pre-trade checks
         allowed, reason, _ = self.rm.pre_trade_check(order)

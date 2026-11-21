@@ -48,10 +48,12 @@ TIER_POOL_MAP = {
     "lite": "nvidia_key3",  # nemotron-3.5-lightning-30b + nano-omni
 }
 
-# Failover pool order per tier when the primary pool is rate-limited/unavailable
+# Failover pool order per tier when the primary pool is rate-limited/unavailable.
+# The local MLX pool leads every chain: it costs nothing and runs on this Mac.
 TIER_FAILOVER_POOLS = {
-    "pro": ["nvidia_key1", "nvidia_key2", "nvidia_key4", "openrouter", "google"],
-    "lite": ["nvidia_key3", "nvidia_key2", "nvidia_key4", "openrouter", "google"],
+    "pro": ["mlx_local", "nvidia_key1", "nvidia_key2", "nvidia_key4", "openrouter", "google"],
+    "lite": ["mlx_local", "nvidia_key3", "nvidia_key2", "nvidia_key4", "openrouter", "google"],
+    "general": ["mlx_local", "nvidia_key3", "nvidia_key2", "nvidia_key4", "openrouter", "google"],
 }
 
 # Agent keywords that always need heavy reasoning
@@ -92,7 +94,7 @@ class CloudModelOrchestrator:
 
     def _failover_pools(self, tier):
         """Return ordered pool list for this tier."""
-        return TIER_FAILOVER_POOLS.get(tier, ["nvidia_key1", "nvidia_key2", "openrouter", "google"])
+        return TIER_FAILOVER_POOLS.get(tier, ["mlx_local", "nvidia_key1", "nvidia_key2", "openrouter", "google"])
 
     def decide_model(self, agent_info, task_type="exec"):
         """
@@ -101,11 +103,12 @@ class CloudModelOrchestrator:
         Returns (model_name, pool_name, is_cloud) where:
         - model_name: the model to call
         - pool_name: the provider pool it belongs to
-        - is_cloud: always True (cloud-only fleet)
+        - is_cloud: True unless the local MLX pool served the task
 
-        Model assignment round-robins across ALL available models (all pools
-        in the tier's failover chain) so that concurrent workers never share
-        the same model. This keeps every key warm and spreads load evenly.
+        Cheapest available pool wins: the local MLX pool costs nothing, so it
+        is preferred over the metered cloud pools. Within the cheapest group
+        the assignment round-robins, so concurrent workers never share the
+        same model.
         """
         agent_id = agent_info["agent_id"]
         tier = agent_info["tier"]
@@ -129,15 +132,25 @@ class CloudModelOrchestrator:
 
         if not candidates:
             raise RuntimeError(
-                f"No cloud model available for tier={tier} (all pools rate-limited/unavailable)"
+                f"No model available for tier={tier} (all pools rate-limited/unavailable)"
             )
+
+        cheapest = min(self._pool_cost(pool_name) for _, pool_name in candidates)
+        cheapest_candidates = [
+            (model, pool_name) for model, pool_name in candidates
+            if self._pool_cost(pool_name) == cheapest
+        ]
 
         # Round-robin pick: concurrent workers get sequential models -> all different
         with self._model_rr_lock:
-            model, pool_name = candidates[self._model_rr_index % len(candidates)]
+            model, pool_name = cheapest_candidates[self._model_rr_index % len(cheapest_candidates)]
             self._model_rr_index += 1
 
-        return model, pool_name, True
+        return model, pool_name, pool_name != "mlx_local"
+
+    def _pool_cost(self, pool_name):
+        """Relative cost of a pool. 0 = free (local MLX), 1 = metered cloud."""
+        return self.router.pools.get(pool_name, {}).get("cost", 1)
 
     def call_model(self, model, pool_name, prompt, task_id=None, priority="normal",
                    max_tokens=500, temperature=0.7, timeout=None):

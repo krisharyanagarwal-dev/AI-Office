@@ -11,6 +11,20 @@
     "task_timeout_sec": 300
   },
   "provider_pools": {
+    "mlx_local": {
+      "provider": "mlx",
+      "models": [
+        "TheCluster/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-MLX-mxfp4"
+      ],
+      "tier": [
+        "pro",
+        "general",
+        "lite"
+      ],
+      "cost": 0,
+      "rate_limit_rpm": 0,
+      "cooldown_sec": 30
+    },
     "nvidia_key1": {
       "provider": "nvidia",
       "models": [
@@ -134,6 +148,7 @@
   "default_model": "google/gemini-3.5-flash",
   "small_model": "google/gemini-3.5-flash-lite",
   "fallback_chain": [
+    "mlx_local",
     "nvidia_key3",
     "nvidia_key4",
     "google",

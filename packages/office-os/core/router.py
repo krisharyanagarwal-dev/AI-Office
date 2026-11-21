@@ -47,10 +47,14 @@ class ProviderRouter:
         with self._lock:
             return time.time() > self.cooldowns.get(pool_name, 0)
 
+    def _pool_cost(self, pool_name):
+        """Relative cost of a pool. 0 = free (local MLX), 1 = metered cloud."""
+        return self.pools.get(pool_name, {}).get("cost", 1)
+
     def select_provider(self, tier="general", preferred_pool=None):
         """
         Select the best available provider for a given tier.
-        Round-robins across available pools of that tier by task count (persisted).
+        Cheapest pool first (cost 0 = local MLX), then round-robin by task count.
         Falls back through fallback_chain if none available.
         Thread-safe for concurrent worker access.
         """
@@ -78,8 +82,8 @@ class ProviderRouter:
                     candidates.append(name)
 
             if candidates:
-                # Round-robin: pick the pool with the fewest tasks assigned
-                best = min(candidates, key=lambda n: self.task_counts.get(n, 0))
+                # Cheapest pool wins; equal-cost pools round-robin by task count
+                best = min(candidates, key=lambda n: (self._pool_cost(n), self.task_counts.get(n, 0)))
                 self.task_counts[best] = self.task_counts.get(best, 0) + 1
                 self._save_task_counts()
                 pool = self.pools[best]
@@ -141,6 +145,7 @@ class ProviderRouter:
         for name, pool in self.pools.items():
             status[name] = {
                 "tier": pool["tier"],
+                "cost": self._pool_cost(name),
                 "available": self.is_available(name),
                 "cooldown_remaining": max(0, self.cooldowns.get(name, 0) - now),
                 "task_count": self.task_counts.get(name, 0),

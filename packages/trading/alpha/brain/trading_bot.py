@@ -4,6 +4,7 @@ TradingBot - Orchestration, execution, and system management
 import asyncio
 import logging
 import time
+from pathlib import Path
 from typing import Dict, List, Optional
 
 from alpha.data.stock_metrics import load_stock_metrics, symbol_fundamentals
@@ -248,7 +249,19 @@ class TradingBot:
         Fails silently — a missing or unreadable metrics file leaves the
         previous (possibly empty) fundamentals in place and never blocks the
         execution loop. The flags are factual context only, not signals.
+
+        Uses mtime caching to avoid re-parsing on every tick.
         """
+        metrics_path = Path("/Users/aryanagarwal/.openclaw/stocks_metrics.json")
+        try:
+            current_mtime = metrics_path.stat().st_mtime if metrics_path.exists() else 0
+        except OSError:
+            current_mtime = 0
+
+        # Skip if file hasn't changed
+        if getattr(self, '_fundamentals_mtime', None) == current_mtime:
+            return
+
         try:
             metrics = load_stock_metrics()
             if not metrics:
@@ -263,6 +276,7 @@ class TradingBot:
                         entry.get("symbol"): entry for entry in top if entry.get("symbol")
                     }
             self._fundamentals_ts = time.time()
+            self._fundamentals_mtime = current_mtime
         except Exception:  # never crash the execution loop on metrics
             pass
 

@@ -64,6 +64,7 @@ class ProviderClient:
         "nvidia_key4":  "https://integrate.api.nvidia.com/v1/chat/completions",
         "google":       "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
         "openrouter":   "https://openrouter.ai/api/v1/chat/completions",
+        "mlx_local":    "http://127.0.0.1:11435/v1/chat/completions",
     }
 
     KEY_NAMES = {
@@ -74,6 +75,14 @@ class ProviderClient:
         "google":       "GEMINI_API_KEY",
         "openrouter":   "OPENROUTER_API_KEY",
     }
+
+    # Pools served by a local process: no API key, no DNS lookup, and a much
+    # lower token rate than the cloud pools.
+    LOCAL_POOLS = frozenset({"mlx_local"})
+
+    # Local inference on an M-series Mac runs at ~18 tok/s on a 9B model, so a
+    # 45s cloud budget never covers a full answer. Local calls get this floor.
+    LOCAL_TIMEOUT_FLOOR = 300
 
     # Per-priority curl timeout in seconds
     TIMEOUT_BY_PRIORITY = {
@@ -96,18 +105,30 @@ class ProviderClient:
         self.model = model
         self.endpoint = self.ENDPOINTS.get(pool_name)
         self.key_name = self.KEY_NAMES.get(pool_name)
+        self.is_local = pool_name in self.LOCAL_POOLS
         if self.endpoint is None:
             raise ValueError(f"Unknown provider pool: {pool_name}. Available: {list(self.ENDPOINTS.keys())}")
-        if self.key_name is None:
-            raise ValueError(f"No API key env var for pool: {pool_name}. Available: {list(self.KEY_NAMES.keys())}")
-        # launchd starts the orchestrator without the shell's exports, so fall
-        # back to ~/.env (mode 600) rather than copying secrets into a plist.
-        self.api_key = os.environ.get(self.key_name, "") or _key_from_env_file(self.key_name)
-        if not self.api_key:
-            raise ValueError(f"Missing env var {self.key_name} for pool {pool_name}")
+        if not self.is_local:
+            if self.key_name is None:
+                raise ValueError(f"No API key env var for pool: {pool_name}. Available: {list(self.KEY_NAMES.keys())}")
+            # launchd starts the orchestrator without the shell's exports, so fall
+            # back to ~/.env (mode 600) rather than copying secrets into a plist.
+            self.api_key = os.environ.get(self.key_name, "") or _key_from_env_file(self.key_name)
+            if not self.api_key:
+                raise ValueError(f"Missing env var {self.key_name} for pool {pool_name}")
+        else:
+            self.api_key = ""
         # Resolve hostname to IP via dig (system resolver is broken for some
         # providers; dig uses its own resolver and works). Cache per instance.
-        self._resolve_ip = self._resolve_host()
+        # Loopback endpoints are already numeric, so they skip DNS entirely.
+        self._resolve_ip = None if self.is_local else self._resolve_host()
+
+    def _effective_timeout(self, priority: str, timeout: Optional[int] = None) -> int:
+        """Final curl timeout for a call, in seconds."""
+        effective = timeout or self.TIMEOUT_BY_PRIORITY.get(priority, self.TIMEOUT_BY_PRIORITY["normal"])
+        if self.is_local:
+            effective = max(effective, self.LOCAL_TIMEOUT_FLOOR)
+        return effective
 
     def _resolve_host(self):
         """Resolve endpoint hostname to IP using dig. Returns None on failure."""
@@ -143,7 +164,7 @@ class ProviderClient:
         # Priority-based timeout
         # An explicit timeout wins (autopilot uses a short one so a slow pool
         # is skipped quickly); otherwise it follows the task priority.
-        timeout = timeout or self.TIMEOUT_BY_PRIORITY.get(priority, self.TIMEOUT_BY_PRIORITY["normal"])
+        timeout = self._effective_timeout(priority, timeout)
 
         payload = json.dumps({
             "model": self.model,
@@ -161,7 +182,8 @@ class ProviderClient:
             fd = os.open(tmp_cfg, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "w") as f:
                 f.write(f"url = \"{self.endpoint}\"\n")
-                f.write(f'header = "Authorization: Bearer {self.api_key}"\n')
+                if self.api_key:
+                    f.write(f'header = "Authorization: Bearer {self.api_key}"\n')
                 f.write('header = "Content-Type: application/json"\n')
             cmd = [
                 "curl", "-s", "-m", str(timeout),

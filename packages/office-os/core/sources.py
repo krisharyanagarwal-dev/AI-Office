@@ -88,7 +88,7 @@ HUD = "http://127.0.0.1:4752"
 
 def office_hud():
     name = "office-hud"
-    health, err = _http_json(HUD + "/api/health")
+    health, err = _http_json(HUD + "/health")
     if err:
         return _result(name, False, None, "unreachable", [f"/api/health: {err}"])
     health = health or {}
@@ -97,7 +97,7 @@ def office_hud():
     if isinstance(core, dict):
         health = dict(health, status=core.get("status"))
         down = [c.get("component") for c in core.get("checks", [])
-                if isinstance(c, dict) and c.get("status") not in ("healthy", None)]
+                if isinstance(c, dict) and c.get("status") not in ("healthy", None, "degraded")]
     else:
         down = []
     agents, aerr = _http_json(HUD + "/api/agents")

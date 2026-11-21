@@ -162,54 +162,86 @@ class ModelRouter:
         if not backend:
             raise HTTPException(503, "No available backend")
         
-        # Check health
-        if not self.health.get(backend.name, {}).get("healthy", True):
-            # Try fallback
-            for rule in self.rules:
-                if rule.backend == backend.name and rule.fallback:
-                    fb = self.backends.get(rule.fallback)
-                    if fb and fb.enabled and self.health.get(fb.name, {}).get("healthy", True):
-                        backend = fb
-                        break
+    async def check_and_route_request(self, model: str, payload: Dict) -> httpx.Response:
+        """Check health of backend and route request, applying fallbacks if necessary."""
+        resolved_model = self.resolve_model(model)
+        backend = self.select_backend(model)
         
-        # Prepare request
-        url = f"{backend.endpoint}/v1/chat/completions"
-        headers = {"Content-Type": "application/json"}
+        if not backend:
+            raise HTTPException(503, "No available backend")
         
-        # Add API key if needed
-        if "api_key_env" in backend.config:
-            api_key = os.environ.get(backend.config["api_key_env"])
-            if api_key:
-                headers["Authorization"] = f"Bearer {api_key}"
-        
-        # Modify payload for backend
-        request_payload = dict(payload)
-        request_payload["model"] = resolved_model
-        
-        # Apply backend-specific config
-        if "max_tokens" in backend.config:
-            request_payload.setdefault("max_tokens", backend.config["max_tokens"])
-        
-        timeout = backend.config.get("timeout", 180)
-        
-        logger.info(f"Routing {model} -> {backend.name} ({backend.type}) at {backend.endpoint}")
-        
-        # Record Prometheus metric
-        record_model_router_request(backend.name, resolved_model)
-        
-        try:
-            response = await self.client.post(
-                url,
-                json=request_payload,
-                headers=headers,
-                timeout=timeout
-            )
-            return response
-        except httpx.TimeoutException:
-            raise HTTPException(504, f"Backend {backend.name} timeout")
-        except Exception as e:
-            logger.error(f"Backend {backend.name} error: {e}")
-            raise HTTPException(502, f"Backend error: {e}")
+        # Health check with retry logic
+        max_retries = 2
+        for attempt in range(max_retries + 1):
+            if not self.health.get(backend.name, {}).get("healthy", True):
+                # Try to find a healthy fallback if current is down
+                if attempt > 0:
+                    for rule in self.rules:
+                        if rule.backend == backend.name and rule.fallback:
+                            fb = self.backends.get(rule.fallback)
+                            if fb and fb.enabled and self.health.get(fb.name, {}).get("healthy", True):
+                                backend = fb
+                                break
+                    if backend != self.backends.get(backend.name): # If fallback changed
+                        logger.info(f"Switched routing for {model} from {self.backends.get(backend.name).name} to {backend.name} via fallback.")
+                        break # Break from health check loop as backend has changed
+                
+                if attempt == max_retries:
+                    logger.error(f"Backend {backend.name} consistently unhealthy after {max_retries} retries.")
+                    raise HTTPException(503, f"Backend {backend.name} unavailable")
+            
+            # If backend changed due to fallback, re-select backend object reference
+            if backend not in self.backends.values() and attempt > 0:
+                # This path is complex due to mutable backend object reference, ensure we have a valid backend object before proceeding
+                backend = self.select_backend(model)
+                if not backend:
+                    raise HTTPException(503, "No available backend even after fallback check")
+            
+            # Prepare request
+            url = f"{backend.endpoint}/v1/chat/completions"
+            headers = {"Content-Type": "application/json"}
+            
+            # Add API key if needed
+            if "api_key_env" in backend.config:
+                api_key = os.environ.get(backend.config["api_key_env"])
+                if api_key:
+                    headers["Authorization"] = f"Bearer {api_key}"
+            
+            # Modify payload for backend
+            request_payload = dict(payload)
+            request_payload["model"] = resolved_model
+            
+            # Apply backend-specific config
+            if "max_tokens" in backend.config:
+                request_payload.setdefault("max_tokens", backend.config["max_tokens"])
+            
+            timeout = backend.config.get("timeout", 180)
+            
+            logger.info(f"Routing {model} -> {backend.name} ({backend.type}) at {backend.endpoint} (Attempt {attempt+1})")
+            
+            # Record Prometheus metric
+            record_model_router_request(backend.name, resolved_model)
+            
+            try:
+                response = await self.client.post(
+                    url,
+                    json=request_payload,
+                    headers=headers,
+                    timeout=timeout
+                )
+                return response
+            except httpx.TimeoutException:
+                logger.warning(f"Backend {backend.name} timeout on attempt {attempt+1}.")
+                self.health[backend.name]["failures"] += 1
+            except Exception as e:
+                logger.error(f"Backend {backend.name} error on attempt {attempt+1}: {e}")
+                self.health[backend.name]["failures"] += 1
+            
+            # Update health based on failure, potentially forcing health_check to update state
+            self.health[backend.name]["healthy"] = False
+
+        # Should be unreachable if logic is sound, but as a safety net:
+        raise HTTPException(502, f"Failed to route request after multiple attempts for {model}")
 
 # FastAPI app
 router = ModelRouter()
@@ -222,6 +254,18 @@ async def lifespan(app: FastAPI):
     for backend in router.backends.values():
         if backend.enabled:
             await router.health_check(backend)
+    
+    # Start periodic health check in background
+    async def periodic_health_check():
+        while True:
+            await asyncio.sleep(60) # Check every 60 seconds
+            logger.info("Running periodic backend health checks.")
+            for backend in router.backends.values():
+                if backend.enabled:
+                    await router.health_check(backend)
+
+    asyncio.create_task(periodic_health_check())
+    
     yield
     # Shutdown
     await router.client.aclose()

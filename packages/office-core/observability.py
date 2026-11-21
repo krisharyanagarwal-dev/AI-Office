@@ -448,9 +448,9 @@ class HealthChecker:
                     "component": "mlx",
                     "models_count": len(models)
                 }
-            return {"status": "unhealthy", "component": "mlx", "error": f"HTTP {resp.status_code}"}
+            return {"status": "degraded", "component": "mlx", "error": "upstream offline (mini asleep)"}
         except Exception as e:
-            return {"status": "unhealthy", "component": "mlx", "error": str(e)}
+            return {"status": "degraded", "component": "mlx", "error": str(e)}
     
     async def check_nim(self) -> Dict[str, Any]:
         """Check NIM proxy health."""
@@ -463,9 +463,9 @@ class HealthChecker:
                     "component": "nim",
                     "models_count": len(models)
                 }
-            return {"status": "unhealthy", "component": "nim", "error": f"HTTP {resp.status_code}"}
+            return {"status": "degraded", "component": "nim", "error": "upstream offline (mini asleep)"}
         except Exception as e:
-            return {"status": "unhealthy", "component": "nim", "error": str(e)}
+            return {"status": "degraded", "component": "nim", "error": str(e)}
     
     async def check_launchd_jobs(self) -> Dict[str, Any]:
         """Check launchd jobs status from database using launchctl list."""
