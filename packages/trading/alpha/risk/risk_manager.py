@@ -5,6 +5,7 @@ Portfolio risk controls, position limits, drawdown monitoring
 import asyncio
 import time
 from dataclasses import dataclass, field
+from typing import List
 from typing import Dict, List, Optional, Callable, Any
 from enum import Enum
 import logging
@@ -59,6 +60,18 @@ class RiskLimits:
     max_daily_loss: float = 50000.0            # max daily loss
     max_drawdown: float = 0.15                 # max drawdown (15%)
     max_drawdown_lookback: int = 252           # lookback days for drawdown
+    
+    # Kelly sizing
+    kelly_fraction: float = 0.25               # Kelly fraction (0.25 = quarter Kelly)
+    min_kelly_fraction: float = 0.05           # minimum Kelly fraction
+    kelly_lookback: int = 252                  # lookback days for Kelly estimation
+    kelly_min_trades: int = 30                 # minimum trades for Kelly estimation
+    
+    # Drawdown circuit breakers
+    dd_circuit_breaker_levels: List[float] = field(default_factory=lambda: [0.05, 0.10, 0.15, 0.20])
+    dd_circuit_reduction: List[float] = field(default_factory=lambda: [0.8, 0.5, 0.25, 0.0])
+    dd_circuit_recovery_threshold: float = 0.02  # 2% recovery before re-enabling
+    dd_circuit_cooldown_hours: int = 24        # cooldown before re-enabling
     
     # VaR limits
     var_confidence: float = 0.99               # VaR confidence level
@@ -130,6 +143,18 @@ class RiskManager:
         self._daily_volume: float = 0.0
         self._peak_equity: float = 0.0
         self._equity_high_water: float = 0.0
+        
+        # Kelly sizing state
+        self._trade_history: List[Dict] = []
+        self._kelly_fraction_cache: Optional[float] = None
+        self._kelly_cache_time: float = 0.0
+        
+        # Drawdown circuit breaker state
+        self._dd_circuit_active: Dict[float, bool] = {}
+        self._dd_circuit_triggered_at: Dict[float, float] = {}
+        self._dd_circuit_reduced_to: Dict[float, float] = {}
+        self._dd_circuit_cooldown_until: Dict[float, float] = {}
+        self._position_multipliers: Dict[str, float] = {}
         
         # Position tracking
         self._positions: Dict[str, Dict] = {}
@@ -306,6 +331,222 @@ class RiskManager:
                 self.on_alert(alert)
             except Exception as e:
                 logger.error(f"Alert callback error: {e}")
+    
+    # ============================================================
+    # Kelly Criterion Position Sizing
+    # ============================================================
+    
+    def record_trade_outcome(self, symbol: str, pnl: float, notional: float, 
+                             entry_price: float, exit_price: float, side: str):
+        """Record trade outcome for Kelly estimation"""
+        trade = {
+            'symbol': symbol,
+            'pnl': pnl,
+            'notional': notional,
+            'return_pct': pnl / notional if notional > 0 else 0,
+            'entry_price': entry_price,
+            'exit_price': exit_price,
+            'side': side,
+            'timestamp': time.time()
+        }
+        self._trade_history.append(trade)
+        
+        # Invalidate Kelly cache
+        self._kelly_fraction_cache = None
+        
+        # Keep only recent trades
+        if len(self._trade_history) > 1000:
+            self._trade_history = self._trade_history[-500:]
+    
+    def estimate_kelly_fraction(self) -> float:
+        """
+        Estimate optimal Kelly fraction from trade history.
+        Uses the standard Kelly formula: f* = (bp - q) / b
+        where b = avg win/loss ratio, p = win rate, q = 1-p
+        """
+        # Check cache
+        if self._kelly_fraction_cache is not None:
+            if time.time() - self._kelly_cache_time < 3600:  # 1 hour cache
+                return self._kelly_fraction_cache
+        
+        # Filter recent trades
+        cutoff = time.time() - self.limits.kelly_lookback * 86400
+        recent_trades = [t for t in self._trade_history if t['timestamp'] > cutoff]
+        
+        if len(recent_trades) < self.limits.kelly_min_trades:
+            return self.limits.min_kelly_fraction
+        
+        wins = [t for t in recent_trades if t['pnl'] > 0]
+        losses = [t for t in recent_trades if t['pnl'] < 0]
+        
+        if not wins or not losses:
+            return self.limits.min_kelly_fraction
+        
+        win_rate = len(wins) / len(recent_trades)
+        avg_win = np.mean([t['pnl'] for t in wins])
+        avg_loss = abs(np.mean([t['pnl'] for t in losses]))
+        
+        if avg_loss <= 0:
+            return self.limits.min_kelly_fraction
+        
+        # Kelly fraction: f* = (p * b - q) / b where b = avg_win/avg_loss
+        b = avg_win / avg_loss
+        kelly = (win_rate * b - (1 - win_rate)) / b
+        
+        # Apply constraints
+        kelly = max(self.limits.min_kelly_fraction, min(kelly, self.limits.kelly_fraction))
+        
+        # Cache result
+        self._kelly_fraction_cache = kelly
+        self._kelly_cache_time = time.time()
+        
+        logger.info(f"Kelly fraction estimated: {kelly:.4f} (win_rate={win_rate:.2%}, avg_win={avg_win:.2f}, avg_loss={avg_loss:.2f})")
+        return kelly
+    
+    def calculate_kelly_position(self, symbol: str, signal_strength: float, 
+                                  volatility: float, price: float, 
+                                  account_equity: float) -> float:
+        """
+        Calculate position size using Kelly criterion with drawdown constraints.
+        
+        Args:
+            symbol: Trading symbol
+            signal_strength: Signal strength (0-1)
+            volatility: Asset volatility (annualized)
+            price: Current price
+            account_equity: Total account equity
+            
+        Returns:
+            Position size in base currency
+        """
+        # Get Kelly fraction
+        kelly = self.estimate_kelly_fraction()
+        
+        # Apply signal strength scaling
+        kelly_adjusted = kelly * signal_strength
+        
+        # Apply volatility scaling (inverse volatility)
+        vol_scalar = min(1.0, 0.15 / max(volatility, 0.05))  # Target 15% vol
+        
+        # Apply drawdown circuit breaker multiplier
+        dd_multiplier = self.get_position_multiplier(symbol)
+        
+        # Calculate position size
+        position_pct = kelly_adjusted * vol_scalar * dd_multiplier
+        
+        # Cap at max position per symbol
+        max_notional = self.limits.max_position_per_symbol
+        position_notional = min(position_pct * account_equity, max_notional)
+        
+        # Convert to quantity
+        quantity = position_notional / price if price > 0 else 0
+        
+        logger.debug(f"Kelly position for {symbol}: kelly={kelly:.4f}, "
+                     f"signal={signal_strength:.2f}, vol_scalar={vol_scalar:.2f}, "
+                     f"dd_mult={dd_multiplier:.2f}, notional={position_notional:.2f}")
+        
+        return quantity
+    
+    # ============================================================
+    # Drawdown Circuit Breakers
+    # ============================================================
+    
+    def get_position_multiplier(self, symbol: str = "") -> float:
+        """
+        Get position size multiplier based on drawdown circuit breakers.
+        Returns multiplier between 0.0 and 1.0.
+        """
+        if not self._equity_curve:
+            return 1.0
+        
+        current = self._equity_curve[-1]
+        peak = max(self._equity_curve)
+        current_dd = (peak - current) / peak if peak > 0 else 0
+        
+        # Check each circuit breaker level
+        levels = self.limits.dd_circuit_breaker_levels
+        reductions = self.limits.dd_circuit_reduction
+        
+        base_multiplier = 1.0
+        
+        for level, reduction in zip(levels, reductions):
+            if current_dd >= level:
+                # Check if circuit is active
+                if level not in self._dd_circuit_active:
+                    self._dd_circuit_active[level] = True
+                    self._dd_circuit_triggered_at[level] = time.time()
+                    self._dd_circuit_reduced_to[level] = reduction
+                    logger.warning(f"Drawdown circuit breaker triggered at {level:.1%}: "
+                                   f"reducing positions to {reduction:.0%}")
+                
+                # Check cooldown
+                cooldown_until = self._dd_circuit_cooldown_until.get(level, 0)
+                if time.time() < cooldown_until:
+                    base_multiplier = min(base_multiplier, reduction)
+                else:
+                    # Check recovery
+                    current_equity = self._equity_curve[-1] if self._equity_curve else 0
+                    peak_equity = max(self._equity_curve)
+                    recovery = (current_equity - peak_equity * (1 - level)) / peak_equity
+                    if recovery >= self.limits.dd_circuit_recovery_threshold:
+                        # Recovery achieved, start cooldown
+                        self._dd_circuit_cooldown_until[level] = time.time() + \
+                            self.limits.dd_circuit_cooldown_hours * 3600
+                        self._dd_circuit_active[level] = False
+                        logger.info(f"Drawdown circuit breaker {level:.1%} recovery detected, "
+                                    f"cooldown started")
+                    else:
+                        base_multiplier = min(base_multiplier, reduction)
+            else:
+                # Below this level, check if we can deactivate
+                if level in self._dd_circuit_active and self._dd_circuit_active[level]:
+                    # Only deactivate if all higher levels are also inactive
+                    higher_active = any(
+                        self._dd_circuit_active.get(l, False) 
+                        for l in levels if l > level
+                    )
+                    if not higher_active:
+                        self._dd_circuit_active[level] = False
+                        self._dd_circuit_reduced_to[level] = 1.0
+                        logger.info(f"Drawdown circuit breaker {level:.1%} deactivated")
+        
+        return max(0.0, base_multiplier)
+    
+    def apply_circuit_breaker_to_order(self, order: Any) -> Any:
+        """Apply circuit breaker multiplier to order quantity"""
+        multiplier = self.get_position_multiplier(order.symbol)
+        if multiplier < 1.0:
+            original_qty = order.quantity
+            order.quantity = order.quantity * multiplier
+            logger.warning(f"Circuit breaker reduced order {order.symbol}: "
+                           f"{original_qty:.4f} -> {order.quantity:.4f} (mult={multiplier:.2f})")
+        return order
+    
+    def get_circuit_breaker_status(self) -> Dict:
+        """Get current circuit breaker status for dashboard"""
+        if not self._equity_curve:
+            return {'active': False, 'levels': {}}
+        
+        current = self._equity_curve[-1]
+        peak = max(self._equity_curve)
+        current_dd = (peak - current) / peak if peak > 0 else 0
+        
+        levels_status = {}
+        for level in self.limits.dd_circuit_breaker_levels:
+            levels_status[str(level)] = {
+                'triggered': self._dd_circuit_active.get(level, False),
+                'reduction': self._dd_circuit_reduced_to.get(level, 1.0),
+                'triggered_at': self._dd_circuit_triggered_at.get(level),
+                'cooldown_until': self._dd_circuit_cooldown_until.get(level)
+            }
+        
+        return {
+            'current_drawdown': current_dd,
+            'peak_equity': peak,
+            'current_equity': self._equity_curve[-1] if self._equity_curve else 0,
+            'active': any(self._dd_circuit_active.values()),
+            'levels': levels_status
+        }
     
     # Public API
     

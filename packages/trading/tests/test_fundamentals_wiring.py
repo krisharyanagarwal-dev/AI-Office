@@ -336,3 +336,103 @@ def test_execution_engine_works_without_fundamentals(monkeypatch):
 
     assert not hasattr(order, "fundamentals")
     assert order.status == ee_mod.OrderStatus.SUBMITTED
+
+
+def test_risk_manager_kelly_sizing():
+    """Test Kelly criterion position sizing."""
+    from alpha.risk.risk_manager import RiskManager, RiskLimits
+
+    limits = RiskLimits(kelly_fraction=0.25, kelly_min_trades=10, kelly_lookback=252)
+    rm = RiskManager(limits)
+
+    # Add winning trades (66% win rate, 2:1 reward/risk)
+    for i in range(20):
+        rm.record_trade_outcome('BTC', 100.0, 10000.0, 50000.0, 50100.0, 'long')
+
+    # Add losing trades
+    for i in range(10):
+        rm.record_trade_outcome('BTC', -50.0, 10000.0, 50000.0, 49950.0, 'long')
+
+    kelly = rm.estimate_kelly_fraction()
+    assert 0.05 <= kelly <= 0.25, f"Kelly fraction {kelly} out of bounds"
+
+    # Test position sizing with full signal
+    qty = rm.calculate_kelly_position('BTC', 1.0, 0.5, 50000.0, 10000.0)
+    assert qty > 0, "Position quantity should be positive"
+
+    # Test with reduced signal
+    qty_reduced = rm.calculate_kelly_position('BTC', 0.5, 0.5, 50000.0, 10000.0)
+    assert qty_reduced < qty, "Reduced signal should reduce position"
+
+    # Test with high volatility
+    qty_high_vol = rm.calculate_kelly_position('BTC', 1.0, 1.0, 50000.0, 10000.0)
+    assert qty_high_vol < qty, "High volatility should reduce position"
+
+
+def test_risk_manager_drawdown_circuit_breakers():
+    """Test drawdown circuit breakers."""
+    from alpha.risk.risk_manager import RiskManager, RiskLimits
+
+    limits = RiskLimits(
+        max_drawdown=0.15,
+        dd_circuit_breaker_levels=[0.05, 0.10, 0.15],
+        dd_circuit_reduction=[0.8, 0.5, 0.25]
+    )
+    rm = RiskManager(limits)
+
+    # Simulate equity curve with ~6% drawdown (triggers 5% level)
+    rm._equity_curve = [10000, 10200, 10100, 10000, 9900, 9800, 9700, 9600, 9500, 9400, 9300]
+
+    mult = rm.get_position_multiplier()
+    assert 0.75 <= mult <= 0.85, f"Expected ~0.8 multiplier at ~6% DD, got {mult}"
+
+    # More drawdown - ~11% triggers 10% level (50% reduction)
+    rm._equity_curve = [10000, 10200, 10100, 10000, 9900, 9800, 9700, 9600, 9500, 9400, 9300, 9200, 9100, 9000, 8900]
+
+    mult = rm.get_position_multiplier()
+    assert 0.45 <= mult <= 0.55, f"Expected ~0.5 multiplier at ~11% DD, got {mult}"
+
+    # Check circuit breaker status
+    status = rm.get_circuit_breaker_status()
+    assert status['active'] is True
+    assert status['levels']['0.05']['triggered'] is True
+    assert status['levels']['0.1']['triggered'] is True
+
+    # Test circuit breaker recovery
+    # Restore equity
+    rm._equity_curve = [10000, 10200, 10100, 10000, 9900, 9800, 9700, 9600, 9500, 9400, 9300, 9200, 9100, 9000, 8900, 9000, 9100, 9200, 9300, 9400, 9500, 9600, 9700, 9800, 9900, 10000]
+    
+    # After recovery, circuit breakers should eventually deactivate
+    status = rm.get_circuit_breaker_status()
+    assert 'active' in status
+    assert 'levels' in status
+
+
+def test_risk_manager_kelly_position_sizing_with_drawdown():
+    """Test Kelly position sizing integrates with drawdown circuit breakers."""
+    from alpha.risk.risk_manager import RiskManager, RiskLimits
+
+    limits = RiskLimits(
+        kelly_fraction=0.25,
+        kelly_min_trades=10,
+        dd_circuit_breaker_levels=[0.05, 0.10],
+        dd_circuit_reduction=[0.8, 0.5]
+    )
+    rm = RiskManager(limits)
+
+    # Add trades for Kelly estimation
+    for i in range(20):
+        rm.record_trade_outcome('BTC', 100.0, 10000.0, 50000.0, 50100.0, 'long')
+    for i in range(10):
+        rm.record_trade_outcome('BTC', -50.0, 10000.0, 50000.0, 49950.0, 'long')
+
+    # Normal conditions - no drawdown
+    rm._equity_curve = [10000] * 100
+    qty_normal = rm.calculate_kelly_position('BTC', 1.0, 0.5, 50000.0, 10000.0)
+
+    # With 6% drawdown - should reduce position by 20%
+    rm._equity_curve = [10000, 10200, 10100, 10000, 9900, 9800, 9700, 9600, 9500, 9400, 9300]
+    qty_dd = rm.calculate_kelly_position('BTC', 1.0, 0.5, 50000.0, 10000.0)
+
+    assert qty_dd < qty_normal, "Drawdown should reduce position size"
+    assert 0.75 <= qty_dd / qty_normal <= 0.85, "Should be ~80% of normal size"
