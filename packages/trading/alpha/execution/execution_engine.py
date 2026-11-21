@@ -13,6 +13,8 @@ from collections import defaultdict
 from datetime import datetime
 import logging
 
+from alpha.data.stock_metrics import symbol_fundamentals
+
 logger = logging.getLogger(__name__)
 
 
@@ -430,7 +432,17 @@ class ExecutionEngine:
     def add_pre_trade_check(self, check: Callable[[Order], bool]):
         self.pre_trade_checks.append(check)
     
+    def _attach_fundamentals(self, order: Order) -> None:
+        """Attach published fundamentals to order as context (read-only)."""
+        if order.symbol:
+            fundamentals = symbol_fundamentals(None, order.symbol)
+            if fundamentals:
+                order.fundamentals = fundamentals
+    
     async def submit_order(self, order: Order) -> Order:
+        # Attach fundamentals as context (read-only, never gates order)
+        self._attach_fundamentals(order)
+        
         # Run pre-trade checks
         for check in self.pre_trade_checks:
             if not check(order):

@@ -253,18 +253,29 @@ class TradingBot:
             metrics = load_stock_metrics()
             if not metrics:
                 return
-            top = metrics.get("top_by_market_cap") or {}
-            if isinstance(top, list):
-                self._fundamentals = {
-                    entry.get("symbol"): entry for entry in top if entry.get("symbol")
-                }
+            alias_map = metrics.get("fundamentals_by_symbol") or {}
+            if isinstance(alias_map, dict) and alias_map:
+                self._fundamentals = dict(alias_map)
+            else:
+                top = metrics.get("top_by_market_cap") or []
+                if isinstance(top, list):
+                    self._fundamentals = {
+                        entry.get("symbol"): entry for entry in top if entry.get("symbol")
+                    }
             self._fundamentals_ts = time.time()
         except Exception:  # never crash the execution loop on metrics
             pass
 
     def get_symbol_fundamentals(self, symbol: str) -> Optional[dict]:
-        """Return the latest fundamental block for a symbol, or None."""
-        return self._fundamentals.get(symbol)
+        """Return the latest fundamental facts for a symbol, or None."""
+        if not symbol:
+            return None
+        entry = self._fundamentals.get(symbol)
+        if entry is None:
+            entry = self._fundamentals.get(symbol.strip().upper())
+        if entry is None:
+            entry = symbol_fundamentals(self._fundamentals, symbol)
+        return entry
 
     async def _persist_execution_state(self):
         """Persist positions/orders/balances to StateStore each tick."""

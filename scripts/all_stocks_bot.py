@@ -90,6 +90,13 @@ DEFAULT_US_UNIVERSE = [
     "DHR", "SPGI", "COP", "SLB", "MCD", "SBUX", "NKE", "ICE", "PLD", "GILD",
 ]
 
+# Crypto majors — yfinance USD pairs. Flags are derived from turnover and
+# 52-week range; equity-only metrics (P/E, D/E, ROE) do not apply.
+DEFAULT_CRYPTO_UNIVERSE = [
+    "BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "XRP-USD",
+    "ADA-USD", "DOGE-USD", "LINK-USD", "AVAX-USD", "DOT-USD",
+]
+
 
 # ---------------------------------------------------------------------------
 # Symbol discovery
@@ -141,14 +148,30 @@ def discover_nse_symbols() -> list[str]:
     return symbols
 
 
+def universe_with_crypto(symbols: list[str]) -> list[str]:
+    """Append the crypto majors to an equity universe.
+
+    The crypto bots read their facts from the same published payload as the
+    equity bots, so every run publishes both asset classes — otherwise a
+    --market us run would leave the crypto bots with no facts at all.
+    """
+    combined = list(symbols)
+    for symbol in DEFAULT_CRYPTO_UNIVERSE:
+        if symbol not in combined:
+            combined.append(symbol)
+    return combined
+
+
 def load_universe(path: Optional[str], limit: Optional[int], market: str = "nse") -> list[str]:
     if path:
         with open(path, "r", encoding="utf-8") as f:
             symbols = [line.strip() for line in f if line.strip() and not line.startswith("#")]
     elif market == "us":
         symbols = list(DEFAULT_US_UNIVERSE)
+    elif market == "crypto":
+        symbols = list(DEFAULT_CRYPTO_UNIVERSE)
     elif market == "both":
-        symbols = discover_nse_symbols() + list(DEFAULT_US_UNIVERSE)
+        symbols = discover_nse_symbols() + list(DEFAULT_US_UNIVERSE) + list(DEFAULT_CRYPTO_UNIVERSE)
     else:
         symbols = discover_nse_symbols()
 
@@ -230,16 +253,44 @@ def band(value, low, high, label_low="Low", label_high="High", label_mid="Mid"):
     return label_mid
 
 
+def _is_crypto(info_full: dict) -> bool:
+    return (safe_get(info_full, "quoteType") or "").upper() == "CRYPTOCURRENCY"
+
+
+def _crypto_volatility_30d(ticker) -> Optional[float]:
+    """Annualized-ish stdev of 30d daily returns, in percent."""
+    try:
+        hist = ticker.history(period="1mo")
+        closes = list(hist["Close"].dropna().astype(float))
+        if len(closes) < 5:
+            return None
+        returns = [
+            (closes[i] - closes[i - 1]) / closes[i - 1]
+            for i in range(1, len(closes))
+            if closes[i - 1]
+        ]
+        if len(returns) < 4:
+            return None
+        mean = sum(returns) / len(returns)
+        var = sum((r - mean) ** 2 for r in returns) / (len(returns) - 1)
+        return round(var ** 0.5 * 100, 2)
+    except Exception:  # noqa: BLE001 - volatility is optional context
+        return None
+
+
 def analyze_symbol(symbol: str) -> dict:
     """Fetch and analyze a single symbol. Returns a dict of metrics + flags."""
     ticker = yf.Ticker(symbol)
     info = ticker.fast_info or {}
     info_full = ticker.info or {}
+    is_crypto = _is_crypto(info_full)
+    asset_class = "crypto" if is_crypto else "equity"
 
     # --- Price / market data ---
     price = (
         safe_get(info, "regularMarketPrice")
         or safe_get(info, "currentPrice")
+        or safe_get(info, "lastPrice")
         or safe_get(info_full, "regularMarketPrice")
         or safe_get(info_full, "currentPrice")
         or safe_get(info_full, "regularMarketPreviousClose")
@@ -247,13 +298,20 @@ def analyze_symbol(symbol: str) -> dict:
     previous_close = safe_get(info_full, "previousClose") or safe_get(info_full, "regularMarketPreviousClose")
     day_high = safe_get(info, "regularMarketDayHigh")
     day_low = safe_get(info, "regularMarketDayLow")
-    fifty_two_high = safe_get(info, "fiftyTwoWeekHigh")
-    fifty_two_low = safe_get(info, "fiftyTwoWeekLow")
+    # Crypto carries its 52-week range in info only — fast_info has no value.
+    fifty_two_high = safe_get(info, "fiftyTwoWeekHigh") or safe_get(info_full, "fiftyTwoWeekHigh")
+    fifty_two_low = safe_get(info, "fiftyTwoWeekLow") or safe_get(info_full, "fiftyTwoWeekLow")
     market_cap = safe_get(info_full, "marketCap")
     enterprise_value = safe_get(info_full, "enterpriseValue")
     shares = safe_get(info_full, "sharesOutstanding")
     beta = safe_get(info_full, "beta")
     dividend_yield = safe_get(info_full, "dividendYield")
+    total_volume = (
+        safe_get(info_full, "totalVolume")
+        or safe_get(info_full, "volume")
+        or safe_get(info_full, "regularMarketVolume")
+        or safe_get(info, "lastVolume")
+    )
 
     # --- Valuation ---
     pe = safe_get(info_full, "trailingPE")
@@ -303,11 +361,28 @@ def analyze_symbol(symbol: str) -> dict:
         pct_from_52w_low = (price - fifty_two_low) / fifty_two_low
 
     # --- Flags (factual thresholds, not recommendations) ---
-    valuation_flag = band(pe, 15, 30, "Cheap", "Expensive", "Fair")
-    leverage_flag = band(debt_to_equity, 0.5, 1.5, "Low", "High", "Moderate")
-    liquidity_flag = band(current_ratio, 1.0, 2.0, "Tight", "Comfortable", "Adequate")
-    profitability_flag = band(profit_margin, 0.05, 0.15, "Weak", "Strong", "Moderate")
-    roe_flag = band(roe, 0.10, 0.20, "Low", "High", "Moderate")
+    turnover_ratio = None
+    volatility_30d_pct = None
+    if is_crypto:
+        # Crypto has no P/E, D/E, ROE or margins — those are N/A, not zero.
+        valuation_flag = "N/A"
+        leverage_flag = "N/A"
+        profitability_flag = "N/A"
+        roe_flag = "N/A"
+        if total_volume and market_cap:
+            turnover_ratio = total_volume / market_cap
+        liquidity_flag = band(
+            turnover_ratio, 0.01, 0.05, "Tight", "Comfortable", "Adequate"
+        )
+        liquidity_basis = "turnover_ratio"
+        volatility_30d_pct = _crypto_volatility_30d(ticker)
+    else:
+        valuation_flag = band(pe, 15, 30, "Cheap", "Expensive", "Fair")
+        leverage_flag = band(debt_to_equity, 0.5, 1.5, "Low", "High", "Moderate")
+        liquidity_flag = band(current_ratio, 1.0, 2.0, "Tight", "Comfortable", "Adequate")
+        liquidity_basis = "current_ratio"
+        profitability_flag = band(profit_margin, 0.05, 0.15, "Weak", "Strong", "Moderate")
+        roe_flag = band(roe, 0.10, 0.20, "Low", "High", "Moderate")
 
     if pct_from_52w_high is not None:
         if pct_from_52w_high >= -0.10:
@@ -322,6 +397,7 @@ def analyze_symbol(symbol: str) -> dict:
     return {
         "symbol": symbol,
         "name": safe_get(info_full, "longName") or safe_get(info_full, "shortName") or symbol,
+        "asset_class": asset_class,
         "sector": safe_get(info_full, "sector"),
         "industry": safe_get(info_full, "industry"),
         "price": price,
@@ -337,6 +413,7 @@ def analyze_symbol(symbol: str) -> dict:
         "shares_outstanding": shares,
         "beta": beta,
         "dividend_yield": dividend_yield,
+        "total_volume": total_volume,
         "pe_ttm": pe,
         "pe_forward": pe_forward,
         "pb": pb,
@@ -365,9 +442,13 @@ def analyze_symbol(symbol: str) -> dict:
         "valuation_flag": valuation_flag,
         "leverage_flag": leverage_flag,
         "liquidity_flag": liquidity_flag,
+        "liquidity_basis": liquidity_basis,
         "profitability_flag": profitability_flag,
         "roe_flag": roe_flag,
         "momentum_flag": momentum_flag,
+        # Crypto-specific context
+        "turnover_ratio": turnover_ratio,
+        "volatility_30d_pct": volatility_30d_pct,
         "analyzed_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -439,6 +520,47 @@ def write_outputs(results: list[dict], outdir: str) -> None:
     print(f"  Per-symbol JSON: {len(results)} files")
 
 
+def symbol_aliases(symbol: str) -> list[str]:
+    """Every spelling bots use for one instrument, canonical first."""
+    sym = symbol.strip()
+    aliases = [sym]
+    if sym.endswith(".NS"):
+        aliases.append(sym[:-3])
+    elif "-" in sym and sym.rsplit("-", 1)[-1] == "USD":
+        base = sym.rsplit("-", 1)[0]
+        aliases += [
+            f"{base}/USD",
+            f"{base}USD",
+            f"{base}USDT",
+            f"{base}/USDT",
+            base,
+        ]
+    elif "-" in sym:
+        aliases.append(sym.replace("-", "."))
+    return aliases
+
+
+def build_alias_map(results: list[dict]) -> dict:
+    """Map every known symbol spelling to its facts entry.
+
+    The producer owns the symbol vocabulary; consumers do a plain dict lookup.
+    """
+    facts_fields = (
+        "symbol", "name", "asset_class", "market_cap", "price",
+        "valuation_flag", "leverage_flag", "liquidity_flag", "liquidity_basis",
+        "profitability_flag", "roe_flag", "momentum_flag",
+        "turnover_ratio", "volatility_30d_pct", "analyzed_at",
+    )
+    alias_map: dict[str, dict] = {}
+    for r in results:
+        if r.get("error"):
+            continue
+        entry = {f: r.get(f) for f in facts_fields}
+        for alias in symbol_aliases(r.get("symbol") or ""):
+            alias_map.setdefault(alias, entry)
+    return alias_map
+
+
 def push_metrics(results: list[dict], market: str = "nse") -> None:
     """Push a compact stock run summary to the Office OS metrics endpoint.
 
@@ -453,7 +575,8 @@ def push_metrics(results: list[dict], market: str = "nse") -> None:
             "profitability_flag", "roe_flag", "momentum_flag",
         )
         flag_counts: dict[str, dict[str, int]] = {f: {} for f in flag_fields}
-        top_by_cap: list[dict] = []
+        equity_top: list[dict] = []
+        crypto_top: list[dict] = []
         errors = 0
 
         for r in results:
@@ -463,14 +586,21 @@ def push_metrics(results: list[dict], market: str = "nse") -> None:
             for f in flag_fields:
                 v = r.get(f) or "—"
                 flag_counts[f][v] = flag_counts[f].get(v, 0) + 1
-            top_by_cap.append({
+            summary = {
                 "symbol": r.get("symbol"),
                 "name": r.get("name"),
+                "asset_class": r.get("asset_class", "equity"),
                 "market_cap": r.get("market_cap"),
                 "valuation_flag": r.get("valuation_flag"),
-            })
-        top_by_cap.sort(key=lambda x: (x.get("market_cap") or 0), reverse=True)
-        top_by_cap = top_by_cap[:10]
+            }
+            if r.get("asset_class") == "crypto":
+                crypto_top.append(summary)
+            else:
+                equity_top.append(summary)
+        equity_top.sort(key=lambda x: (x.get("market_cap") or 0), reverse=True)
+        crypto_top.sort(key=lambda x: (x.get("market_cap") or 0), reverse=True)
+        equity_top = equity_top[:10]
+        crypto_top = crypto_top[:10]
 
         payload = {
             "service": "all-stocks-bot",
@@ -480,7 +610,9 @@ def push_metrics(results: list[dict], market: str = "nse") -> None:
             "errors": errors,
             "analyzed_at": datetime.now(timezone.utc).isoformat(),
             "flag_counts": flag_counts,
-            "top_by_market_cap": top_by_cap,
+            "top_by_market_cap": equity_top,
+            "top_crypto_by_market_cap": crypto_top,
+            "fundamentals_by_symbol": build_alias_map(results),
         }
         resp = requests.post(METRICS_URL, json=payload, timeout=10)
         if resp.status_code == 200:
@@ -497,8 +629,8 @@ def main() -> None:
     )
     parser.add_argument("--file", help="Path to a file with one symbol per line")
     parser.add_argument("--limit", type=int, help="Max symbols to analyze (for testing)")
-    parser.add_argument("--market", choices=["nse", "us", "both"], default="nse",
-                        help="Market universe: nse (default), us, or both")
+    parser.add_argument("--market", choices=["nse", "us", "crypto", "both"], default="nse",
+                        help="Market universe: nse (default), us, crypto, or both")
     parser.add_argument("--outdir", default="reports", help="Output directory (default: reports/)")
     parser.add_argument("--resume", action="store_true", help="Resume from last checkpoint")
     parser.add_argument("--rate-limit", type=float, default=0.5,
@@ -506,6 +638,8 @@ def main() -> None:
     args = parser.parse_args()
 
     universe = load_universe(args.file, args.limit, args.market)
+    if not args.file and args.market != "crypto":
+        universe = universe_with_crypto(universe)
     print(f"Universe size: {len(universe)} symbols (auto-discovered from NSE EQUITY_L.csv)")
 
     # Resume support

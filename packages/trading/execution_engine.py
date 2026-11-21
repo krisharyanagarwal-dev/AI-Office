@@ -14,6 +14,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Tuple
 
+from alpha.data.stock_metrics import load_stock_metrics, symbol_fundamentals
 from alpha.execution.execution_engine import (
     Order, OrderSide, OrderType, OrderStatus, TimeInForce,
     Fill, PaperBroker as BasePaperBroker
@@ -289,6 +290,28 @@ class OpenClawExecutionEngine:
 
         logger.info("OpenClaw Execution Engine initialized (PAPER ONLY mode)")
 
+    def _attach_fundamentals(self, signals: List[Dict[str, Any]]) -> None:
+        """Attach published fundamental facts to each parsed signal.
+
+        Read-only context: the facts never change a signal's side or
+        confidence, and a missing metrics file leaves the signals untouched.
+        """
+        try:
+            metrics = load_stock_metrics()
+        except Exception as e:  # noqa: BLE001 - context must never block execution
+            logger.debug(f"fundamentals unavailable: {e}")
+            return
+        if not metrics:
+            return
+        for signal in signals:
+            try:
+                entry = symbol_fundamentals(metrics, signal.get("symbol", ""))
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"fundamentals lookup failed: {e}")
+                continue
+            if entry:
+                signal["fundamentals"] = entry
+
     async def process_analysis(self, analysis_text: str) -> Dict[str, Any]:
         """Process OpenClaw trader agent analysis and execute trades.
 
@@ -300,6 +323,7 @@ class OpenClawExecutionEngine:
         """
         # Parse signals from analysis
         signals = self.signal_parser.parse(analysis_text)
+        self._attach_fundamentals(signals)
 
         results = {
             'analysis_text': analysis_text[:200] + "..." if len(analysis_text) > 200 else analysis_text,

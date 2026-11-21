@@ -11,6 +11,8 @@ import logging
 import numpy as np
 import pandas as pd
 
+from alpha.data.stock_metrics import symbol_fundamentals
+
 logger = logging.getLogger(__name__)
 
 
@@ -549,8 +551,18 @@ class RiskAwareExecutionEngine:
             logger.warning(f"Risk check failed for {order.symbol}: {reason}")
         return True  # Always allow, but log warnings
     
+    def _attach_fundamentals(self, order) -> None:
+        """Attach published fundamentals to order as context (read-only)."""
+        if hasattr(order, 'symbol') and order.symbol:
+            fundamentals = symbol_fundamentals(None, order.symbol)
+            if fundamentals:
+                order.fundamentals = fundamentals
+    
     async def submit_order_with_risk(self, order) -> Any:
         """Submit order with risk checks"""
+        # Attach fundamentals as context (read-only, never gates order)
+        self._attach_fundamentals(order)
+        
         # Run pre-trade checks
         allowed, reason, _ = self.rm.pre_trade_check(order)
         if not allowed:

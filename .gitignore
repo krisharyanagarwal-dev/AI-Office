@@ -32,6 +32,11 @@ data/
 *.db
 *.sqlite
 
+# ...but this source package is code, not runtime data
+!packages/trading/alpha/data/
+packages/trading/alpha/data/*
+!packages/trading/alpha/data/stock_metrics.py
+
 # Logs
 logs/
 *.log
