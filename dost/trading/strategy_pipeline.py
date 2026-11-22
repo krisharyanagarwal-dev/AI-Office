@@ -41,6 +41,7 @@ def run_strategy_pipeline(
     max_retries: int = 3,
     poll_interval: float = 5.0,
     max_wait: int = 300,
+    dry_run: bool = False,
 ) -> dict:
     """
     Run a complete strategy pipeline:
@@ -62,6 +63,7 @@ def run_strategy_pipeline(
         max_retries: Max retries for dispatcher submission
         poll_interval: Seconds between status checks
         max_wait: Maximum seconds to wait for task completion
+        dry_run: If True, preview the dispatch without writing a task file
 
     Returns:
         Dict with full pipeline results
@@ -90,6 +92,7 @@ def run_strategy_pipeline(
             prompt=prompt,
             agent_id=agent_id,
             priority=priority,
+            dry_run=dry_run,
         )
 
         if not dispatch_result.get("ok"):
@@ -102,6 +105,14 @@ def run_strategy_pipeline(
         task_id = dispatch_result["task_id"]
         result["task_id"] = task_id
         print(f"  Task submitted: {task_id}")
+
+        if dry_run:
+            return {
+                **result,
+                "status": "dry_run",
+                "dry_run": True,
+                "message": dispatch_result.get("message", "[DRY RUN] No task written."),
+            }
 
         # Step 2: Wait for task completion
         print(f"[2/6] Waiting for task completion (max {max_wait}s)...")

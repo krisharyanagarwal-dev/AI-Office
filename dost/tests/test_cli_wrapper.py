@@ -123,6 +123,51 @@ def test_batch_uses_priority_flag():
     assert m.call_args.kwargs["priority"] == "low"
 
 
+def test_backtest_threads_priority_flag():
+    with mock.patch.object(
+        dost, "run_strategy_pipeline", return_value={"ok": True}
+    ) as m:
+        code, _ = _run(["--backtest", "mean reversion", "--priority", "critical"])
+    assert code == 0
+    assert m.call_args.kwargs["priority"] == "critical"
+
+
+def test_backtest_defaults_to_normal_priority():
+    with mock.patch.object(
+        dost, "run_strategy_pipeline", return_value={"ok": True}
+    ) as m:
+        code, _ = _run(["--backtest", "mean reversion"])
+    assert code == 0
+    assert m.call_args.kwargs["priority"] == "normal"
+
+
+def test_backtest_threads_dry_run_flag():
+    with mock.patch.object(
+        dost, "run_strategy_pipeline", return_value={"status": "dry_run"}
+    ) as m:
+        code, _ = _run(["--backtest", "mean reversion", "--dry-run"])
+    assert code == 0
+    assert m.call_args.kwargs.get("dry_run") is True
+
+
+def test_backtest_exits_one_when_pipeline_reports_error():
+    with mock.patch.object(
+        dost, "run_strategy_pipeline",
+        return_value={"status": "error", "error": "dispatch failed"},
+    ):
+        code, _ = _run(["--backtest", "mean reversion"])
+    assert code == 1
+
+
+def test_strategy_pipeline_dry_run_writes_no_task_file(tmp_path):
+    pipeline = dost._strategy_pipeline_module
+    fleet_module = sys.modules["dost.dost"]
+    with mock.patch.object(fleet_module, "HIVE_DIR", tmp_path):
+        result = pipeline.run_strategy_pipeline("mean reversion", dry_run=True)
+    assert result["status"] == "dry_run"
+    assert list(tmp_path.iterdir()) == []
+
+
 # ---------------------------------------------------------------------------
 # flag threading into the inner module
 # ---------------------------------------------------------------------------

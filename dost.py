@@ -61,7 +61,7 @@ def main():
     parser.add_argument("--history-regex", help="Search dost task history by regex pattern")
     parser.add_argument("--results-status", choices=["done", "error", "in_progress", "pending"], help="Filter --results by status")
     parser.add_argument("--results-agent", help="Filter --results by agent_id")
-    parser.add_argument("--priority", choices=["low", "normal", "high", "critical"], default="normal", help="Task priority for --dispatch and --batch")
+    parser.add_argument("--priority", choices=["low", "normal", "high", "critical"], default="normal", help="Task priority for --dispatch, --batch and --backtest")
     parser.add_argument("--briefing-now", action="store_true", help="Generate on-demand briefing immediately")
     parser.add_argument("--export", choices=["md", "json"], help="Export last debate/dispatch results to file")
     parser.add_argument("--synthesis", action="store_true", help="Show detailed synthesis report over all findings")
@@ -197,7 +197,7 @@ def main():
         answers = result.get("answers") or []
         if answers and all(a.get("error") for a in answers):
             sys.exit(1)
-    elif args.results:
+    elif args.results or args.results_status or args.results_agent:
         tasks = _dost_module.list_recent_dost_tasks(
             status_filter=args.results_status,
             agent_filter=args.results_agent,
@@ -298,9 +298,12 @@ def main():
         result = run_strategy_pipeline(
             prompt=prompt,
             agent_id="strategy-advisor",
-            priority="normal",
+            priority=args.priority,
+            dry_run=args.dry_run,
         )
         print(json.dumps(result, indent=2, default=str))
+        if result.get("status") == "error":
+            sys.exit(1)
     elif args.message:
         print(dost_respond(args.message, args.department))
     else:
