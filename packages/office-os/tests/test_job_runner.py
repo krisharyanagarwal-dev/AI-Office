@@ -85,7 +85,62 @@ def test_a_claimed_pass_is_rejected_when_the_evidence_contradicts_it(evidence, m
 def test_a_claimed_pass_is_rejected_when_the_evidence_is_absent():
     """Silence is not consent: a missing fact cannot support a PASS."""
     problems = runner.check_acceptance(GOOD, {"mode": "paper"}, RULES)
-    assert problems and "absent" in problems[0]
+    assert problems and "evidence has no execution_enabled" in problems[0]
+
+
+# ---------- derived facts: computed in code, never asked of the model ----------
+def test_age_is_derived_from_an_iso_stamp_with_a_trailing_z():
+    """The killswitch file stamps 2026-11-22T22:20:17.999192Z; 3.9's
+    fromisoformat rejects the Z, which is why the parse is explicit."""
+    import time, calendar
+    recent = time.strftime("%Y-%m-%dT%H:%M:%S.000000Z", time.gmtime(time.time() - 600))
+    age = runner.iso_age_min(recent)
+    assert age is not None and 9 < age < 11
+
+
+def test_unparseable_or_missing_stamp_derives_to_none():
+    assert runner.iso_age_min("not a date") is None
+    assert runner.iso_age_min(None) is None
+
+
+def test_counts_are_derived_from_the_evidence():
+    facts = {"findings": [{"ok": True}, {"ok": False}, {"ok": True}], "surfaces": []}
+    out = runner.derive_facts(facts, {
+        "findings_total": {"count_of": "findings"},
+        "findings_failed": {"count_where_false": ["findings", "ok"]},
+        "no_other_surfaces": {"is_empty": "surfaces"},
+    })
+    assert out["findings_total"] == 3
+    assert out["findings_failed"] == 1
+    assert out["no_other_surfaces"] is True
+
+
+def test_a_broken_derive_rule_yields_none_not_a_crash():
+    out = runner.derive_facts({"x": 1}, {"bad": {"count_of": "missing"}})
+    assert out["bad"] is None
+
+
+# ---------- numeric clauses ----------
+@pytest.mark.parametrize("clause,evidence,ok", [
+    ("status_age_min<=60", {"status_age_min": 3.4}, True),
+    ("status_age_min<=60", {"status_age_min": 240.0}, False),
+    ("drift_count==0", {"drift_count": 0}, True),
+    ("findings_failed<1", {"findings_failed": 0}, True),
+    ("findings_failed<1", {"findings_failed": 2}, False),
+])
+def test_numeric_clauses(clause, evidence, ok):
+    assert runner.check_clause(clause, evidence)[0] is ok
+
+
+def test_a_numeric_clause_on_an_absent_field_fails():
+    """A freshness claim cannot rest on an age the evidence never supplied."""
+    ok, detail = runner.check_clause("status_age_min<=60", {})
+    assert not ok and "no status_age_min" in detail
+
+
+def test_a_numeric_clause_on_a_non_numeric_value_fails():
+    ok, detail = runner.check_clause("status_age_min<=60", {"status_age_min": "soon"})
+    assert not ok and "not numeric" in detail
 
 
 def test_rules_do_not_fire_on_other_verdicts():

@@ -311,12 +311,8 @@ class PaperBroker(BaseBroker):
             exchange_fill_id=f"paper_{uuid.uuid4().hex[:8]}"
         )
         
-        order.filled_qty = order.quantity
-        order.avg_fill_price = price
-        order.commission = fill.commission
-        order.status = OrderStatus.FILLED
-        
-        await self._update_order(order)
+        # _process_fill handles filled_qty, avg_fill_price, commission and
+        # terminal status; pre-setting them here double-counts the fill.
         await self._process_fill(fill)
         
         # Update balances

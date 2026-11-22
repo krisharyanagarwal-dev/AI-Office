@@ -97,6 +97,11 @@ class StateStore:
         if self._conn:
             self._conn.close()
             self._conn = None
-    
+
     async def close(self):
-        self.close()
+        # async variant: close the connection directly (sync SQLite I/O) rather
+        # than delegating to self.close(), which now resolves to this same
+        # async method and would discard an unawaited coroutine.
+        if self._conn:
+            self._conn.close()
+            self._conn = None

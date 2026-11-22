@@ -57,6 +57,54 @@ def read_evidence(spec):
     return facts, missing
 
 
+
+# ---------- derived facts ----------
+def iso_age_min(value):
+    """Minutes since an ISO-8601 stamp. Written for 3.9: fromisoformat there does
+    not accept a trailing Z, so the parse is explicit."""
+    import calendar
+    text = str(value or "").strip().replace("Z", "")
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            parsed = time.strptime(text.split("+")[0], fmt)
+        except ValueError:
+            continue
+        return round((time.time() - calendar.timegm(parsed)) / 60.0, 1)
+    return None
+
+
+def derive_facts(facts, rules):
+    """Compute what the model must NOT be asked to work out.
+
+    A language model is unreliable at arithmetic and worse at dates, so ages,
+    counts and totals are produced here, deterministically, and handed to it as
+    plain facts. The model's only job is to classify what it is given.
+    """
+    for name, rule in (rules or {}).items():
+        try:
+            if "age_min_of" in rule:
+                facts[name] = iso_age_min(facts.get(rule["age_min_of"]))
+            elif "count_of" in rule:
+                value = facts.get(rule["count_of"])
+                facts[name] = len(value) if isinstance(value, (list, dict)) else None
+            elif "count_where_false" in rule:
+                field, key = rule["count_where_false"]
+                items = facts.get(field)
+                if isinstance(items, list):
+                    facts[name] = sum(1 for i in items
+                                      if isinstance(i, dict) and not i.get(key))
+                else:
+                    facts[name] = None
+            elif "is_empty" in rule:
+                value = facts.get(rule["is_empty"])
+                facts[name] = (len(value) == 0) if isinstance(value, (list, dict)) else None
+        except Exception as e:
+            facts[name] = None
+            log("derive " + name + " failed: " + type(e).__name__ + ": " + str(e)[:80])
+    return facts
+
 # ---------- schema ----------
 def check_type(value, declared):
     if isinstance(declared, list):
@@ -102,6 +150,36 @@ def as_text(value):
     return str(value)
 
 
+
+def check_clause(clause, evidence):
+    """One require_evidence clause: field==value, or a numeric <=, <, >=, >.
+
+    An absent field never satisfies a clause. Silence is not consent: a verdict
+    cannot rest on a fact the evidence does not contain.
+    """
+    for op in ("<=", ">=", "==", "<", ">"):
+        if op not in clause:
+            continue
+        key, _, expected = clause.partition(op)
+        key, expected = key.strip(), expected.strip()
+        actual = evidence.get(key, "<<absent>>")
+        if actual == "<<absent>>":
+            return False, "evidence has no " + key + " (needs " + op + " " + expected + ")"
+        if op == "==":
+            ok = as_text(actual).lower() == expected.lower()
+        else:
+            try:
+                left, right = float(actual), float(expected)
+            except (TypeError, ValueError):
+                return False, key + "=" + as_text(actual) + " is not numeric, needs " + op + " " + expected
+            ok = {"<=": left <= right, ">=": left >= right,
+                  "<": left < right, ">": left > right}[op]
+        if ok:
+            return True, ""
+        return False, "evidence has " + key + "=" + as_text(actual) + ", needs " + op + " " + expected
+    return True, ""   # a clause with no operator constrains nothing
+
+
 def check_acceptance(answer, evidence, rules):
     """require_evidence is the important one: it tests the FACTS, not the answer."""
     problems = []
@@ -111,15 +189,10 @@ def check_acceptance(answer, evidence, rules):
             continue
         label = "; ".join(k + "=" + as_text(v) for k, v in when.items())
         for clause in rule.get("require_evidence", []):
-            if "==" not in clause:
-                continue
-            key, _, expected = clause.partition("==")
-            actual = evidence.get(key.strip(), "<<absent>>")
-            if as_text(actual).lower() != expected.strip().lower():
-                problems.append(
-                    "claimed " + label + " but evidence has " + key.strip() + "=" +
-                    as_text(actual) + ", needs " + expected.strip() +
-                    " (" + rule.get("why", "") + ")")
+            ok, detail = check_clause(clause, evidence)
+            if not ok:
+                problems.append("claimed " + label + " but " + detail +
+                                " (" + rule.get("why", "") + ")")
         for field in rule.get("require_output_not_null", []):
             if answer.get(field) is None:
                 problems.append(
@@ -176,6 +249,7 @@ def main(argv):
         print(json.dumps(row))
         return 1
 
+    evidence = derive_facts(evidence, spec.get("evidence_derive"))
     prompt = spec["prompt"].replace("{evidence}", json.dumps(evidence, indent=2, sort_keys=True))
     attempts = int(spec.get("retries", 2)) + 1
     last = None

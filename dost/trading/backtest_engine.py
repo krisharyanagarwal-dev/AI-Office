@@ -130,7 +130,7 @@ def run_backtest(
     instrument = signal.get("instrument", "UNKNOWN")
     strategy_name = signal.get("strategy_name", "unknown")
     direction = signal.get("direction", "neutral")
-    entry_price_signal = signal.get("exec_price", 0) or 0
+    entry_price_signal = signal.get("entry_price", 0) or 0
     stop_loss_signal = signal.get("stop_loss")
     take_profit_signal = signal.get("take_profit")
 
@@ -170,7 +170,7 @@ def run_backtest(
     position_entry_price = 0.0
     position_direction = direction  # "long", "short", or "neutral"
 
-    if direction == "neutral" or entry_idx >= len(candles) - 1:
+    if direction == "neutral":
         return _empty_backtest_result(
             signal_id, signal_id, instrument, strategy_name, "neutral"
         )
@@ -422,7 +422,9 @@ def run_backtest(
         trade_list=trade_list,
     )
 
-    return result.to_dict()
+    result_dict = result.to_dict()
+    result_dict["status"] = "done"
+    return result_dict
 
 
 def _empty_backtest_result(task_id: str, signal_id: str, instrument: str, strategy_name: str, reason: str = "insufficient_data") -> Dict[str, Any]:
