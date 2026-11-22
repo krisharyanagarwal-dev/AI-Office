@@ -21,12 +21,16 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-ROOT = Path("/Users/aryanagarwal/office-os")
+ROOT = Path((os.environ.get("OFFICE_OS_HOME") or str(Path.home() / "office-os")))
 CONFIG_PATH = ROOT / "config" / "office.json"
 STATE_PATH = ROOT / "config" / "executor_state.json"
 WORKTREE_ROOT = ROOT / "worktrees"
 STOP_FILE = ROOT / "STOP"
-CLAUDE_FALLBACK = "/Users/aryanagarwal/.nvm/versions/node/v22.22.3/bin/claude"
+# A pinned nvm path exists on one machine only; prefer whatever `claude` is on
+# PATH and fall back to this user's nvm install.
+CLAUDE_FALLBACK = shutil.which("claude") or str(
+    Path.home() / ".nvm" / "versions" / "node" / "v22.22.3" / "bin" / "claude"
+)
 # opencode --auto was tried first and wrote outside its worktree (canary, 2026-11-12); see
 # logs/executor/canary-findings.txt. The executor now runs the Claude CLI under sandbox-exec.
 AGENT_CALL_TIMEOUT_SEC = 900

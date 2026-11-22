@@ -20,7 +20,7 @@ from typing import Optional
 
 # Default location for NSE bhavcopy archives (free tier, end-of-day).
 # Users populate this directory with downloaded bhavcopy files.
-BHAVCOPY_ROOT = Path("/Users/aryanagarwal/Documents/indian-paper-trading/data/bhavcopy")
+BHAVCOPY_ROOT = Path.home() / "Documents" / "indian-paper-trading" / "data" / "bhavcopy"
 
 
 def _parse_date(s: str) -> Optional[date]:

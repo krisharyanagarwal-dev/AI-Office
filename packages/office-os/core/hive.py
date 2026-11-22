@@ -11,7 +11,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 class Hive:
-    def __init__(self, root="/Users/aryanagarwal/office-os"):
+    def __init__(self, root=None):
+        # OFFICE_OS_HOME, else ~/office-os. Hardcoding this user's home
+        # kept the hive -- mailbox, memory, tasks, logs -- on one machine.
+        root = root or (os.environ.get("OFFICE_OS_HOME") or str(Path.home() / "office-os"))
         self.root = Path(root)
         self.mailbox = self.root / "mailbox"
         self.memory = self.root / "memory"

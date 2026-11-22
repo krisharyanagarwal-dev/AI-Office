@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, "/Users/aryanagarwal/office-os")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core.hive import Hive
 from core.router import ProviderRouter
 from core.provider_client import make_client, ProviderClient
@@ -165,7 +165,7 @@ class WorkerAgent:
 
     def _load_agent_prompt(self):
         """Load the agent's system prompt from its .md file."""
-        agent_path = Path(f"/Users/aryanagarwal/.config/opencode/agent/{self.agent_id}.md")
+        agent_path = Path.home() / ".config" / "opencode" / "agent" / f"{self.agent_id}.md"
         if not agent_path.exists():
             # Fallback: no agent file, use generic prompt
             return "You are a helpful assistant. Execute the task described below."

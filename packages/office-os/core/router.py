@@ -11,12 +11,14 @@ from pathlib import Path
 
 
 class ProviderRouter:
-    def __init__(self, config_path="/Users/aryanagarwal/AI-Office/packages/office-os/config/office.json"):
+    def __init__(self, config_path=None):
+        if config_path is None:
+            config_path = str(Path(__file__).resolve().parents[1] / "config" / "office.json")
         with open(config_path) as f:
             self.config = json.load(f)
         self.pools = self.config["provider_pools"]
         self.fallback_chain = self.config.get("fallback_chain", [])
-        self.state_path = Path("/Users/aryanagarwal/office-os/config/router_state.json")
+        self.state_path = Path((os.environ.get("OFFICE_OS_HOME") or str(Path.home() / "office-os"))) / "config" / "router_state.json"
         # Per-pool state: cooldown until timestamp, task count for round-robin
         self.cooldowns = {name: 0 for name in self.pools}
         self.task_counts = self._load_task_counts()

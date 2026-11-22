@@ -12,6 +12,7 @@ usual inbox/outbox files, and each round is also saved as logs/autopilot/*.md.
 Bounded on purpose: one round per interval, a daily cap, only when no tasks are
 queued or running, and it never creates tasks unless config says so.
 """
+import os
 import json
 import re
 import socket
@@ -23,10 +24,10 @@ from pathlib import Path
 
 from core.provider_client import make_client
 
-ROOT = Path("/Users/aryanagarwal/office-os")
+ROOT = Path((os.environ.get("OFFICE_OS_HOME") or str(Path.home() / "office-os")))
 STATE_PATH = ROOT / "config" / "autopilot_state.json"
 ROUNDS_DIR = ROOT / "logs" / "autopilot"
-AGENT_DIR = Path("/Users/aryanagarwal/.config/opencode/agent")
+AGENT_DIR = Path.home() / ".config" / "opencode" / "agent"
 
 DEFAULTS = {
     "enabled": False,

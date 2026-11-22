@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, "/Users/aryanagarwal/office-os")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core.hive import Hive
 from core.router import ProviderRouter
 

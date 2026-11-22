@@ -18,12 +18,12 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, "/Users/aryanagarwal/office-os")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core.hive import Hive
 from core.router import ProviderRouter
 from agents.god_agent import GodAgent
 
-INBOX_DIR = Path("/Users/aryanagarwal/office-os/inbox")
+INBOX_DIR = Path((os.environ.get("OFFICE_OS_HOME") or str(Path.home() / "office-os"))) / "inbox"
 DONE_DIR = INBOX_DIR / "done"
 
 
