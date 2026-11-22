@@ -11,18 +11,13 @@
      Interpreter is the homebrew build (3.15.2); the mini has no Python
      framework install, and its system python is 3.9.
 
-     NOT loaded yet. The mini's ~/.env carries only GEMINI_API_KEY, so the
-     orchestrator would run on one provider instead of the configured
-     fallback chain. Its NVIDIA NIM keys live behind the local nv_manager
-     proxy on :4200, not in ~/.env. Resolve that first -- either add the keys
-     to the mini's ~/.env, or give provider_client an endpoint override so it
-     routes through :4200 -- then:
+     Providers, all keyless on this box: the configured chain leads with
+     mlx_local -- the mlx_lm server the mini already runs on :11435 with
+     Qwen3.5-9B -- then the two nvidia pools via the :4200 proxy, then
+     google on the one key the mini's ~/.env does hold.
 
-       launchctl bootstrap gui/$(id -u) \
-         ~/Library/LaunchAgents/com.aryan.office-orchestrator.plist
-
-     and bootout the laptop's copy in the same breath: two orchestrators
-     against one org state is a double-dispatch, not redundancy. -->
+     Only ever run ONE orchestrator against one org state: bootout the
+     laptop's copy before loading this. -->
 <plist version="1.0">
 <dict>
 	<key>Label</key>
@@ -43,6 +38,15 @@
 		<string>1</string>
 		<key>OFFICE_OS_HOME</key>
 		<string>/Users/a/office-os</string>
+		<!-- The mini has no NVIDIA key in ~/.env and launchd gives a job none of
+		     the shell's exports, so both nvidia pools in the fallback chain go
+		     through the local nv_manager proxy, which holds the keys itself.
+		     Verified on the mini with all four NVIDIA_API_KEY* vars removed:
+		     api_key empty, call still answered. -->
+		<key>OFFICE_ENDPOINT_NVIDIA_KEY3</key>
+		<string>http://127.0.0.1:4200/v1/chat/completions</string>
+		<key>OFFICE_ENDPOINT_NVIDIA_KEY4</key>
+		<string>http://127.0.0.1:4200/v1/chat/completions</string>
 	</dict>
 	<key>RunAtLoad</key>
 	<true/>
