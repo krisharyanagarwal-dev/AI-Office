@@ -163,6 +163,58 @@ except Exception as e:
     book["history_error"] = type(e).__name__ + ": " + str(e)[:80]
 out["paper_book"] = book
 
+# job output: what the mini's free workers actually produced (see docs/compile-and-run.md).
+# Records are accepted answers; failures are the compiler's input. The number that
+# matters is rejects_since_success - that is the escalation signal.
+jobs_out = {}
+JD = os.path.join(H, "office-jobs")
+def _tail_rows(path, limit=300):
+    try:
+        lines = open(path).read().strip().split("\n")
+    except Exception:
+        return None
+    rows = []
+    for line in lines[-limit:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except Exception:
+            rows.append({"ts": None, "outcome": "UNPARSEABLE"})
+    return rows
+try:
+    names = sorted(n for n in os.listdir(JD) if n.endswith(".records.jsonl"))
+except Exception as e:
+    jobs_out["dir_error"] = type(e).__name__
+    names = []
+for name in names:
+    job = name[: -len(".records.jsonl")]
+    recs = _tail_rows(os.path.join(JD, name)) or []
+    fails = _tail_rows(os.path.join(JD, job + ".failures.jsonl")) or []
+    last_rec_ts = recs[-1].get("ts") if recs else None
+    # a failure newer than the newest accepted answer has not been resolved yet
+    since = [r for r in fails if (r.get("ts") or "") > (last_rec_ts or "")]
+    info = {
+        "records": len(recs),
+        "failures": len(fails),
+        "last_record_ts": last_rec_ts,
+        "last_record_age_min": None,
+        "rejects_since_success": len(since),
+        "last_failure_stage": (since[-1].get("stage") if since else None),
+        "last_failure_problem": ((since[-1].get("problems") or [None])[0] if since else None),
+        "model": (recs[-1].get("model") if recs else (fails[-1].get("model") if fails else None)),
+    }
+    try:
+        info["last_record_age_min"] = round(
+            (time.time() - os.path.getmtime(os.path.join(JD, name))) / 60.0, 1)
+    except Exception:
+        pass
+    if recs and isinstance(recs[-1].get("answer"), dict):
+        info["last_answer"] = recs[-1]["answer"]
+    jobs_out[job] = info
+out["job_output"] = jobs_out
+
 st2 = os.statvfs(H)
 out["disk_free_gb"] = round(st2.f_bavail * st2.f_frsize / 1e9, 1)
 print(json.dumps(out))

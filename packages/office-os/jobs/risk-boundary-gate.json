@@ -81,5 +81,6 @@
   "model_note": "uncensored 9B, mxfp4: 4-bit suits the MLX shim and the mini's 16 GB with swap already in use",
   "compile_log": [
     "2026-11-22 pass 1: 3/3 rejects were type errors (open_positions got the positions array, cites got a list). Verdicts were correct. Prompt now states the type of every field; schema unchanged."
-  ]
+  ],
+  "escalate_after_consecutive_rejects": 3
 }

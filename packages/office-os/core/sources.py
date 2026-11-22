@@ -530,6 +530,83 @@ def paper_book():
         b.get("mark_price"), b.get("mode")))
     return _result(name, not problems, age, summary, problems)
 
+JOBS_DIR = Path(__file__).resolve().parents[1] / "jobs"
+
+
+def _escalation_thresholds():
+    """Per-job reject threshold, read from the job specs so there is one source."""
+    out = {}
+    try:
+        for path in JOBS_DIR.glob("*.json"):
+            try:
+                spec = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            out[spec.get("id") or path.stem] = int(
+                spec.get("escalate_after_consecutive_rejects") or 3)
+    except OSError:
+        pass
+    return out
+
+
+def job_records():
+    """What the mini's free workers produced (docs/compile-and-run.md step 3).
+
+    Nothing is scheduled yet, so an old record is NOT a problem - saying otherwise
+    would be the fourth false positive of that shape. What IS a problem is a job
+    whose rejects have piled up since its last accepted answer: that is the signal
+    that its spec needs a compile pass, and it is the only thing here that asks for
+    a human or an expensive model.
+    """
+    name = "job-records"
+    m = _mini()
+    if "error" in m:
+        return _result(name, False, None, "cannot verify (mini unreachable)", [m["error"]])
+    jo = m.get("job_output")
+    if jo is None:
+        return _result(name, False, None, "mini returned no job_output block",
+                       ["the mini probe produced no job_output - is it running the current script?"])
+
+    problems = []
+    err = jo.get("dir_error")
+    if err and err != "FileNotFoundError":
+        problems.append("job output dir unreadable: " + err)
+    jobs = dict((k, v) for k, v in jo.items() if k != "dir_error")
+    if not jobs:
+        # no worker has run yet. That is a true statement about a system still
+        # being built, not a fault to report.
+        return _result(name, not problems, None, "no job has produced output yet", problems)
+
+    thresholds = _escalation_thresholds()
+    newest = None
+    total_rec = total_fail = 0
+    for job, info in sorted(jobs.items()):
+        total_rec += info.get("records") or 0
+        total_fail += info.get("failures") or 0
+        age = info.get("last_record_age_min")
+        if age is not None and (newest is None or age < newest):
+            newest = age
+        rejects = info.get("rejects_since_success") or 0
+        limit = thresholds.get(job, 3)
+        if rejects >= limit:
+            problems.append(
+                "%s: %d rejects since its last accepted answer (limit %d) at stage '%s' - "
+                "its spec needs a compile pass: %s"
+                % (job, rejects, limit, info.get("last_failure_stage"),
+                   str(info.get("last_failure_problem"))[:120])
+            )
+        elif rejects and not info.get("records"):
+            problems.append(
+                "%s: %d failures and no accepted answer ever - the job has never worked"
+                % (job, rejects))
+        if info.get("last_answer") is None and info.get("records"):
+            problems.append("%s: records hold no answer object - the runner wrote a malformed row" % job)
+
+    summary = "%d job(s), %d records, %d failures; newest %s" % (
+        len(jobs), total_rec, total_fail,
+        "none" if newest is None else str(newest) + " min old")
+    return _result(name, not problems, newest, summary, problems)
+
 COLLECTORS = [
     office_hud,
     laptop_jobs,
@@ -540,6 +617,7 @@ COLLECTORS = [
     ops_market_data,
     ops_repo_safety,
     paper_book,
+    job_records,
     office_registry,
     office_wiring,
     office_pools,
