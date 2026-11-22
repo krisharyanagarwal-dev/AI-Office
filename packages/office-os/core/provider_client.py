@@ -74,6 +74,7 @@ class ProviderClient:
         "nvidia_key4":  "NVIDIA_API_KEY_FALLBACK3",
         "google":       "GEMINI_API_KEY",
         "openrouter":   "OPENROUTER_API_KEY",
+        "mlx_local":    "MLX_LOCAL_API_KEY",
     }
 
     # Pools served by a local process: no API key, no DNS lookup, and a much
@@ -100,28 +101,56 @@ class ProviderClient:
         """Raised when a provider's daily quota is exhausted."""
         pass
 
+    @classmethod
+    def endpoint_for(cls, pool_name: str) -> Optional[str]:
+        """Endpoint for a pool, honouring a per-pool env override.
+
+        OFFICE_ENDPOINT_<POOL> redirects one pool, e.g.
+        OFFICE_ENDPOINT_NVIDIA_KEY1=http://127.0.0.1:4200/v1/chat/completions.
+        The mini keeps its NVIDIA NIM keys inside a local nv_manager proxy on
+        :4200 which injects them per request and benches a 429'd key, so
+        pointing the pool at loopback is how that box reaches NVIDIA without a
+        second copy of the keys sitting in its ~/.env.
+        """
+        override = os.environ.get(f"OFFICE_ENDPOINT_{pool_name.upper()}", "").strip()
+        return override or cls.ENDPOINTS.get(pool_name)
+
+    @staticmethod
+    def _is_loopback(endpoint: str) -> bool:
+        from urllib.parse import urlparse
+        try:
+            host = (urlparse(endpoint).hostname or "").lower()
+        except Exception:
+            return False
+        return host in {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
+
     def __init__(self, pool_name: str, model: str):
         self.pool_name = pool_name
         self.model = model
-        self.endpoint = self.ENDPOINTS.get(pool_name)
+        self.endpoint = self.endpoint_for(pool_name)
         self.key_name = self.KEY_NAMES.get(pool_name)
         self.is_local = pool_name in self.LOCAL_POOLS
         if self.endpoint is None:
             raise ValueError(f"Unknown provider pool: {pool_name}. Available: {list(self.ENDPOINTS.keys())}")
+        # A cloud pool redirected to loopback is served by a local proxy that
+        # holds the credential itself. Still a cloud call upstream, so it keeps
+        # cloud timeouts and is NOT added to LOCAL_POOLS -- only the key
+        # requirement is lifted.
+        self.via_local_proxy = (not self.is_local) and self._is_loopback(self.endpoint)
         if not self.is_local:
             if self.key_name is None:
                 raise ValueError(f"No API key env var for pool: {pool_name}. Available: {list(self.KEY_NAMES.keys())}")
             # launchd starts the orchestrator without the shell's exports, so fall
             # back to ~/.env (mode 600) rather than copying secrets into a plist.
             self.api_key = os.environ.get(self.key_name, "") or _key_from_env_file(self.key_name)
-            if not self.api_key:
+            if not self.api_key and not self.via_local_proxy:
                 raise ValueError(f"Missing env var {self.key_name} for pool {pool_name}")
         else:
             self.api_key = ""
         # Resolve hostname to IP via dig (system resolver is broken for some
         # providers; dig uses its own resolver and works). Cache per instance.
         # Loopback endpoints are already numeric, so they skip DNS entirely.
-        self._resolve_ip = None if self.is_local else self._resolve_host()
+        self._resolve_ip = None if (self.is_local or self.via_local_proxy) else self._resolve_host()
 
     def _effective_timeout(self, priority: str, timeout: Optional[int] = None) -> int:
         """Final curl timeout for a call, in seconds."""
