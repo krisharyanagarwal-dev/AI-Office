@@ -212,11 +212,54 @@ def import_check() -> list:
         return [{"kind": "IMPORT_FAIL", "file": "dost/", "line": 0,
                  "detail": "sweep output was not JSON", "fix": "run the sweep by hand"}]
 
-    out = []
+    # One broken module at the bottom of the package takes every importer down
+    # with it. Reporting 38 copies of one PermissionError buries the cause, so
+    # identical failures collapse into a single finding that names the count.
+    groups = {}
     for mod, exc, msg in bad:
-        out.append({"kind": "IMPORT_FAIL", "file": mod.replace(".", "/") + ".py", "line": 0,
-                    "detail": f"{exc}: {msg}", "fix": "resolve the import above"})
+        groups.setdefault((exc, msg), []).append(mod)
+
+    out = []
+    for (exc, msg), mods in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+        mods.sort()
+        first = mods[0].replace(".", "/") + ".py"
+        detail = f"{exc}: {msg}"
+        if len(mods) > 1:
+            detail += f"  [same failure in {len(mods)} modules]"
+        out.append({"kind": "IMPORT_FAIL", "file": first, "line": 0, "detail": detail,
+                    "modules": mods if len(mods) > 1 else None,
+                    "fix": "one root cause — fix it once, not per module"
+                           if len(mods) > 1 else "resolve the import above"})
     return out
+
+
+# A path under someone's literal home directory pins the module to one machine.
+# On the mini every dost import dies with PermissionError on /Users/aryanagarwal
+# for exactly this reason, so it is a finding in its own right, not a style nit.
+FOREIGN_HOME = re.compile(r"[\"']/Users/(?!" + re.escape(Path.home().name) + r"\b)[A-Za-z0-9._-]+/")
+OWN_HOME = re.compile(r"[\"']" + re.escape(str(Path.home())) + r"/")
+
+
+def home_pin_scan() -> list:
+    """Report absolute home paths that make a module machine-specific."""
+    findings = []
+    for fp in python_files():
+        rel = str(fp.relative_to(AI_OFFICE))
+        try:
+            src = fp.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for i, line in enumerate(src.splitlines(), 1):
+            code = line.split("#", 1)[0]
+            if FOREIGN_HOME.search(code):
+                findings.append({"kind": "HOME_PINNED", "file": rel, "line": i,
+                                 "detail": f"absolute path under another user's home: {code.strip()[:90]}",
+                                 "fix": "derive it from Path(__file__) or Path.home()"})
+            elif OWN_HOME.search(code):
+                findings.append({"kind": "HOME_HARDCODED", "file": rel, "line": i,
+                                 "detail": f"hardcoded home path: {code.strip()[:90]}",
+                                 "fix": "Path.home() / ... so it travels between machines"})
+    return findings
 
 
 # Known-benign: these two load correctly as scripts (how launchd runs them) but
@@ -243,7 +286,20 @@ def main() -> int:
 
     known, live = [], []
     for f in findings:
-        (known if (f["kind"], f["file"]) in KNOWN else live).append(f)
+        # A grouped import failure is only benign when EVERY module in it is
+        # known. Otherwise a new breakage sharing an old error message would
+        # ride into the benign bucket and never be seen.
+        members = f.get("modules") or [f["file"].replace("/", ".")[:-3]]
+        files = [m.replace(".", "/") + ".py" for m in members] if f.get("modules") else [f["file"]]
+        if files and all((f["kind"], path) in KNOWN for path in files):
+            known.append(f)
+        else:
+            live.append(f)
+
+    # Portability warnings. These do not set the exit code: a hardcoded home
+    # path is a real defect but it is not this commit breaking, and a check
+    # that cries wolf on 60 pre-existing lines stops being read.
+    warnings = home_pin_scan()
 
     by_kind = {}
     for f in live:
@@ -259,6 +315,9 @@ def main() -> int:
         "counts": by_kind,
         "findings": live,
         "known_benign": known,
+        "warning_counts": {k: sum(1 for w in warnings if w["kind"] == k)
+                           for k in sorted({w["kind"] for w in warnings})},
+        "warnings": warnings,
     }
 
     if not args.no_write:
@@ -278,6 +337,9 @@ def main() -> int:
             print(f"  {f['kind']:13} {f['file']}:{f['line']}  {f['detail']}")
             if f.get("fix"):
                 print(f"  {'':13} fix: {f['fix']}")
+        if report["warning_counts"]:
+            counts = ", ".join(f"{k}={v}" for k, v in report["warning_counts"].items())
+            print(f"  warnings (not fatal): {counts} — see {REPORT}")
 
     return 0 if not live else 1
 

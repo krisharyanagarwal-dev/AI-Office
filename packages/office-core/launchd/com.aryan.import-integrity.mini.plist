@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Mac mini variant. The mini is the always-on box, so this is where the
+     check runs continuously; the laptop sleeps. It drives
+     ~/.local/bin/import-integrity.sh, which refreshes the read-only
+     ~/ai-office-src checkout from origin before scanning. The mini has no
+     Python framework build, so the wrapper uses /usr/bin/python3 (3.9) —
+     the checker is stdlib-only and 3.9-compatible for that reason. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.aryan.import-integrity</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>/Users/a/.local/bin/import-integrity.sh</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/Users/a/ai-office-src</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<false/>
+	<key>StartInterval</key>
+	<integer>1800</integer>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>LowPriorityIO</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>60</integer>
+	<key>StandardOutPath</key>
+	<string>/tmp/com.aryan.import-integrity.log</string>
+	<key>StandardErrorPath</key>
+	<string>/tmp/com.aryan.import-integrity.log</string>
+</dict>
+</plist>
