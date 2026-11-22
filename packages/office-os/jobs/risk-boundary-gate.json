@@ -1,0 +1,85 @@
+{
+  "id": "risk-boundary-gate",
+  "agent": "risk-manager",
+  "department": "risk-management",
+  "source": "paper-book",
+  "model": "TheCluster/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-MLX-mxfp4",
+  "evidence_files": [
+    "trading/openalice-fleet/state/alphainsider_paper.json",
+    "trading/openalice-fleet/state/alphainsider_multistrat.json"
+  ],
+  "evidence_fields": [
+    "mode",
+    "execution_enabled",
+    "live_trading",
+    "status",
+    "positions",
+    "closed",
+    "realized_pnl",
+    "price",
+    "last_run",
+    "last_error"
+  ],
+  "prompt": "You are the Risk Manager for a PAPER-ONLY trading office. Below is the live paper book, verbatim.\n\n<evidence>\n{evidence}\n</evidence>\n\nReport two separate verdicts.\n\nboundary_verdict: is the PAPER boundary intact? PASS only if the evidence shows mode=paper AND execution_enabled=false AND live_trading=false. BREACH if any of them says otherwise. NOT_VERIFIED if any of the three is missing from the evidence.\n\nexposure_verdict: are open positions within limits? WITHIN_LIMITS or BREACH only if the evidence actually shows positions. NO_EVIDENCE if the book is empty or positions are missing - an empty book is NOT 'within limits', it is no sample at all.\n\nRules: every number must come from the evidence above. Never estimate, never fill a gap from memory. cites must name the evidence field you used. reason is one sentence.\n\nReply with ONLY a JSON object with exactly these six keys and these exact types:\n  boundary_verdict: one string from PASS | BREACH | NOT_VERIFIED\n  exposure_verdict: one string from WITHIN_LIMITS | BREACH | NO_EVIDENCE\n  open_positions: an INTEGER COUNT of open positions - the LENGTH of the positions list, so an empty list is 0. Never the list itself.\n  realized_pnl: a NUMBER, or null if absent from the evidence\n  cites: ONE STRING naming the evidence fields you used, joined with '; '. Never a list.\n  reason: ONE STRING, a single sentence.\nAdd no other keys. Use JSON types exactly as described: counts are numbers, cites and reason are strings.",
+  "output_schema": {
+    "boundary_verdict": [
+      "PASS",
+      "BREACH",
+      "NOT_VERIFIED"
+    ],
+    "exposure_verdict": [
+      "WITHIN_LIMITS",
+      "BREACH",
+      "NO_EVIDENCE"
+    ],
+    "open_positions": "integer|null",
+    "realized_pnl": "number|null",
+    "cites": "string",
+    "reason": "string"
+  },
+  "acceptance": [
+    {
+      "when": {
+        "boundary_verdict": "PASS"
+      },
+      "require_evidence": [
+        "mode==paper",
+        "execution_enabled==False",
+        "live_trading==False"
+      ],
+      "why": "PASS may only be claimed when the evidence itself shows all three"
+    },
+    {
+      "when": {
+        "exposure_verdict": "WITHIN_LIMITS"
+      },
+      "require_output_not_null": [
+        "open_positions"
+      ],
+      "why": "a limits verdict with no position count is unfalsifiable"
+    },
+    {
+      "when": {
+        "exposure_verdict": "BREACH"
+      },
+      "require_output_not_null": [
+        "open_positions"
+      ],
+      "why": "a breach must say how many positions caused it"
+    }
+  ],
+  "retries": 2,
+  "timeout_sec": 180,
+  "escalate_when": [
+    "3 consecutive schema failures",
+    "judge rejects 2 of 3 runs"
+  ],
+  "budget": {
+    "free_calls_per_day": 24,
+    "claude_calls_per_week": 2
+  },
+  "model_note": "uncensored 9B, mxfp4: 4-bit suits the MLX shim and the mini's 16 GB with swap already in use",
+  "compile_log": [
+    "2026-11-22 pass 1: 3/3 rejects were type errors (open_positions got the positions array, cites got a list). Verdicts were correct. Prompt now states the type of every field; schema unchanged."
+  ]
+}
