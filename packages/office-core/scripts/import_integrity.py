@@ -84,6 +84,11 @@ def python_files() -> list:
         for fn in files:
             if fn.endswith(".py"):
                 out.append(Path(root) / fn)
+    # dost/dost.py imports company_dispatcher at module level, so a path pinned
+    # in a repo-root module breaks every dost import just as surely as one
+    # inside the package. Checking only dost/ reported OK on the laptop while
+    # the mini failed on company_dispatcher.py -- so these are in scope.
+    out += [f for f in sorted(AI_OFFICE.glob("*.py")) if f.is_file()]
     return sorted(out)
 
 

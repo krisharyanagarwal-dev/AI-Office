@@ -32,8 +32,8 @@ def _fmt_money(v) -> str:
 UPGRADE = COMPANY_DIR / "upgrade_system.py"
 DOST = COMPANY_DIR / "dost.py"
 STOCKS_BOT = COMPANY_DIR / "scripts" / "all_stocks_bot.py"
-STOCKS_METRICS_FILE = Path("/Users/aryanagarwal/.openclaw/stocks_metrics.json")
-PNL_FILE = Path("/Users/aryanagarwal/.openclaw/office_pnl.json")
+STOCKS_METRICS_FILE = (Path.home() / ".openclaw" / "stocks_metrics.json")
+PNL_FILE = (Path.home() / ".openclaw" / "office_pnl.json")
 METRICS_URL = "http://127.0.0.1:8083/metrics"
 
 

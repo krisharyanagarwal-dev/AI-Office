@@ -20,9 +20,9 @@ import time
 import uuid
 from pathlib import Path
 
-COMPANY_DIR = Path("/Users/aryanagarwal/AI-Office")
-DISPATCHER = "/Users/aryanagarwal/.openclaw/jev-dispatcher.py"
-TEST_FILE = "/Users/aryanagarwal/AI-Office/packages/office-os/tests/test_dispatcher.py"
+COMPANY_DIR = (Path(__file__).resolve().parents[0])
+DISPATCHER = str(Path.home() / ".openclaw" / "jev-dispatcher.py")
+TEST_FILE = str(Path(__file__).resolve().parents[0] / "packages" / "office-os" / "tests" / "test_dispatcher.py")
 UPGRADE_LOG = COMPANY_DIR / "logs" / "upgrade.log"
 UPGRADE_LOG.parent.mkdir(parents=True, exist_ok=True)
 

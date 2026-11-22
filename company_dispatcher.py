@@ -23,13 +23,13 @@ import uuid
 from pathlib import Path
 
 # Add office-os to path for existing dispatcher imports
-sys.path.insert(0, "/Users/aryanagarwal/AI-Office/packages/office-os")
+sys.path.insert(0, str(Path(__file__).resolve().parents[0] / "packages" / "office-os"))
 
 COMPANY_DIR = Path(__file__).resolve().parent
-RESEARCH_DIR = Path("/Users/aryanagarwal/Documents/indian-paper-trading")
-FLEET_DISPATCHER = "/Users/aryanagarwal/.openclaw/jev-dispatcher.py"
+RESEARCH_DIR = (Path.home() / "Documents" / "indian-paper-trading")
+FLEET_DISPATCHER = str(Path.home() / ".openclaw" / "jev-dispatcher.py")
 
-COMPANY_LOG = Path("/Users/aryanagarwal/AI-Office/logs/company.log")
+COMPANY_LOG = (Path(__file__).resolve().parents[0] / "logs" / "company.log")
 COMPANY_LOG.parent.mkdir(parents=True, exist_ok=True)
 
 STOCKS_BOT = COMPANY_DIR / "scripts" / "all_stocks_bot.py"
@@ -252,7 +252,7 @@ def handle_upgrade(task: str) -> dict:
 def handle_ops(task: str) -> dict:
     """Route to company operations."""
     log(f"OPS: {task[:80]}")
-    pnl_file = Path("/Users/aryanagarwal/.openclaw/office_pnl.json")
+    pnl_file = (Path.home() / ".openclaw" / "office_pnl.json")
     pnl_exists = pnl_file.exists()
     return {
         "department": "ops",
