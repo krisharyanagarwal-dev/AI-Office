@@ -36,7 +36,7 @@ MINI_ROUTES = [
 
 # Runs ON the mini with /usr/bin/python3 (3.9, stdlib + yaml). Prints one JSON object.
 MINI_SCRIPT = r'''
-import json, os, plistlib, subprocess, urllib.request
+import json, os, plistlib, subprocess, time, urllib.request
 H = os.path.expanduser("~")
 out = {}
 
@@ -109,6 +109,59 @@ except Exception as e:
     safety["bot_sandbox"] = "UNREADABLE: " + type(e).__name__
 safety["fleet_paused"] = any(n.startswith("disable-local-fleet") for n in os.listdir(os.path.join(H, ".config/openalice-fleet")))
 out["paper_safety"] = safety
+
+# paper book: the live paper-trading state the trading departments reason from.
+# Numbers only - no keys, no credentials, no order paths.
+book = {}
+SD = os.path.join(H, "trading/openalice-fleet/state")
+def _load(name):
+    try:
+        return json.load(open(os.path.join(SD, name))), None
+    except Exception as e:
+        return None, type(e).__name__ + ": " + str(e)[:80]
+d, err = _load("alphainsider_paper.json")
+if d is None:
+    book["book_error"] = err
+else:
+    book["status"] = d.get("status")
+    book["open_positions"] = len(d.get("positions") or [])
+    book["closed_trades"] = len(d.get("closed") or [])
+    book["realized_pnl"] = d.get("realized_pnl")
+    book["last_run"] = d.get("last_run")
+    book["last_error"] = d.get("last_error")
+    book["mark_price"] = d.get("price")
+d, err = _load("alphainsider_multistrat.json")
+if d is None:
+    book["multistrat_error"] = err
+else:
+    book["mode"] = d.get("mode")
+    book["execution_enabled"] = d.get("execution_enabled")
+    book["live_trading"] = d.get("live_trading")
+    book["multistrat_status"] = d.get("status")
+    book["multistrat_error_text"] = (d.get("last_error") or "")[:200]
+    book["daily_realized"] = d.get("daily_realized")
+d, err = _load("alphainsider_state.json")
+if d is None:
+    book["poller_error"] = err
+else:
+    book["poller_status"] = d.get("status")
+    # a provider error names a missing VARIABLE, never a value
+    book["poller_provider_error"] = (d.get("provider_error") or "")[:120]
+    book["new_signals"] = d.get("new_signals")
+try:
+    hp = os.path.join(SD, "paper_history.jsonl")
+    lines = open(hp).read().strip().split("\n")
+    book["history_rows"] = len(lines)
+    first = json.loads(lines[0]) if lines and lines[0] else {}
+    last = json.loads(lines[-1]) if lines and lines[-1] else {}
+    book["history_first_ts"] = first.get("ts")
+    book["history_last_ts"] = last.get("ts")
+    book["history_any_trade"] = any(
+        (json.loads(l).get("closed") or 0) > 0 for l in lines if l.strip())
+    book["history_age_min"] = round((time.time() - os.path.getmtime(hp)) / 60.0, 1)
+except Exception as e:
+    book["history_error"] = type(e).__name__ + ": " + str(e)[:80]
+out["paper_book"] = book
 
 st2 = os.statvfs(H)
 out["disk_free_gb"] = round(st2.f_bavail * st2.f_frsize / 1e9, 1)

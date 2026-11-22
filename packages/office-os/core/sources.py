@@ -453,6 +453,83 @@ def office_cadence():
     return _result(name, not problems, age, summary, problems)
 
 
+def _iso_age_min(ts):
+    """Minutes since an ISO-8601 timestamp, or None if it cannot be read."""
+    if not ts:
+        return None
+    try:
+        from datetime import datetime, timezone
+        t = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        return round((datetime.now(timezone.utc) - t).total_seconds() / 60.0, 1)
+    except (ValueError, TypeError):
+        return None
+
+
+def paper_book():
+    """The live paper-trading book on the mini: positions, closed trades, realized P&L.
+
+    This is the evidence the trading departments were missing. It is deliberately
+    blunt about an empty book: a bot that has taken no trades has produced no
+    sample, and no claim of edge can rest on it. Reporting 0 P&L as 'ok' is how
+    silence gets mistaken for success.
+    """
+    name = "paper-book"
+    m = _mini()
+    if "error" in m:
+        return _result(name, False, None, "cannot verify (mini unreachable)", [m["error"]])
+    b = m.get("paper_book") or {}
+    if not b:
+        return _result(name, False, None, "mini returned no paper-book facts",
+                       ["the mini probe produced no paper_book block - is the state dir present?"])
+
+    problems = []
+    # 1. the paper boundary, before anything about performance
+    if b.get("execution_enabled") is True:
+        problems.append("URGENT: execution_enabled is TRUE in alphainsider_multistrat.json - paper boundary breached")
+    if b.get("live_trading") is True:
+        problems.append("URGENT: live_trading is TRUE in alphainsider_multistrat.json - paper boundary breached")
+    if b.get("mode") not in (None, "paper"):
+        problems.append("URGENT: multistrat mode is %r, expected 'paper'" % (b.get("mode"),))
+
+    # 2. unreadable state is not an empty book
+    for key, label in (("book_error", "alphainsider_paper.json"),
+                       ("multistrat_error", "alphainsider_multistrat.json"),
+                       ("poller_error", "alphainsider_state.json"),
+                       ("history_error", "paper_history.jsonl")):
+        if b.get(key):
+            problems.append("%s unreadable: %s" % (label, b[key]))
+
+    # 3. freshness
+    age = _iso_age_min(b.get("last_run"))
+    if age is not None and age > 60:
+        problems.append("book last_run is %s min old - the paper loop is not running" % age)
+    hist_age = b.get("history_age_min")
+    if hist_age is not None and hist_age > 60:
+        problems.append("paper_history.jsonl is %s min old - no new history rows" % hist_age)
+
+    # 4. degraded upstreams, with the reason, since they explain an empty book
+    if b.get("poller_status") == "degraded":
+        problems.append("signal poller degraded: %s" % (b.get("poller_provider_error") or "no reason given"))
+    if b.get("multistrat_status") == "degraded":
+        problems.append("multistrat degraded: %s" % (b.get("multistrat_error_text") or "no reason given"))
+    if b.get("status") not in (None, "ok"):
+        problems.append("paper book status is %r" % (b.get("status"),))
+
+    # 5. the sample itself - an empty book cannot support any claim
+    if b.get("history_any_trade") is False:
+        problems.append(
+            "ZERO closed trades in %s history rows since %s - there is no sample, so no "
+            "edge, cost or risk claim can rest on this book"
+            % (b.get("history_rows"), (b.get("history_first_ts") or "?")[:10])
+        )
+
+    summary = ("open %s, closed %s, realized %s, mark %s, mode %s" % (
+        b.get("open_positions"), b.get("closed_trades"), b.get("realized_pnl"),
+        b.get("mark_price"), b.get("mode")))
+    return _result(name, not problems, age, summary, problems)
+
 COLLECTORS = [
     office_hud,
     laptop_jobs,
@@ -462,6 +539,7 @@ COLLECTORS = [
     ops_paper_safety,
     ops_market_data,
     ops_repo_safety,
+    paper_book,
     office_registry,
     office_wiring,
     office_pools,
