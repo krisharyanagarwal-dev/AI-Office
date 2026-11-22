@@ -87,6 +87,8 @@ def test_missing_event_log_is_not_ok(tmp_path, monkeypatch):
         "enabled": True, "interval_min": 30, "rounds_dir": str(tmp_path),
         "rounds_dir_exists": True, "round_files": 1, "latest_age_min": 1.0,
         "events": None, "events_path": str(tmp_path / "nope.jsonl"), "departments": 10,
+        "max_rounds_per_day": 24, "rounds_today": 1, "budget_spent": False,
+        "summary_stamped": True,
     })
     result = sources.office_cadence()
     assert not result["ok"] and "unverifiable" in result["problems"][0]
@@ -97,5 +99,41 @@ def test_disabled_autopilot_is_not_a_problem(monkeypatch):
         "enabled": False, "interval_min": 30, "rounds_dir": "/x",
         "rounds_dir_exists": False, "round_files": 0, "latest_age_min": None,
         "events": None, "events_path": "/x/events.jsonl", "departments": 10,
+        "max_rounds_per_day": 24, "rounds_today": 1, "budget_spent": False,
+        "summary_stamped": True,
     })
     assert sources.office_cadence()["ok"]
+
+
+def _cadence_stub(**over):
+    base = {
+        "enabled": True, "interval_min": 30, "rounds_dir": "/x",
+        "rounds_dir_exists": True, "round_files": 47, "latest_age_min": 572.0,
+        "events": {"started": 57, "finished": 47, "failed": 0, "this_process": 47,
+                   "settled": 47, "lost": 0, "newest_round": "20261122-113856",
+                   "newest_outcome": "finished", "in_flight": None,
+                   "in_flight_age_min": None},
+        "events_path": "/x/events.jsonl", "departments": 10,
+        "max_rounds_per_day": 24, "rounds_today": 24, "budget_spent": True,
+        "summary_stamped": True,
+    }
+    base.update(over)
+    return lambda: base
+
+
+def test_spent_daily_budget_is_not_a_stall(monkeypatch):
+    """max_rounds_per_day=24 stops the autopilot for the day on purpose; a stale
+    newest round after that is correct behaviour, not a problem."""
+    monkeypatch.setattr(office_audit, "cadence", _cadence_stub())
+    r = sources.office_cadence()
+    assert r["ok"], r["problems"]
+    assert "budget SPENT" in r["summary"]
+
+
+def test_stale_rounds_with_budget_left_is_still_a_stall(monkeypatch):
+    """The same staleness, but with budget remaining, must still be reported."""
+    monkeypatch.setattr(office_audit, "cadence",
+                        _cadence_stub(rounds_today=3, budget_spent=False))
+    r = sources.office_cadence()
+    assert not r["ok"]
+    assert "over 3x" in r["problems"][0]

@@ -29,6 +29,7 @@ CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "office.json"
 AGENT_DIR = HOME / ".config" / "opencode" / "agent"
 ROUNDS_DIR = HOME / "office-os" / "logs" / "autopilot"
 EVENTS_PATH = HOME / "office-os" / "logs" / "events.jsonl"
+AP_STATE_PATH = HOME / "office-os" / "config" / "autopilot_state.json"
 ENV_FILE = HOME / ".env"
 
 # A persona shorter than this is a stub: autopilot would send almost no role.
@@ -280,9 +281,22 @@ def cadence() -> dict:
             latest_age_min = round((time.time() - max(p.stat().st_mtime for p in rounds)) / 60.0, 1)
         except OSError:
             latest_age_min = None
+    # The autopilot stops for the day once it spends max_rounds_per_day, so after
+    # that a stale newest round is correct behaviour, not a stall.
+    budget = ap.get("max_rounds_per_day")
+    try:
+        ap_state = json.loads(AP_STATE_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        ap_state = {}
+    today = time.strftime("%Y-%m-%d")
+    rounds_today = ap_state.get("rounds_today") if ap_state.get("day") == today else 0
     return {
         "enabled": bool(ap.get("enabled")),
         "interval_min": ap.get("interval_min"),
+        "max_rounds_per_day": budget,
+        "rounds_today": rounds_today,
+        "budget_spent": bool(budget and (rounds_today or 0) >= budget),
+        "summary_stamped": "last_summary_at" in ap_state,
         "events": _round_events(),
         "events_path": str(EVENTS_PATH),
         "rounds_dir": str(ROUNDS_DIR),

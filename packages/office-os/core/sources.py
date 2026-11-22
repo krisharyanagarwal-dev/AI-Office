@@ -441,11 +441,15 @@ def office_cadence():
             f"round {ev['in_flight']} has been in flight {ev['in_flight_age_min']} min, over "
             f"2x the {interval} min interval - it is stalled, not slow"
         )
-    if age is not None and age > 3 * interval and not problems:
+    if age is not None and age > 3 * interval and not problems and not r["budget_spent"]:
         problems.append(f"newest round file is {age} min old, over 3x the {interval} min interval")
     ev_bit = (f"; {ev['started']}/{ev['finished']}/{ev['failed']} started/finished/failed all-time, "
               f"this process {ev['this_process']}, last round {ev['newest_outcome'] or 'in flight'}") if ev else ""
-    summary = f"{r['round_files']} round files; newest {'none' if age is None else str(age) + ' min'} old{ev_bit}"
+    budget_bit = (f"; daily budget SPENT ({r['rounds_today']}/{r['max_rounds_per_day']}), rounds resume tomorrow"
+                  if r["budget_spent"] else
+                  f"; {r['rounds_today']}/{r['max_rounds_per_day']} rounds used today")
+    summary = (f"{r['round_files']} round files; newest {'none' if age is None else str(age) + ' min'} old"
+               f"{ev_bit}{budget_bit}")
     return _result(name, not problems, age, summary, problems)
 
 
