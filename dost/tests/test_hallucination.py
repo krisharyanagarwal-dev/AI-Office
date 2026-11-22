@@ -21,7 +21,7 @@ import pytest
 
 COMPANY_DIR = Path(__file__).resolve().parent.parent.parent
 DOST_DIR = COMPANY_DIR / "dost"
-RESEARCH_DIR = Path("/Users/aryanagarwal/Documents/indian-paper-trading")
+RESEARCH_DIR = (Path.home() / "Documents" / "indian-paper-trading")
 
 sys_path_inserted = False
 
@@ -61,12 +61,12 @@ def _source_text() -> str:
             parts.append(p.read_text())
 
     # Dispatcher PID (live system fact, not a data file but referenced in replies)
-    pid_file = Path("/Users/aryanagarwal/.openclaw/jev-dispatcher.pid")
+    pid_file = (Path.home() / ".openclaw" / "jev-dispatcher.pid")
     if pid_file.exists():
         parts.append(pid_file.read_text())
 
     # Office P&L — raw data + computed aggregates (snapshot at test time)
-    pnl = Path("/Users/aryanagarwal/.openclaw/office_pnl.json")
+    pnl = (Path.home() / ".openclaw" / "office_pnl.json")
     if pnl.exists():
         parts.append(pnl.read_text())
         try:
@@ -187,7 +187,7 @@ def _number_matches_source(n_str: str, haystack: str, h_vals: list[float]) -> bo
 
     # 3. Race-condition guard: re-read volatile office_pnl.json fresh and check
     #    (dispatcher may have added tasks since we snapshotted the haystack)
-    pnl = Path("/Users/aryanagarwal/.openclaw/office_pnl.json")
+    pnl = (Path.home() / ".openclaw" / "office_pnl.json")
     if pnl.exists():
         try:
             fresh = pnl.read_text()

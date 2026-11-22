@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 COMPANY_DIR = Path(__file__).resolve().parent.parent.parent
 DOST_DIR = Path(__file__).resolve().parent.parent
 
-OFFICE_OS = Path("/Users/aryanagarwal/AI-Office/packages/office-os")
+OFFICE_OS = (Path(__file__).resolve().parents[2] / "packages" / "office-os")
 if str(OFFICE_OS) not in sys.path:
     sys.path.insert(0, str(OFFICE_OS))
 
@@ -48,7 +48,7 @@ SAMPLE_RATE = 16000
 CHANNELS = 1
 
 # Hive dir for writing voice-dispatch task records.
-HIVE_DIR = Path("/Users/aryanagarwal/AI-Office/packages/office-os/tasks")
+HIVE_DIR = (Path(__file__).resolve().parents[2] / "packages" / "office-os" / "tasks")
 
 # Multi-turn: last-turn context stored here so follow-ups can reference it.
 LAST_DISPATCH_PATH = DOST_DIR / "last_dispatch.json"

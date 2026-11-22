@@ -35,9 +35,7 @@ except Exception:  # pragma: no cover - fallback when imported as dost.setup_wiz
 SETUP_DIR = Path(os.path.expanduser("~/.openclaw/setup"))
 SETUP_DIR.mkdir(parents=True, exist_ok=True)
 
-OFFICE_CONFIG_DEFAULT = Path(
-    "/Users/aryanagarwal/AI-Office/packages/office-os/config/office.json"
-)
+OFFICE_CONFIG_DEFAULT = (Path(__file__).resolve().parents[1] / "packages" / "office-os" / "config" / "office.json")
 DEFAULT_WORKSPACE_NAME = "Default Workspace"
 DISPATCHER_METRICS_URL = "http://127.0.0.1:8083/metrics"
 

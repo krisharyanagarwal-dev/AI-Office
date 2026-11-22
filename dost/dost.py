@@ -59,12 +59,12 @@ from collab.workspace import (  # noqa: E402
 
 # Cloud model orchestrator (same orchestration the dispatcher uses) for direct
 # debate calls that bypass the dispatcher's general-assistant override.
-OFFICE_OS = Path("/Users/aryanagarwal/AI-Office/packages/office-os")
+OFFICE_OS = (Path(__file__).resolve().parents[1] / "packages" / "office-os")
 if str(OFFICE_OS) not in sys.path:
     sys.path.insert(0, str(OFFICE_OS))
 from core.subs.cloud_orchestrator import CloudModelOrchestrator  # noqa: E402
 
-RESEARCH_DIR = Path("/Users/aryanagarwal/Documents/indian-paper-trading")
+RESEARCH_DIR = (Path.home() / "Documents" / "indian-paper-trading")
 O3_RUNNER = RESEARCH_DIR / "o3_runner.py"
 
 RESEARCH_COMMANDS = {"register", "gate", "holdout", "calibrate", "report", "all"}
@@ -376,8 +376,115 @@ for anything not covered):
   overstated. The kill switch is locked and Tier C is human-only."""
 
 DISPATCHER_METRICS_URL = "http://127.0.0.1:8083/metrics"
-HIVE_DIR = Path("/Users/aryanagarwal/AI-Office/packages/office-os/tasks")
-OFFICE_CONFIG_PATH = Path("/Users/aryanagarwal/AI-Office/packages/office-os/config/office.json")
+HIVE_DIR = (Path(__file__).resolve().parents[1] / "packages" / "office-os" / "tasks")
+OFFICE_CONFIG_PATH = (Path(__file__).resolve().parents[1] / "packages" / "office-os" / "config" / "office.json")
+
+
+# --- Advisory daily cost cap -------------------------------------------------
+# The fleet books synthetic cost units per task. The daily ceiling is read from
+# office.json so it can track fleet scale, and it stays advisory: it warns, it
+# never halts dispatch.
+
+def cost_cap_limit() -> int | None:
+    try:
+        cfg = json.loads(OFFICE_CONFIG_PATH.read_text())
+        cap = (cfg.get("cost_cap") or {}) if isinstance(cfg, dict) else {}
+        value = cap.get("daily_units")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        value = int(value)
+        return value if value > 0 else None
+    except Exception:
+        return None
+
+
+def cost_cap_status(cost_units: float, limit: int | None = None) -> tuple[bool, str]:
+    if limit is None:
+        limit = cost_cap_limit()
+    detail = f"Today's cost: {cost_units} units"
+    if limit is None:
+        return True, f"{detail} — no cap configured (advisory only)"
+    if cost_units > limit:
+        return False, f"{detail} — COST CAP EXCEEDED ({limit} units, advisory)"
+    if cost_units > limit * 0.8:
+        return True, f"{detail} — approaching cap ({limit} units)"
+    return True, f"{detail} (cap {limit} units)"
+
+
+def _daily_cost_check(pnl_path: Path) -> tuple[bool, str]:
+    try:
+        if not pnl_path.exists():
+            return True, "no P&L file"
+        pnl = json.loads(pnl_path.read_text())
+        if not isinstance(pnl, list):
+            return True, "no P&L data"
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today_cost = sum(
+            t.get("cost_units", 0)
+            for t in pnl
+            if isinstance(t, dict) and str(t.get("created_at", "")).startswith(today)
+        )
+        return cost_cap_status(today_cost)
+    except Exception as e:
+        return False, f"cost cap check failed ({e})"
+
+
+# --- Local provider verification ---------------------------------------------
+# The dispatcher reports pool availability from its own state, so a local pool
+# can read "available" while its server is down. Local pools are probed
+# directly so unverifiable is reported as not-verified, never as up.
+
+LOCAL_POOL_ENDPOINTS = {
+    "mlx_local": "http://127.0.0.1:11435/v1/models",
+}
+
+
+def probe_local_pools(timeout: float = 3.0) -> dict[str, str]:
+    status = {}
+    for name, url in LOCAL_POOL_ENDPOINTS.items():
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as response:
+                status[name] = "up" if getattr(response, "status", 0) == 200 else "not-verified"
+        except Exception:
+            status[name] = "not-verified"
+    return status
+
+
+def summarize_provider_pools(
+    pools: dict, local_status: dict | None = None
+) -> tuple[bool, str]:
+    local_status = local_status or {}
+    parts = []
+    ok = True
+    for pname, pinfo in pools.items():
+        avail = pinfo.get("available", False)
+        cd = pinfo.get("cooldown_remaining", 0)
+        if pname in local_status:
+            state = local_status[pname]
+            if state != "up":
+                ok = False
+                parts.append(f"{pname}:{state}")
+            elif avail and cd == 0:
+                parts.append(f"{pname}:up")
+            elif cd > 0:
+                ok = False
+                parts.append(f"{pname}:cooling({cd}s)")
+            else:
+                ok = False
+                parts.append(f"{pname}:down")
+        elif avail and cd == 0:
+            parts.append(f"{pname}:up")
+        elif cd > 0:
+            ok = False
+            parts.append(f"{pname}:cooling({cd}s)")
+        else:
+            ok = False
+            parts.append(f"{pname}:down")
+    if not pools:
+        ok = False
+        parts.append("no pools")
+    return ok, ", ".join(parts) if parts else "unknown"
+
 
 # Default pro-tier agents for general debate questions (all exist in office.json
 # agent_tiers under "pro"). data-analyst suggested in the spec does not exist,
@@ -390,7 +497,7 @@ DEBATE_DEFAULT_AGENTS = ["strategy-advisor", "cost-analyst", "risk-manager"]
 # never hit the dispatcher's record_task_outcome(). Log them here so they
 # appear in office_pnl.json with source="debate" instead of being a blind spot.
 
-TASK_LEDGER_PATH = Path("/Users/aryanagarwal/.openclaw/office_pnl.json")
+TASK_LEDGER_PATH = (Path.home() / ".openclaw" / "office_pnl.json")
 
 MODEL_COST_UNITS = {
     "pro": 3,
@@ -557,7 +664,7 @@ JUNK_PATTERNS = [
     "what verdict?",
 ]
 
-FINDINGS_STORE_PATH = "/Users/aryanagarwal/Documents/polymarket/research/findings.json"
+FINDINGS_STORE_PATH = str(Path.home() / "Documents" / "polymarket" / "research" / "findings.json")
 
 
 def _load_findings_store() -> dict:
@@ -747,7 +854,7 @@ def review_findings(actions: list[dict]) -> dict:
 # Repeat questions (fleet status, completion rate, error rate) return a cached
 # answer instead of burning a provider call. TTL 10 minutes.
 
-DOST_ANSWER_CACHE_PATH = "/Users/aryanagarwal/.openclaw/dost_answer_cache.json"
+DOST_ANSWER_CACHE_PATH = str(Path.home() / ".openclaw" / "dost_answer_cache.json")
 ANSWER_CACHE_TTL_SEC = 600  # 10 minutes
 
 
@@ -1275,7 +1382,7 @@ def list_recent_dost_tasks(limit: int = 20, status_filter: str | None = None, ag
     Returns a list of dicts with task_id, status, result preview (first 200
     chars), model, pool, agent_id.
     """
-    HIVE_DIR = Path("/Users/aryanagarwal/AI-Office/packages/office-os/tasks")
+    HIVE_DIR = (Path(__file__).resolve().parents[1] / "packages" / "office-os" / "tasks")
     tasks = []
     if not HIVE_DIR.exists():
         return tasks
@@ -1321,7 +1428,7 @@ def search_history(query: str | None = None, limit: int = 10) -> list[dict]:
     Case-insensitive substring match. If query is None/empty, returns the most
     recent dost tasks (history paging).
     """
-    HIVE_DIR = Path("/Users/aryanagarwal/AI-Office/packages/office-os/tasks")
+    HIVE_DIR = (Path(__file__).resolve().parents[1] / "packages" / "office-os" / "tasks")
     results = []
     if not HIVE_DIR.exists():
         return results
@@ -1379,7 +1486,7 @@ def search_history_regex(pattern, limit: int = 10) -> list[dict]:
     """
     import re
 
-    HIVE_DIR = Path("/Users/aryanagarwal/AI-Office/packages/office-os/tasks")
+    HIVE_DIR = (Path(__file__).resolve().parents[1] / "packages" / "office-os" / "tasks")
     results = []
     if not HIVE_DIR.exists():
         return results
@@ -1519,7 +1626,7 @@ def generate_daily_briefing():
         "",
     ]
 
-    research_dir = Path("/Users/aryanagarwal/Documents/indian-paper-trading")
+    research_dir = (Path.home() / "Documents" / "indian-paper-trading")
     queue_dir = research_dir / "results" / "hypothesis_queue"
     if queue_dir.exists():
         hyps = list(queue_dir.glob("*.json"))
@@ -1652,7 +1759,7 @@ def doctor() -> tuple:
     pid_text = "unknown"
     pid_ok = False
     try:
-        pid_text = Path("/Users/aryanagarwal/.openclaw/jev-dispatcher.pid").read_text().strip()
+        pid_text = (Path.home() / ".openclaw" / "jev-dispatcher.pid").read_text().strip()
         pid_ok = _pid_alive(int(pid_text))
     except Exception:
         pid_ok = False
@@ -1664,7 +1771,7 @@ def doctor() -> tuple:
     )
 
     # 2. Metrics fresh (<10 min) — dispatcher log updated within 10 min
-    log_path = Path("/Users/aryanagarwal/.openclaw/jev-dispatcher.log")
+    log_path = (Path.home() / ".openclaw" / "jev-dispatcher.log")
     fresh = False
     age_text = "unknown"
     try:
@@ -1681,7 +1788,7 @@ def doctor() -> tuple:
     office_ok = False
     try:
         json.loads(
-            Path("/Users/aryanagarwal/AI-Office/packages/office-os/config/office.json").read_text()
+            (Path(__file__).resolve().parents[1] / "packages" / "office-os" / "config" / "office.json").read_text()
         )
         office_ok = True
     except Exception:
@@ -1725,32 +1832,13 @@ def doctor() -> tuple:
     no_lock = not index_lock.exists()
     checks.append(("No .git/index.lock", no_lock, str(index_lock)))
 
-    # 8. Provider-health audit — honest read of which providers are actually
-    #    alive vs cooling down / quota-exhausted (from :8083/metrics).
-    pools_ok = True
-    pool_detail_parts = []
+    # 8. Provider-health audit — dispatcher metrics plus a direct probe of the
+    #    local pools, so a dead local server can never be reported as up.
     try:
         with urllib.request.urlopen("http://127.0.0.1:8083/metrics", timeout=4) as r:
             metrics = json.loads(r.read().decode("utf-8"))
         pools = metrics.get("provider_pools", {})
-        available = 0
-        total = len(pools)
-        for pname, pinfo in pools.items():
-            avail = pinfo.get("available", False)
-            cd = pinfo.get("cooldown_remaining", 0)
-            if avail and cd == 0:
-                available += 1
-                pool_detail_parts.append(f"{pname}:up")
-            elif cd > 0:
-                pools_ok = False
-                pool_detail_parts.append(f"{pname}:cooling({cd}s)")
-            else:
-                pools_ok = False
-                pool_detail_parts.append(f"{pname}:down")
-        if total == 0:
-            pools_ok = False
-            pool_detail_parts.append("no pools")
-        pool_detail = ", ".join(pool_detail_parts) if pool_detail_parts else "unknown"
+        pools_ok, pool_detail = summarize_provider_pools(pools, probe_local_pools())
     except Exception as e:
         pools_ok = False
         pool_detail = f"metrics unreachable ({e})"
@@ -1825,33 +1913,10 @@ def doctor() -> tuple:
         quota_detail = f"quota check failed ({e})"
     checks.append(("Quota burn projection", quota_ok, quota_detail))
 
-    # 11. Cost cap alert — stop if daily cost_units exceeds threshold.
-    cost_cap_ok = True
-    cost_cap_detail = "unknown"
-    try:
-        pnl_path = Path("/Users/aryanagarwal/.openclaw/office_pnl.json")
-        if pnl_path.exists():
-            pnl = json.loads(pnl_path.read_text())
-            if isinstance(pnl, list):
-                today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-                today_cost = sum(
-                    t.get("cost_units", 0)
-                    for t in pnl
-                    if t.get("created_at", "").startswith(today)
-                )
-                cost_cap_detail = f"Today's cost: {today_cost} units"
-                if today_cost > 100:
-                    cost_cap_ok = False
-                    cost_cap_detail += " — COST CAP EXCEEDED (100 units)"
-                elif today_cost > 50:
-                    cost_cap_detail += " — approaching cap"
-            else:
-                cost_cap_detail = "no P&L data"
-        else:
-            cost_cap_detail = "no P&L file"
-    except Exception as e:
-        cost_cap_ok = False
-        cost_cap_detail = f"cost cap check failed ({e})"
+    # 11. Daily cost cap — advisory only; never halts dispatch.
+    cost_cap_ok, cost_cap_detail = _daily_cost_check(
+        (Path.home() / ".openclaw" / "office_pnl.json")
+    )
     checks.append(("Daily cost cap", cost_cap_ok, cost_cap_detail))
 
     # 12. Alert webhook — POST anomalies to configured webhook URL.
@@ -1903,7 +1968,7 @@ def doctor() -> tuple:
     cost_anomaly_ok = True
     cost_anomaly_detail = "unknown"
     try:
-        pnl_path = Path("/Users/aryanagarwal/.openclaw/office_pnl.json")
+        pnl_path = (Path.home() / ".openclaw" / "office_pnl.json")
         if pnl_path.exists():
             pnl = json.loads(pnl_path.read_text())
             if isinstance(pnl, list) and len(pnl) > 1:
@@ -2007,7 +2072,7 @@ def export_results(fmt: str = "json") -> str:
     export_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
-    HIVE_DIR = Path("/Users/aryanagarwal/AI-Office/packages/office-os/tasks")
+    HIVE_DIR = (Path(__file__).resolve().parents[1] / "packages" / "office-os" / "tasks")
     latest_debate = None
     latest_dispatch = None
     if HIVE_DIR.exists():

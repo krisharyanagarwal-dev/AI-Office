@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-sys.path.insert(0, "/Users/aryanagarwal/AI-Office")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from dost.dost import dispatch_prompt_to_fleet
 from dost.trading.strategy_engine import generate_all_signals
@@ -28,7 +28,7 @@ from dost.trading.position_sizer import calculate_position_size
 from dost.trading.oos_validator import run_oos_validation
 from dost.data_access import generate_synthetic_ohlcv
 
-STRATEGY_DIR = Path("/Users/aryanagarwal/AI-Office/packages/office-os/tasks")
+STRATEGY_DIR = (Path(__file__).resolve().parents[2] / "packages" / "office-os" / "tasks")
 STRATEGY_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -111,9 +111,7 @@ def run_strategy_pipeline(
 
         while time.time() - start_time < max_wait:
             time.sleep(poll_interval)
-            task_path = Path(
-                "/Users/aryanagarwal/AI-Office/packages/office-os/tasks"
-            ) / f"{task_id}.json"
+            task_path = (Path(__file__).resolve().parents[2] / "packages" / "office-os" / "tasks") / f"{task_id}.json"
             if task_path.exists():
                 try:
                     task_data = json.loads(task_path.read_text())

@@ -21,8 +21,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 DISPATCHER_METRICS_URL = "http://127.0.0.1:8083/metrics"
-FINDINGS_STORE_PATH = "/Users/aryanagarwal/Documents/polymarket/research/findings.json"
-OFFICE_PNL_PATH = "/Users/aryanagarwal/.openclaw/office_pnl.json"
+FINDINGS_STORE_PATH = str(Path.home() / "Documents" / "polymarket" / "research" / "findings.json")
+OFFICE_PNL_PATH = str(Path.home() / ".openclaw" / "office_pnl.json")
 
 # Thresholds for proactive alerts
 ERROR_RATE_THRESHOLD = 5.0  # %

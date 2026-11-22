@@ -148,7 +148,7 @@ def download_file(file_path: str, dest: str) -> bool:
 
 def _status_one_liner() -> str:
     h = provider_health()
-    pnl_path = Path("/Users/aryanagarwal/.openclaw/office_pnl.json")
+    pnl_path = (Path.home() / ".openclaw" / "office_pnl.json")
     net = "?"
     try:
         pnl = json.loads(pnl_path.read_text())
@@ -167,7 +167,7 @@ def _status_one_liner() -> str:
 
 
 def _report_summary() -> str:
-    pub_dir = Path("/Users/aryanagarwal/Documents/indian-paper-trading/results/public_record")
+    pub_dir = (Path.home() / "Documents" / "indian-paper-trading" / "results" / "public_record")
     try:
         reports = sorted(pub_dir.glob("monthly_report_*.json"))
         if not reports:

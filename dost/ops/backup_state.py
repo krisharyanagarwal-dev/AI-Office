@@ -22,7 +22,7 @@ RETENTION_DAYS = 7
 SOURCES = [
     OPENCLAW_DIR / "office_pnl.json",
     OPENCLAW_DIR / "jev-dispatcher.log",
-    Path("/Users/aryanagarwal/Documents/polymarket/research/findings.json"),
+    (Path.home() / "Documents" / "polymarket" / "research" / "findings.json"),
 ]
 
 

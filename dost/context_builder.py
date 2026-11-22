@@ -27,15 +27,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-RESEARCH_DIR = Path("/Users/aryanagarwal/Documents/indian-paper-trading")
+RESEARCH_DIR = (Path.home() / "Documents" / "indian-paper-trading")
 QUEUE_DIR = RESEARCH_DIR / "results" / "hypothesis_queue"
 CALIBRATION_FILE = RESEARCH_DIR / "results" / "calibration_ledger.json"
 PUBLIC_DIR = RESEARCH_DIR / "results" / "public_record"
-DOST_DIR = Path("/Users/aryanagarwal/AI-Office/dost")
+DOST_DIR = (Path(__file__).resolve().parents[1] / "dost")
 DOST_MEMORY = DOST_DIR / "memory.json"
 DOST_HISTORY = DOST_DIR / "history.jsonl"
-DISPATCHER = Path("/Users/aryanagarwal/.openclaw/jev-dispatcher.py")
-PNL_FILE = Path("/Users/aryanagarwal/.openclaw/office_pnl.json")
+DISPATCHER = (Path.home() / ".openclaw" / "jev-dispatcher.py")
+PNL_FILE = (Path.home() / ".openclaw" / "office_pnl.json")
 
 MAX_TOKENS = 4000  # rough cap for the context block
 
@@ -158,7 +158,7 @@ def fleet_section() -> str:
         pools = data.get("provider_pools", {})
         available = sum(1 for p in pools.values() if p.get("available"))
         total = len(pools)
-        pid_file = Path("/Users/aryanagarwal/.openclaw/jev-dispatcher.pid")
+        pid_file = (Path.home() / ".openclaw" / "jev-dispatcher.pid")
         pid = pid_file.read_text().strip() if pid_file.exists() else "?"
         lines.append(
             f"  Dispatcher: running (PID {pid}) | {jev.get('tasks_done',0)}/{jev.get('tasks_created',0)} tasks done "
@@ -168,7 +168,7 @@ def fleet_section() -> str:
         )
     except Exception as e:
         lines.append(f"  Dispatcher: unreachable ({e})")
-        pid_file = Path("/Users/aryanagarwal/.openclaw/jev-dispatcher.pid")
+        pid_file = (Path.home() / ".openclaw" / "jev-dispatcher.pid")
         pid = pid_file.read_text().strip() if pid_file.exists() else "?"
         lines.append(f"  PID file: {pid}")
 
@@ -238,7 +238,7 @@ def alerts_section() -> str:
     last 24 hours, deduped by metric so a repeating failure shows once.
     """
     lines = ["RECENT ALERTS:"]
-    alerts_log = Path("/Users/aryanagarwal/AI-Office/dost/jarvis_memory/alerts.jsonl")
+    alerts_log = (Path(__file__).resolve().parents[1] / "dost" / "jarvis_memory" / "alerts.jsonl")
     if not alerts_log.exists():
         lines.append("  No alerts recorded.")
         return "\n".join(lines)

@@ -30,7 +30,7 @@ from typing import Dict, List, Optional
 WORKSPACE_DIR = Path(os.path.expanduser("~/.openclaw/workspaces"))
 OPENCLAW_DIR = Path(os.path.expanduser("~/.openclaw"))
 OFFICE_PNL_FILE = OPENCLAW_DIR / "office_pnl.json"
-RESEARCH_DIR = Path("/Users/aryanagarwal/Documents/indian-paper-trading")
+RESEARCH_DIR = (Path.home() / "Documents" / "indian-paper-trading")
 CALIBRATION_FILE = RESEARCH_DIR / "results" / "calibration_ledger.json"
 DELETIONS_DIR = OPENCLAW_DIR / "deletions"
 

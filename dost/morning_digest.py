@@ -23,8 +23,8 @@ DOST_DIR = Path(__file__).resolve().parent
 DOST_BRIEFINGS = DOST_DIR / "briefings"
 
 DISPATCHER_METRICS_URL = "http://127.0.0.1:8083/metrics"
-PNL_FILE = Path("/Users/aryanagarwal/.openclaw/office_pnl.json")
-FINDINGS_STORE = Path("/Users/aryanagarwal/Documents/polymarket/research/findings.json")
+PNL_FILE = (Path.home() / ".openclaw" / "office_pnl.json")
+FINDINGS_STORE = (Path.home() / "Documents" / "polymarket" / "research" / "findings.json")
 
 ANOMALY_ERROR_RATE_PCT = 5.0
 ANOMALY_HEADROOM_PCT = 50.0

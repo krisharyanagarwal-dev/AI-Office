@@ -17,9 +17,9 @@ from typing import Dict, List, Optional, Any
 WORKSPACE_DIR = Path(os.path.expanduser("~/.openclaw/workspaces"))
 WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 
-RESEARCH_DIR = Path("/Users/aryanagarwal/Documents/indian-paper-trading")
+RESEARCH_DIR = (Path.home() / "Documents" / "indian-paper-trading")
 CALIBRATION_FILE = RESEARCH_DIR / "results" / "calibration_ledger.json"
-OFFICE_PNL_FILE = Path("/Users/aryanagarwal/.openclaw/office_pnl.json")
+OFFICE_PNL_FILE = (Path.home() / ".openclaw" / "office_pnl.json")
 
 EXPORT_STATUS_DIR = Path(os.path.expanduser("~/.openclaw/exports"))
 EXPORT_STATUS_DIR.mkdir(parents=True, exist_ok=True)
