@@ -153,3 +153,44 @@ def test_require_output_not_null():
               "require_output_not_null": ["open_positions"], "why": "unfalsifiable"}]
     assert runner.check_acceptance(dict(GOOD, open_positions=None), PAPER, rules)
     assert runner.check_acceptance(GOOD, PAPER, rules) == []
+
+
+# ---------- the third gate: the model's numbers must match the facts ----------
+MATCH_RULES = [{
+    "when": {"scope_verdict": "PARTIAL"},
+    "require_output_matches_evidence": {"other_surfaces_count": "other_surfaces_total"},
+    "why": "a count in a typed field can be checked; prose cannot",
+}]
+
+
+def test_a_matching_count_passes():
+    answer = {"scope_verdict": "PARTIAL", "other_surfaces_count": 0}
+    assert runner.check_acceptance(answer, {"other_surfaces_total": 0}, MATCH_RULES) == []
+
+
+def test_a_misstated_count_is_rejected():
+    """killswitch-audit run 1 asserted in prose that other_live_surfaces was
+    'non-empty' when it was []. As a typed field that claim is catchable."""
+    answer = {"scope_verdict": "PARTIAL", "other_surfaces_count": 2}
+    problems = runner.check_acceptance(answer, {"other_surfaces_total": 0}, MATCH_RULES)
+    assert problems and "but the evidence says" in problems[0]
+
+
+def test_a_count_with_no_evidence_to_check_against_is_rejected():
+    answer = {"scope_verdict": "PARTIAL", "other_surfaces_count": 0}
+    problems = runner.check_acceptance(answer, {}, MATCH_RULES)
+    assert problems and "cannot check" in problems[0]
+
+
+def test_numeric_equality_survives_type_differences():
+    """json may give 0 or 0.0; the gate is about the value, not the type."""
+    answer = {"scope_verdict": "PARTIAL", "other_surfaces_count": 0}
+    assert runner.check_acceptance(answer, {"other_surfaces_total": 0.0}, MATCH_RULES) == []
+
+
+def test_prose_is_not_gated_and_that_is_the_point():
+    """A reason field can say anything; nothing here can catch it. This test exists
+    to record the limit, so facts are kept in typed fields instead."""
+    answer = {"scope_verdict": "PARTIAL", "other_surfaces_count": 0,
+              "reason": "other_live_surfaces is non-empty"}   # false, and unverifiable
+    assert runner.check_acceptance(answer, {"other_surfaces_total": 0}, MATCH_RULES) == []

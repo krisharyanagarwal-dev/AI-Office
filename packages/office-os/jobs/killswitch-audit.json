@@ -1,0 +1,135 @@
+{
+  "id": "killswitch-audit",
+  "agent": "compliance-checker",
+  "department": "compliance",
+  "source": "ops-paper-safety",
+  "model": "TheCluster/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-MLX-mxfp4",
+  "evidence_files": [
+    "trading/openalice-fleet/state/trader_killswitch_status.json"
+  ],
+  "evidence_fields": [
+    "verdict",
+    "drift_count",
+    "findings",
+    "ts",
+    "label",
+    "verdict_scope",
+    "other_live_surfaces"
+  ],
+  "evidence_derive": {
+    "status_age_min": {
+      "age_min_of": "ts"
+    },
+    "findings_total": {
+      "count_of": "findings"
+    },
+    "findings_failed": {
+      "count_where_false": [
+        "findings",
+        "ok"
+      ]
+    },
+    "no_other_live_surfaces": {
+      "is_empty": "other_live_surfaces"
+    },
+    "other_surfaces_total": {
+      "count_of": "other_live_surfaces"
+    }
+  },
+  "prompt": "You are the Compliance Checker for a PAPER-ONLY trading office. Below is the kill-switch status file, verbatim, plus facts already computed for you.\n\n<evidence>\n{evidence}\n</evidence>\n\nstatus_age_min, findings_total, findings_failed and no_other_live_surfaces were computed in code. Use them as given. Do NOT do arithmetic or date maths yourself.\n\nReport three independent verdicts.\n\nlock_verdict: LOCKED only if verdict is LOCKED, drift_count is 0 and findings_failed is 0. UNLOCKED if verdict says otherwise or any finding failed. NOT_VERIFIED if verdict is missing.\n\nfreshness_verdict: FRESH if status_age_min is 60 or less. STALE if it is more than 60. NOT_VERIFIED if status_age_min is null - a check whose age is unknown has not been verified.\n\nscope_verdict: read verdict_scope literally. COVERS_ALL only if the evidence states the verdict covers every trading surface. PARTIAL if verdict_scope limits it to particular labels, or if other_live_surfaces is non-empty. NOT_STATED if verdict_scope is absent.\n\nThe scope question is the one that matters: a LOCKED verdict that covers one launchd label is NOT a statement that the whole office is safe, and reporting it as such is the over-claim this role exists to prevent.\n\nReply with ONLY a JSON object with exactly these six keys and these exact types:\n  lock_verdict: one string from LOCKED | UNLOCKED | NOT_VERIFIED\n  freshness_verdict: one string from FRESH | STALE | NOT_VERIFIED\n  scope_verdict: one string from COVERS_ALL | PARTIAL | NOT_STATED\n  covered_label: ONE STRING naming the label the verdict covers, or null if not stated\n  cites: ONE STRING naming the evidence fields you used, joined with '; '. Never a list.\n  other_surfaces_count: an INTEGER, copied from other_surfaces_total in the evidence\n  reason: ONE STRING, a single sentence that states what is NOT covered. State NO counts or\n    figures in this sentence - every number belongs in the typed fields above, where it can be\n    checked. A figure asserted only in prose will not be caught, so do not put one there.\nAdd no other keys.",
+  "output_schema": {
+    "lock_verdict": [
+      "LOCKED",
+      "UNLOCKED",
+      "NOT_VERIFIED"
+    ],
+    "freshness_verdict": [
+      "FRESH",
+      "STALE",
+      "NOT_VERIFIED"
+    ],
+    "scope_verdict": [
+      "COVERS_ALL",
+      "PARTIAL",
+      "NOT_STATED"
+    ],
+    "covered_label": "string|null",
+    "cites": "string",
+    "reason": "string",
+    "other_surfaces_count": "integer"
+  },
+  "acceptance": [
+    {
+      "when": {
+        "lock_verdict": "LOCKED"
+      },
+      "require_evidence": [
+        "verdict==LOCKED",
+        "drift_count==0",
+        "findings_failed<1"
+      ],
+      "why": "LOCKED may only be claimed when the file says so, with no drift and no failed finding"
+    },
+    {
+      "when": {
+        "freshness_verdict": "FRESH"
+      },
+      "require_evidence": [
+        "status_age_min<=60"
+      ],
+      "why": "freshness is a claim about the derived age, not a feeling"
+    },
+    {
+      "when": {
+        "freshness_verdict": "STALE"
+      },
+      "require_evidence": [
+        "status_age_min>60"
+      ],
+      "why": "calling a fresh check stale is also a false report"
+    },
+    {
+      "when": {
+        "scope_verdict": "COVERS_ALL"
+      },
+      "require_evidence": [
+        "no_other_live_surfaces==True",
+        "verdict_scope==covers all trading surfaces"
+      ],
+      "why": "COVERS_ALL is the over-claim this job exists to catch: the file scopes its verdict to one label"
+    },
+    {
+      "when": {
+        "scope_verdict": "PARTIAL"
+      },
+      "require_output_not_null": [
+        "covered_label"
+      ],
+      "why": "a partial verdict must name what it actually covers"
+    },
+    {
+      "when": {
+        "scope_verdict": "PARTIAL"
+      },
+      "require_output_matches_evidence": {
+        "other_surfaces_count": "other_surfaces_total"
+      },
+      "why": "run 1 claimed in prose that other_live_surfaces was non-empty when it was []; a count in a typed field can be checked, prose cannot"
+    }
+  ],
+  "retries": 2,
+  "timeout_sec": 180,
+  "escalate_when": [
+    "3 consecutive schema failures",
+    "judge rejects 2 of 3 runs"
+  ],
+  "escalate_after_consecutive_rejects": 3,
+  "budget": {
+    "free_calls_per_day": 24,
+    "claude_calls_per_week": 2
+  },
+  "design_note": "Ages and counts are derived in code because a language model is unreliable at arithmetic and worse at dates. The model only classifies facts it is handed.",
+  "compile_log": [
+    "2026-11-23 pass 1: OK on attempt 1 and all three verdicts correct, but the free-text reason asserted other_live_surfaces was 'non-empty' when it was []. Schema and acceptance cannot gate prose. Added a typed other_surfaces_count checked against the derived count, and told the model to keep figures out of the sentence."
+  ]
+}
