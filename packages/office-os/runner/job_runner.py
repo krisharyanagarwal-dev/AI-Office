@@ -197,6 +197,22 @@ def check_acceptance(answer, evidence, rules):
             if answer.get(field) is None:
                 problems.append(
                     "claimed " + label + " but " + field + " is null (" + rule.get("why", "") + ")")
+        for field, ev_key in (rule.get("require_output_matches_evidence") or {}).items():
+            expected = evidence.get(ev_key, "<<absent>>")
+            if expected == "<<absent>>":
+                problems.append("cannot check " + field + ": evidence has no " + ev_key)
+                continue
+            actual = answer.get(field)
+            same = as_text(actual).lower() == as_text(expected).lower()
+            if not same:
+                try:
+                    same = float(actual) == float(expected)
+                except (TypeError, ValueError):
+                    same = False
+            if not same:
+                problems.append(
+                    "reported " + field + "=" + as_text(actual) + " but the evidence says " +
+                    ev_key + "=" + as_text(expected) + " (" + rule.get("why", "") + ")")
     return problems
 
 
