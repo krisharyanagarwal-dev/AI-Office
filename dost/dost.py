@@ -620,6 +620,7 @@ def _call_with_retry(
     task_id: str,
     pool_cooldowns: dict[str, int],
     max_retries: int = 2,
+    debug: bool = False,
 ) -> tuple[str | None, str | None, str | None, str | None]:
     """Call a model with cooldown-aware pool selection and auto-retry.
 
@@ -633,15 +634,35 @@ def _call_with_retry(
             model, pool_name, _ = _select_available_pool(
                 orchestrator, agent_info, pool_cooldowns
             )
+            if debug:
+                print(
+                    f"    [debug] attempt {attempt + 1}: agent={agent_info.get('agent_id')} "
+                    f"model={model} pool={pool_name} task={task_id}"
+                )
             response_text, model_used, pool_used = orchestrator.call_model(
                 model, pool_name, full_prompt, task_id=task_id, priority="normal",
             )
+            if debug:
+                status = "OK" if response_text else "EMPTY"
+                print(
+                    f"    [debug] attempt {attempt + 1} result: {status} "
+                    f"model={model_used} pool={pool_used}"
+                )
             return response_text, model_used, pool_used, None
         except Exception as e:
             last_error = str(e)
+            if debug:
+                print(
+                    f"    [debug] attempt {attempt + 1} failed: {e}"
+                )
             # Refresh cooldowns before retry (pool may have just cooled/heated)
             pool_cooldowns = _check_pool_cooldowns()
             continue
+    if debug:
+        print(
+            f"    [debug] all {max_retries + 1} attempts exhausted for "
+            f"agent={agent_info.get('agent_id')} task={task_id}: {last_error}"
+        )
     return None, None, None, last_error
 
 
@@ -1048,6 +1069,7 @@ def dispatch_prompt_to_fleet(
     parent_task_id: str | None = None,
     chain: dict | None = None,
     workspace_id: str | None = None,
+    debug: bool = False,
 ) -> dict:
     """Submit a prompt to the fleet orchestrator by writing a task file.
 
@@ -1060,6 +1082,7 @@ def dispatch_prompt_to_fleet(
     (task threading / multi-turn follow-up).
     If chain is given (dict with prompt/agent_id/priority), the dispatcher
     auto-dispatches a follow-up task when this task completes (done).
+    If debug is True, prints the task being written.
     """
     import uuid
 
@@ -1090,6 +1113,13 @@ def dispatch_prompt_to_fleet(
         task["title"] = f"Chain parent: {prompt[:50]}"
     if workspace_id:
         task["metadata"]["workspace_id"] = workspace_id
+    if debug:
+        print(
+            f"[debug] dispatch_prompt_to_fleet: task_id={task_id} agent_id="
+            f"{task['agent_id']} priority={priority} dry_run={dry_run} "
+            f"parent={parent_task_id or 'none'} chain={chain is not None} "
+            f"workspace={workspace_id or 'default'}"
+        )
     if dry_run:
         return {
             "ok": True,
@@ -1104,6 +1134,8 @@ def dispatch_prompt_to_fleet(
         HIVE_DIR.mkdir(parents=True, exist_ok=True)
         task_path = HIVE_DIR / f"{task_id}.json"
         task_path.write_text(json.dumps(task, indent=2))
+        if debug:
+            print(f"[debug] wrote task file {task_path}")
         return {
             "ok": True,
             "task_id": task_id,
@@ -1112,6 +1144,8 @@ def dispatch_prompt_to_fleet(
             "message": f"Prompt submitted to fleet (task {task_id}). The dispatcher will execute it on the next cycle.",
         }
     except Exception as e:
+        if debug:
+            print(f"[debug] failed to write task file: {e}")
         return {"ok": False, "error": str(e)}
 
 
@@ -1161,7 +1195,10 @@ def _synthesize_debate(prompt: str, answers: list[dict]) -> str:
     )
 
 
-def dispatch_debate_to_fleet(prompt: str, agents: list[str] | None = None) -> dict:
+def dispatch_debate_to_fleet(
+    prompt: str, agents: list[str] | None = None, dry_run: bool = False,
+    debug: bool = False,
+) -> dict:
     """Fan one question out to multiple pro agents, each answering independently.
 
     Writes ONE task file per agent to HIVE_DIR (metadata.source="dost",
@@ -1172,6 +1209,10 @@ def dispatch_debate_to_fleet(prompt: str, agents: list[str] | None = None) -> di
 
     Returns {"debate_id", "task_ids", "agents", "answers", "synthesis"}.
     Read-only: paper-only, no live orders, no dispatcher writes.
+
+    If dry_run is True, shows what would be dispatched without making provider
+    calls or writing task files.
+    If debug is True, prints model selection, pool routing, and retry attempts.
     """
     import uuid
 
@@ -1182,6 +1223,27 @@ def dispatch_debate_to_fleet(prompt: str, agents: list[str] | None = None) -> di
     known = [a for a in dict.fromkeys(agents) if a in agent_tiers]
     if not known:
         known = [a for a in agents if a in agent_tiers] or list(DEBATE_DEFAULT_AGENTS)
+
+    if dry_run:
+        debate_id = f"debate-{uuid.uuid4().hex[:8]}"
+        if debug:
+            print(
+                f"[debug] debate dry-run: would fan '{prompt}' to {len(known)} agents: "
+                f"{', '.join(known)}."
+            )
+        return {
+            "debate_id": debate_id,
+            "task_ids": [],
+            "agents": known,
+            "answers": [],
+            "synthesis": None,
+            "dry_run": True,
+            "message": (
+                f"[DRY RUN] Would fan '{prompt}' to {len(known)} agents: "
+                f"{', '.join(known)}."
+            ),
+            "cost_units": 0,
+        }
 
     # Answer cache: return cached result if question was asked recently.
     question_hash = _hash_question(prompt)
@@ -1252,6 +1314,7 @@ def dispatch_debate_to_fleet(prompt: str, agents: list[str] | None = None) -> di
             task_id=f"debate-{debate_id}-{agent_id}",
             pool_cooldowns=pool_cooldowns,
             max_retries=2,
+            debug=debug,
         )
 
         # Write one task file per agent to HIVE_DIR for the record.
@@ -2273,8 +2336,8 @@ def load_template(name: str) -> dict | None:
         return None
 
 
-def _handle_workspace_command(args) -> None:
-    """Handle the `dost workspace` subcommand group."""
+def _handle_workspace_command(args) -> int:
+    """Handle the `dost workspace` subcommand group. Returns an exit code."""
     action = args.action
     rest = args.rest
     if action == "list":
@@ -2291,7 +2354,7 @@ def _handle_workspace_command(args) -> None:
     elif action == "create":
         if not rest:
             print("Usage: dost workspace create <name> [--owner <email>] [--plan <plan>]")
-            return
+            return 1
         name = rest[0]
         owner = "admin@default.local"
         plan = "starter"
@@ -2310,14 +2373,19 @@ def _handle_workspace_command(args) -> None:
     elif action == "add-user":
         if len(rest) < 2:
             print("Usage: dost workspace add-user <workspace_id> <email> [role]")
-            return
+            return 1
         workspace_id = rest[0]
         email = rest[1]
         role = rest[2] if len(rest) > 2 else "viewer"
+        if get_workspace(workspace_id) is None:
+            print(f"Workspace '{workspace_id}' not found.")
+            return 1
         added = add_user(workspace_id, email, role)
         print(json.dumps(added, indent=2))
     else:
         print("Unknown workspace action. Use: list | create <name> | add-user <workspace_id> <email> [role]")
+        return 1
+    return 0
 
 
 def main():
@@ -2333,8 +2401,7 @@ def main():
         _ws_parser.add_argument("rest", nargs="*", help="Additional arguments for the workspace action")
         _ws_args, _ws_extras = _ws_parser.parse_known_args(_sys.argv[2:])
         _ws_args.rest = list(_ws_args.rest) + list(_ws_extras)
-        _handle_workspace_command(_ws_args)
-        return
+        sys.exit(_handle_workspace_command(_ws_args))
 
     parser = argparse.ArgumentParser(description="THE CLAUDE COMPANY — Dost")
     parser.add_argument("message", nargs="?")

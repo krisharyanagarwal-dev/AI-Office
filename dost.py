@@ -61,6 +61,7 @@ def main():
     parser.add_argument("--history-regex", help="Search dost task history by regex pattern")
     parser.add_argument("--results-status", choices=["done", "error", "in_progress", "pending"], help="Filter --results by status")
     parser.add_argument("--results-agent", help="Filter --results by agent_id")
+    parser.add_argument("--priority", choices=["low", "normal", "high", "critical"], default="normal", help="Task priority for --dispatch and --batch")
     parser.add_argument("--briefing-now", action="store_true", help="Generate on-demand briefing immediately")
     parser.add_argument("--export", choices=["md", "json"], help="Export last debate/dispatch results to file")
     parser.add_argument("--synthesis", action="store_true", help="Show detailed synthesis report over all findings")
@@ -85,12 +86,16 @@ def main():
     parser.add_argument("--add-user", nargs=2, metavar=("EMAIL", "ROLE"),
                         help="Add a user (email role) to the current/default workspace")
 
-    # `dost workspace` subcommand group for workspace management
-    subparsers = parser.add_subparsers(dest="command", help="Subcommands")
-    ws_parser = subparsers.add_parser("workspace", help="Workspace management")
-    ws_parser.add_argument("action", choices=["list", "create", "add-user"],
-                           help="Workspace action: list | create <name> | add-user <workspace_id> <email> [role]")
-    ws_parser.add_argument("rest", nargs="*", help="Additional arguments for the workspace action")
+    # Route `dost workspace <action> ...` through a dedicated subparser so the
+    # `message` positional (nargs="?") does not steal the subcommand name.
+    if len(sys.argv) > 1 and sys.argv[1] == "workspace":
+        _ws_parser = argparse.ArgumentParser(prog="dost workspace")
+        _ws_parser.add_argument("action", choices=["list", "create", "add-user"],
+                                help="Workspace action: list | create <name> | add-user <workspace_id> <email> [role]")
+        _ws_parser.add_argument("rest", nargs="*", help="Additional arguments for the workspace action")
+        _ws_args, _ws_extras = _ws_parser.parse_known_args(sys.argv[2:])
+        _ws_args.rest = list(_ws_args.rest) + list(_ws_extras)
+        sys.exit(_handle_workspace_command(_ws_args))
 
     args = parser.parse_args()
 
@@ -100,8 +105,6 @@ def main():
         sys.exit(code)
     if args.push_telegram:
         _dost_module._push_telegram_briefing()
-    elif args.command == "workspace":
-        _handle_workspace_command(args)
     elif args.briefing:
         print(generate_daily_briefing())
     elif args.status:
@@ -138,15 +141,18 @@ def main():
                 sys.exit(1)
         result = _dost_module.dispatch_prompt_to_fleet(
             prompt,
-            priority=args.results_status or "normal",
+            priority=args.priority,
             dry_run=args.dry_run,
             parent_task_id=args.parent,
             chain=chain,
             workspace_id=workspace_id,
+            debug=args.debug,
         )
         print(json.dumps(result, indent=2))
         if args.debug:
-            print(f"\n🔧 Debug: dispatch_prompt_to_fleet called with priority={args.results_status or 'normal'}, dry_run={args.dry_run}, parent={args.parent or 'none'}, chain={chain is not None}")
+            print(f"\n🔧 Debug: dispatch_prompt_to_fleet called with priority={args.priority}, dry_run={args.dry_run}, parent={args.parent or 'none'}, chain={chain is not None}")
+        if not result.get("ok"):
+            sys.exit(1)
     elif args.batch:
         chain = None
         if args.chain:
@@ -157,26 +163,40 @@ def main():
                 sys.exit(1)
         prompts = [p.strip() for p in args.batch.split(",") if p.strip()]
         print(f"Batch dispatch: {len(prompts)} prompts")
+        any_failure = False
         for i, prompt in enumerate(prompts, 1):
             print(f"\n[{i}/{len(prompts)}] {prompt[:80]}")
             result = _dost_module.dispatch_prompt_to_fleet(
                 prompt,
-                priority="normal",
+                priority=args.priority,
                 dry_run=args.dry_run,
                 parent_task_id=args.parent,
                 chain=chain,
+                debug=args.debug,
             )
             print(json.dumps(result, indent=2))
             if args.debug:
-                print(f"  [debug] priority=normal, dry_run={args.dry_run}, parent={args.parent or 'none'}, task_id={result.get('task_id', '?')}")
+                print(f"  [debug] priority={args.priority}, dry_run={args.dry_run}, parent={args.parent or 'none'}, task_id={result.get('task_id', '?')}")
+            if not result.get("ok"):
+                any_failure = True
+        if any_failure:
+            sys.exit(1)
     elif args.debate is not None:
         prompt = args.debate if args.debate else input("Debate question: ")
-        result = _dost_module.dispatch_debate_to_fleet(prompt)
+        result = _dost_module.dispatch_debate_to_fleet(prompt, dry_run=args.dry_run, debug=args.debug)
         print(json.dumps(result, indent=2))
+        if args.debug:
+            print(
+                f"\n🔧 Debug: dispatch_debate_to_fleet called with dry_run={args.dry_run}, "
+                f"agents={result.get('agents', [])}, task_ids={result.get('task_ids', [])}"
+            )
         if result.get("cost_units"):
             print(f"\n💰 Debate cost: {result['cost_units']} cost_units")
         if result.get("_cached"):
             print("⚡ Served from answer cache (no provider calls)")
+        answers = result.get("answers") or []
+        if answers and all(a.get("error") for a in answers):
+            sys.exit(1)
     elif args.results:
         tasks = _dost_module.list_recent_dost_tasks(
             status_filter=args.results_status,
@@ -286,7 +306,7 @@ def main():
     else:
         print(dost_greeting())
         print("\nI'm your dost. Tell me what you need: research, trading, code, writing, strategy.")
-        print("Commands: --briefing, --briefing-now, --push-telegram, --status, --dispatch, --dry-run, --batch, --debug, --parent, --results, --results-status, --results-agent, --history, --history-regex, --export, --synthesis, --review, --auto-archive, --weekly-digest, --memory, --context, --health, --doctor, --department X")
+        print("Commands: --briefing, --briefing-now, --push-telegram, --status, --dispatch, --dry-run, --batch, --debug, --parent, --priority, --results, --results-status, --results-agent, --history, --history-regex, --export, --synthesis, --review, --auto-archive, --weekly-digest, --memory, --context, --health, --doctor, --department X")
 
 
 if __name__ == "__main__":
