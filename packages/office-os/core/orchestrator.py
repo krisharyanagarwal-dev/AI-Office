@@ -13,7 +13,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from pathlib import Path
 
-sys.path.insert(0, "/Users/aryanagarwal/office-os")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core.hive import Hive
 from core.router import ProviderRouter
 from agents.god_agent import GodAgent
@@ -23,7 +23,13 @@ from core.autopilot import Autopilot
 from core.sources import collect_all
 import threading
 
-ORG_STATE_PATH = Path("/Users/aryanagarwal/office-os/logs/org_state.json")
+# logs/ is the ONE part of ~/office-os that is a real directory rather than a
+# symlink into this monorepo, so deriving it from __file__ would silently move
+# the orchestrator's state into packages/office-os/logs/ and abandon the live
+# org_state.json. Honour OFFICE_OS_HOME instead: default keeps the laptop
+# byte-identical, and the mini's plist points it at that checkout.
+OFFICE_OS_HOME = Path(os.environ.get("OFFICE_OS_HOME") or (Path.home() / "office-os"))
+ORG_STATE_PATH = OFFICE_OS_HOME / "logs" / "org_state.json"
 ORG_REFRESH_SEC = 300
 
 
@@ -88,7 +94,12 @@ def release_lock(lock_path: str):
 
 
 class Orchestrator:
-    def __init__(self, config_path="/Users/aryanagarwal/office-os/config/office.json"):
+    def __init__(self, config_path=None):
+        # Default resolves next to this checkout, so the orchestrator runs
+        # under any home -- it used to hardcode /Users/aryanagarwal. Kept as
+        # str: ProviderRouter and the config readers take the path as text.
+        if config_path is None:
+            config_path = str(Path(__file__).resolve().parents[1] / "config" / "office.json")
         self.config_path = config_path
         with open(config_path) as f:
             self.config = json.load(f)
@@ -309,7 +320,7 @@ class Orchestrator:
     def run(self):
         """Main event loop - runs until shutdown."""
         # Acquire lock to prevent double-running
-        lock_path = "/Users/aryanagarwal/office-os/logs/orchestrator.lock"
+        lock_path = str(OFFICE_OS_HOME / "logs" / "orchestrator.lock")
         if not acquire_lock(lock_path):
             print("[orchestrator] Another instance is already running. Exiting.")
             return
