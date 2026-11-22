@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Mac mini variant of the office orchestrator.
+
+     Code comes from the read-only checkout at ~/ai-office-src, which
+     import-integrity.sh hard-resets to origin every 30 min. State does NOT:
+     OFFICE_OS_HOME points at ~/office-os, outside the checkout, because that
+     reset runs `git clean -fd` and would otherwise delete the org state and
+     logs every half hour.
+
+     Interpreter is the homebrew build (3.15.2); the mini has no Python
+     framework install, and its system python is 3.9.
+
+     NOT loaded yet. The mini's ~/.env carries only GEMINI_API_KEY, so the
+     orchestrator would run on one provider instead of the configured
+     fallback chain. Its NVIDIA NIM keys live behind the local nv_manager
+     proxy on :4200, not in ~/.env. Resolve that first -- either add the keys
+     to the mini's ~/.env, or give provider_client an endpoint override so it
+     routes through :4200 -- then:
+
+       launchctl bootstrap gui/$(id -u) \
+         ~/Library/LaunchAgents/com.aryan.office-orchestrator.plist
+
+     and bootout the laptop's copy in the same breath: two orchestrators
+     against one org state is a double-dispatch, not redundancy. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.aryan.office-orchestrator</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/homebrew/bin/python3</string>
+		<string>-u</string>
+		<string>/Users/a/ai-office-src/packages/office-os/core/orchestrator.py</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/Users/a/ai-office-src/packages/office-os</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>PYTHONUNBUFFERED</key>
+		<string>1</string>
+		<key>OFFICE_OS_HOME</key>
+		<string>/Users/a/office-os</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>30</integer>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>StandardOutPath</key>
+	<string>/Users/a/office-os/logs/orchestrator.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/a/office-os/logs/orchestrator.log</string>
+</dict>
+</plist>
