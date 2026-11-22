@@ -6,7 +6,7 @@ Chaos engineering utilities for the Dost dispatcher:
 
 * :func:`inject_provider_failure` — temporarily mark a provider as unavailable.
 * :func:`run_chaos_test` — run dispatch tests while providers are failing.
-* :func:`test_graceful_degradation` — verify the system degrades (falls back)
+* :func:`check_graceful_degradation` — verify the system degrades (falls back)
   instead of crashing when providers fail.
 
 Provider failures are recorded in a module-level registry keyed by provider
@@ -30,7 +30,7 @@ __all__ = [
     "clear_provider_failure",
     "reset_failures",
     "run_chaos_test",
-    "test_graceful_degradation",
+    "check_graceful_degradation",
 ]
 
 # provider_name -> expiry timestamp (monotonic clock, seconds)
@@ -182,7 +182,7 @@ def _looks_like_degraded_response(response) -> bool:
     return bool(response)
 
 
-def test_graceful_degradation(dispatch_func: Callable) -> dict:
+def check_graceful_degradation(dispatch_func: Callable) -> dict:
     """Test that the system degrades gracefully when providers fail.
 
     Runs :func:`run_chaos_test` against a small battery of provider failure
@@ -258,8 +258,8 @@ if __name__ == "__main__":
     for r in summary["results"]:
         print("  ", r["provider"], "passed=", r["passed"], "error=", r["error"])
 
-    print("== test_graceful_degradation ==")
-    print(test_graceful_degradation(fake_dispatch))
+    print("== check_graceful_degradation ==")
+    print(check_graceful_degradation(fake_dispatch))
 
     reset_failures()
     print("== done ==")

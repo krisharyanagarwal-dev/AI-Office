@@ -51,6 +51,96 @@ from collab.activity_feed import get_activity_feed
 OFFICE_ROOT = Path("/Users/aryanagarwal/AI-Office/packages/office-os")
 CONFIG_DIR = OFFICE_ROOT / "config"
 
+
+def advisory_cost_cap_limit():
+    """Daily synthetic cost ceiling from office.json; None when not configured."""
+    try:
+        cfg = json.loads((CONFIG_DIR / "office.json").read_text())
+        cap = (cfg.get("cost_cap") or {}) if isinstance(cfg, dict) else {}
+        value = cap.get("daily_units")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        value = int(value)
+        return value if value > 0 else None
+    except Exception:
+        return None
+
+
+def _daily_ledger_cost(pnl_path: Path) -> int:
+    """Cost booked in the ledger's local day.
+
+    office_pnl.json entries are stamped with local wall-clock time, so the day
+    key used to sum them must be local too. A UTC key reads the previous
+    local day's spend as "today" for part of every local day.
+    """
+    pnl = json.loads(pnl_path.read_text())
+    if not isinstance(pnl, list):
+        return 0
+    today = datetime.now().strftime("%Y-%m-%d")
+    return sum(
+        t.get("cost_units", 0)
+        for t in pnl
+        if isinstance(t, dict) and str(t.get("created_at", "")).startswith(today)
+    )
+
+
+def _workspace_pnl_costs(pnl_dir: Path) -> dict:
+    """Aggregate the workspace P&L entries by local day.
+
+    Entries are stamped with local wall-clock time, so the day keys used to
+    bucket them must be local too.
+    """
+    stats = {
+        "cost_units_today": 0,
+        "net_value_today": 0,
+        "tasks_completed_today": 0,
+        "debate_calls_today": 0,
+        "voice_dispatches_today": 0,
+        "cost_per_agent": {},
+        "cost_per_type": {},
+        "cost_yesterday": 0,
+    }
+    if not pnl_dir.exists():
+        return stats
+
+    now = datetime.now()
+    today_str = now.strftime("%Y-%m-%d")
+    yesterday_str = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    for f in sorted(pnl_dir.iterdir()):
+        if f.suffix != ".json":
+            continue
+        try:
+            raw = json.loads(f.read_text())
+        except Exception:
+            continue
+        entries = raw if isinstance(raw, list) else [raw]
+        for t in entries:
+            if not isinstance(t, dict):
+                continue
+            created = t.get("created_at", "")
+            day = created[:10] if created else ""
+            cost = int(t.get("cost_units", 0) or 0)
+            agent = t.get("agent_id", "unknown")
+            mtype = t.get("metric_type", "task")
+            if day == today_str:
+                stats["cost_units_today"] += cost
+                stats["net_value_today"] += int(t.get("net_value", 0) or 0)
+                per_agent = stats["cost_per_agent"]
+                per_agent[agent] = per_agent.get(agent, 0) + cost
+                per_type = stats["cost_per_type"]
+                per_type[mtype] = per_type.get(mtype, 0) + cost
+                if t.get("status") == "done":
+                    stats["tasks_completed_today"] += 1
+                if t.get("source") == "debate":
+                    stats["debate_calls_today"] += 1
+                md = t.get("metadata", {}) or {}
+                if md.get("voice_dispatch"):
+                    stats["voice_dispatches_today"] += 1
+            elif day == yesterday_str:
+                stats["cost_yesterday"] += cost
+    return stats
+
 # Qwen autonomous worker directories
 QWEN_DIR = Path("/Users/aryanagarwal/.openclaw/autonomous-qwen")
 TASK_QUEUE_DIR = QWEN_DIR / "queue"
@@ -1673,6 +1763,268 @@ def escape(s):
     return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+HIVE_METRICS_CACHE_TTL_SEC = 30
+HIVE_METRICS_PERSIST_INTERVAL_SEC = 60
+HIVE_METRICS_REFRESH_INTERVAL_SEC = 30
+HIVE_METRICS_STATE_FILE = str(OFFICE_ROOT / "state" / "hive_metrics.json")
+_HIVE_METRICS_CACHE: dict = {}
+_HIVE_METRICS_FILE_STATE: dict = {}
+_HIVE_METRICS_STATE_LOADED_PATH = None
+_HIVE_METRICS_LAST_PERSIST_TS = 0.0
+_HIVE_METRICS_REFRESH_RUNNING = False
+_HIVE_METRICS_LOCK = threading.Lock()
+_HIVE_METRICS_SCAN_LOCK = threading.Lock()
+
+
+def _empty_hive_metrics() -> dict:
+    return {
+        "tasks_created_total": 0,
+        "tasks_done_total": 0,
+        "errors_total": 0,
+        "tasks_created": 0,
+        "tasks_done": 0,
+        "errors_cycle": 0,
+        "tasks_per_min": 0,
+    }
+
+
+def _load_hive_metrics_state() -> bool:
+    """Load the persisted aggregate and per-file index from disk."""
+    global _HIVE_METRICS_FILE_STATE, _HIVE_METRICS_STATE_LOADED_PATH
+    path = str(HIVE_METRICS_STATE_FILE)
+    try:
+        raw = json.loads(Path(path).read_text())
+    except Exception:
+        raw = None
+    if not isinstance(raw, dict):
+        _HIVE_METRICS_STATE_LOADED_PATH = path
+        return False
+
+    aggregate = raw.get("aggregate")
+    files = raw.get("files")
+    if not isinstance(aggregate, dict) or not isinstance(files, dict):
+        _HIVE_METRICS_STATE_LOADED_PATH = path
+        return False
+
+    data = _empty_hive_metrics()
+    for key in data:
+        value = aggregate.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            data[key] = value
+    try:
+        ts = float(raw.get("ts") or 0.0)
+    except (TypeError, ValueError):
+        ts = 0.0
+
+    _HIVE_METRICS_CACHE["ts"] = ts
+    _HIVE_METRICS_CACHE["data"] = data
+    _HIVE_METRICS_CACHE["ready"] = True
+    _HIVE_METRICS_FILE_STATE = dict(files)
+    _HIVE_METRICS_STATE_LOADED_PATH = path
+    return True
+
+
+def _ensure_hive_metrics_state_loaded() -> None:
+    if _HIVE_METRICS_STATE_LOADED_PATH != str(HIVE_METRICS_STATE_FILE):
+        _load_hive_metrics_state()
+
+
+def _save_hive_metrics_state(data: dict) -> None:
+    global _HIVE_METRICS_LAST_PERSIST_TS
+    try:
+        path = Path(HIVE_METRICS_STATE_FILE)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(
+            json.dumps({"ts": time.time(), "aggregate": data, "files": _HIVE_METRICS_FILE_STATE})
+        )
+        tmp.replace(path)
+        _HIVE_METRICS_LAST_PERSIST_TS = time.time()
+    except Exception:
+        pass
+
+
+def _refresh_hive_metrics() -> dict:
+    """Rescan the hive and return the fresh aggregate.
+
+    Only files whose mtime/size changed are re-read, so a refresh over a
+    hive with thousands of tasks costs a directory listing plus a handful of
+    parses instead of re-reading everything.
+    """
+    global _HIVE_METRICS_FILE_STATE
+
+    with _HIVE_METRICS_SCAN_LOCK:
+        _ensure_hive_metrics_state_loaded()
+        now = time.time()
+
+        CYCLE_WINDOW_SEC = 24 * 60 * 60  # per-cycle = last 24 hours
+        MIN_WINDOW_SEC = 60
+
+        state = dict(_HIVE_METRICS_FILE_STATE)
+        seen = set()
+        changed = False
+
+        try:
+            hive_files = glob.glob(os.path.join(HIVE_DIR, "*.json"))
+        except Exception:
+            hive_files = []
+
+        for hive_file in hive_files:
+            name = os.path.basename(hive_file)
+            seen.add(name)
+            try:
+                stat = os.stat(hive_file)
+            except OSError:
+                continue
+
+            previous = state.get(name)
+            if (
+                isinstance(previous, list)
+                and len(previous) >= 2
+                and previous[0] == stat.st_mtime_ns
+                and previous[1] == stat.st_size
+            ):
+                continue
+
+            try:
+                with open(hive_file) as f:
+                    task = json.load(f)
+            except Exception:
+                continue
+            if not isinstance(task, dict):
+                continue
+
+            is_jev = task.get("metadata", {}).get("source") == "jev-cloud-orchestrator"
+            status = task.get("status")
+            if not isinstance(status, str):
+                status = ""
+            raw_ts = task.get("updated_at") or task.get("created_at")
+            task_time = None
+            if raw_ts:
+                try:
+                    task_time = time.mktime(time.strptime(raw_ts, "%Y-%m-%dT%H:%M:%SZ"))
+                except (TypeError, ValueError):
+                    task_time = None
+            state[name] = [stat.st_mtime_ns, stat.st_size, 1 if is_jev else 0, status, task_time]
+            changed = True
+
+        for name in list(state.keys()):
+            if name not in seen:
+                del state[name]
+                changed = True
+
+        created_total = 0
+        done_total = 0
+        errors_total = 0
+        created_cycle = 0
+        done_cycle = 0
+        errors_cycle = 0
+        tasks_per_min = 0
+
+        for entry in state.values():
+            if not isinstance(entry, list) or len(entry) < 5:
+                continue
+            _, _, is_jev, status, task_time = entry[:5]
+            if not is_jev:
+                continue
+            created_total += 1
+            if status == "done":
+                done_total += 1
+            if status == "error":
+                errors_total += 1
+            if task_time is not None:
+                age_sec = now - task_time
+                if age_sec <= CYCLE_WINDOW_SEC:
+                    created_cycle += 1
+                    if status == "done":
+                        done_cycle += 1
+                    if status == "error":
+                        errors_cycle += 1
+                if age_sec <= MIN_WINDOW_SEC:
+                    tasks_per_min += 1
+
+        data = {
+            "tasks_created_total": created_total,
+            "tasks_done_total": done_total,
+            "errors_total": errors_total,
+            "tasks_created": created_cycle,
+            "tasks_done": done_cycle,
+            "errors_cycle": errors_cycle,
+            "tasks_per_min": tasks_per_min,
+        }
+
+        _HIVE_METRICS_FILE_STATE = state
+        _HIVE_METRICS_CACHE["ts"] = now
+        _HIVE_METRICS_CACHE["data"] = data
+        _HIVE_METRICS_CACHE["ready"] = True
+        if changed and now - _HIVE_METRICS_LAST_PERSIST_TS >= HIVE_METRICS_PERSIST_INTERVAL_SEC:
+            _save_hive_metrics_state(data)
+        return data
+
+
+def _run_hive_metrics_refresh() -> None:
+    global _HIVE_METRICS_REFRESH_RUNNING
+    try:
+        _refresh_hive_metrics()
+    except Exception:
+        pass
+    finally:
+        with _HIVE_METRICS_LOCK:
+            _HIVE_METRICS_REFRESH_RUNNING = False
+
+
+def _schedule_hive_metrics_refresh() -> bool:
+    """Start a hive refresh in the background; only one runs at a time."""
+    global _HIVE_METRICS_REFRESH_RUNNING
+    with _HIVE_METRICS_LOCK:
+        if _HIVE_METRICS_REFRESH_RUNNING:
+            return False
+        _HIVE_METRICS_REFRESH_RUNNING = True
+    threading.Thread(target=_run_hive_metrics_refresh, daemon=True).start()
+    return True
+
+
+def _hive_metrics_refresher_loop(stop_event: threading.Event, interval_sec: float) -> None:
+    """Keep the hive aggregate current without waiting for a request."""
+    while not stop_event.is_set():
+        try:
+            _schedule_hive_metrics_refresh()
+        except Exception:
+            pass
+        stop_event.wait(interval_sec)
+
+
+def _start_hive_metrics_refresher(
+    interval_sec: float = HIVE_METRICS_REFRESH_INTERVAL_SEC,
+) -> threading.Event:
+    """Start the background refresher. Setting the returned event stops it."""
+    stop_event = threading.Event()
+    threading.Thread(
+        target=_hive_metrics_refresher_loop,
+        args=(stop_event, interval_sec),
+        name="hive-metrics-refresher",
+        daemon=True,
+    ).start()
+    return stop_event
+
+
+def _hive_task_metrics() -> dict:
+    """Return the last-known hive aggregate without waiting for a scan.
+
+    The scan itself is expensive on a hive with thousands of tasks, so it
+    runs in the background and readers get the previous aggregate straight
+    away.
+    """
+    _ensure_hive_metrics_state_loaded()
+    cached = _HIVE_METRICS_CACHE.get("data")
+    if not isinstance(cached, dict):
+        cached = _empty_hive_metrics()
+        _HIVE_METRICS_CACHE["data"] = cached
+    if time.time() - _HIVE_METRICS_CACHE.get("ts", 0.0) >= HIVE_METRICS_CACHE_TTL_SEC:
+        _schedule_hive_metrics_refresh()
+    return cached
+
+
 class OfficeHandler(BaseHTTPRequestHandler):
     current_user = None
     current_sid = None
@@ -2359,23 +2711,6 @@ class OfficeHandler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
-        # Count JEV tasks in Hive
-        jev_created = 0
-        jev_done = 0
-        try:
-            for hive_file in glob.glob(os.path.join(HIVE_DIR, "*.json")):
-                try:
-                    with open(hive_file) as f:
-                        t = json.load(f)
-                    if t.get("metadata", {}).get("source") == "jev-cloud-orchestrator":
-                        jev_created += 1
-                        if t.get("status") == "done":
-                            jev_done += 1
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
         # Ollama status
         ollama_ok = False
         try:
@@ -2388,53 +2723,16 @@ class OfficeHandler(BaseHTTPRequestHandler):
             pass
 
         # JEV throughput metrics: per-cycle (last 24h) counts, tasks/min, error rate
-        now = time.time()
-        CYCLE_WINDOW_SEC = 24 * 60 * 60  # per-cycle = last 24 hours
-        MIN_WINDOW_SEC = 60
-
-        jev_created_total = 0
-        jev_done_total = 0
-        jev_errors_total = 0
-        jev_created_cycle = 0
-        jev_done_cycle = 0
-        jev_errors_cycle = 0
-        jev_tasks_per_min = 0
-
-        try:
-            for hive_file in glob.glob(os.path.join(HIVE_DIR, "*.json")):
-                try:
-                    with open(hive_file) as f:
-                        t = json.load(f)
-                    if t.get("metadata", {}).get("source") != "jev-cloud-orchestrator":
-                        continue
-
-                    # Lifetime counts
-                    jev_created_total += 1
-                    if t.get("status") == "done":
-                        jev_done_total += 1
-                    if t.get("status") == "error":
-                        jev_errors_total += 1
-
-                    # Per-cycle counts (last 24h)
-                    ts = t.get("updated_at") or t.get("created_at")
-                    if ts:
-                        try:
-                            task_time = time.mktime(time.strptime(ts, "%Y-%m-%dT%H:%M:%SZ"))
-                            age_sec = now - task_time
-                            if age_sec <= CYCLE_WINDOW_SEC:
-                                jev_created_cycle += 1
-                                if t.get("status") == "done":
-                                    jev_done_cycle += 1
-                                if t.get("status") == "error":
-                                    jev_errors_cycle += 1
-                            if age_sec <= MIN_WINDOW_SEC:
-                                jev_tasks_per_min += 1
-                        except ValueError:
-                            pass
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        hive_metrics = _hive_task_metrics()
+        jev_created_total = hive_metrics["tasks_created_total"]
+        jev_done_total = hive_metrics["tasks_done_total"]
+        jev_errors_total = hive_metrics["errors_total"]
+        jev_created_cycle = hive_metrics["tasks_created"]
+        jev_done_cycle = hive_metrics["tasks_done"]
+        jev_errors_cycle = hive_metrics["errors_cycle"]
+        jev_tasks_per_min = hive_metrics["tasks_per_min"]
+        jev_data_ready = bool(_HIVE_METRICS_CACHE.get("ready"))
+        jev_data_age_sec = round(max(0.0, time.time() - _HIVE_METRICS_CACHE.get("ts", 0.0)), 1)
 
         jev_calls_today = jev_created_cycle  # per-cycle calls
 
@@ -2473,6 +2771,10 @@ class OfficeHandler(BaseHTTPRequestHandler):
                 "tasks_created_total": jev_created_total,
                 "tasks_done_total": jev_done_total,
                 "error_rate_total": round(jev_errors_total / jev_created_total * 100, 1) if jev_created_total > 0 else 0,
+                # Provenance of the hive aggregate — false means the counters are
+                # a cold-start placeholder, not a measured value.
+                "data_ready": jev_data_ready,
+                "data_age_sec": jev_data_age_sec,
             },
             "ollama": {
                 "available": ollama_ok,
@@ -2800,53 +3102,20 @@ class OfficeHandler(BaseHTTPRequestHandler):
         tier_a, tier_b, tier_c = 13, 12, 7
 
         # --- Cost panel: per-agent, per-type, trend, headroom from workspace pnl ---
-        cost_units_today = 0
-        net_value_today = 0
-        tasks_completed_today = 0
-        debate_calls_today = 0
-        voice_dispatches_today = 0
         cost_class = "cost-ok"
-        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        yesterday_str = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
 
-        cost_per_agent = {}   # agent_id -> cost_units today
-        cost_per_type = {}    # metric_type -> cost_units today
-        cost_yesterday = 0
         try:
-            pnl_dir = workspace_pnl_dir("default")
-            if pnl_dir.exists():
-                for f in sorted(pnl_dir.iterdir()):
-                    if f.suffix != ".json":
-                        continue
-                    try:
-                        raw = json.loads(f.read_text())
-                        entries = raw if isinstance(raw, list) else [raw]
-                        for t in entries:
-                            if not isinstance(t, dict):
-                                continue
-                            created = t.get("created_at", "")
-                            day = created[:10] if created else ""
-                            cost = int(t.get("cost_units", 0) or 0)
-                            agent = t.get("agent_id", "unknown")
-                            mtype = t.get("metric_type", "task")
-                            if day == today_str:
-                                cost_units_today += cost
-                                net_value_today += int(t.get("net_value", 0) or 0)
-                                cost_per_agent[agent] = cost_per_agent.get(agent, 0) + cost
-                                cost_per_type[mtype] = cost_per_type.get(mtype, 0) + cost
-                                if t.get("status") == "done":
-                                    tasks_completed_today += 1
-                                if t.get("source") == "debate":
-                                    debate_calls_today += 1
-                                md = t.get("metadata", {}) or {}
-                                if md.get("voice_dispatch"):
-                                    voice_dispatches_today += 1
-                            elif day == yesterday_str:
-                                cost_yesterday += cost
-                    except Exception:
-                        continue
+            cost_stats = _workspace_pnl_costs(workspace_pnl_dir("default"))
         except Exception:
-            pass
+            cost_stats = _workspace_pnl_costs(Path("/nonexistent"))
+        cost_units_today = cost_stats["cost_units_today"]
+        net_value_today = cost_stats["net_value_today"]
+        tasks_completed_today = cost_stats["tasks_completed_today"]
+        debate_calls_today = cost_stats["debate_calls_today"]
+        voice_dispatches_today = cost_stats["voice_dispatches_today"]
+        cost_per_agent = cost_stats["cost_per_agent"]
+        cost_per_type = cost_stats["cost_per_type"]
+        cost_yesterday = cost_stats["cost_yesterday"]
 
         # Cost per agent rows
         cost_per_agent_rows = ""
@@ -3416,11 +3685,20 @@ class OfficeHandler(BaseHTTPRequestHandler):
         pools_available = sum(1 for p in pools.values() if p.get("available"))
         pools_total = len(pools)
 
+        error_rate = jev.get("error_rate")
+        error_rate_total = jev.get("error_rate_total")
+        if isinstance(error_rate, (int, float)) and isinstance(error_rate_total, (int, float)):
+            error_line = (
+                f"Error rate: {error_rate:.1f}% in the last 24h (all-time {error_rate_total:.1f}%)"
+            )
+        else:
+            error_line = "Error rate: unavailable"
+
         lines = [
             "Dost Doctor — System Health Check",
             "",
             f"Dispatcher: reachable, {jev.get('tasks_done',0)}/{jev.get('tasks_created',0)} tasks done ({jev.get('completion_rate',0):.0f}%)",
-            f"Error rate: {jev.get('error_rate_total',0):.1f}%",
+            error_line,
             f"Calls today: {jev.get('calls_today',0)}",
             f"Provider pools: {pools_available}/{pools_total} available",
             f"Free-tier headroom: {free.get('headroom_pct',0):.0f}%",
@@ -3433,20 +3711,20 @@ class OfficeHandler(BaseHTTPRequestHandler):
             status = "UP" if (avail and cd == 0) else f"COOLING {cd:.0f}s" if cd > 0 else "DOWN"
             lines.append(f"  {pname}: {status} (tier={pinfo.get('tier','?')})")
 
-        # Cost cap
+        # Cost cap (advisory; threshold comes from office.json)
         try:
             pnl_path = Path("/Users/aryanagarwal/.openclaw/office_pnl.json")
+            cap_limit = advisory_cost_cap_limit()
             if pnl_path.exists():
-                pnl = json.loads(pnl_path.read_text())
-                if isinstance(pnl, list):
-                    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-                    today_cost = sum(t.get("cost_units",0) for t in pnl if t.get("created_at","").startswith(today))
-                    lines.append(f"")
-                    lines.append(f"Today's cost: {today_cost} units")
-                    if today_cost > 100:
-                        lines.append(f"  ⚠ COST CAP EXCEEDED (100 units)")
-                    elif today_cost > 50:
-                        lines.append(f"  ⚠ Approaching cap")
+                today_cost = _daily_ledger_cost(pnl_path)
+                lines.append(f"")
+                lines.append(f"Today's cost: {today_cost} units")
+                if cap_limit is None:
+                    lines.append(f"  ⚠ No cost cap configured")
+                elif today_cost > cap_limit:
+                    lines.append(f"  ⚠ COST CAP EXCEEDED ({cap_limit} units, advisory)")
+                elif today_cost > cap_limit * 0.8:
+                    lines.append(f"  ⚠ Approaching cap ({cap_limit} units)")
         except Exception:
             pass
 
@@ -3655,6 +3933,7 @@ def run(port=8083):
         return
     try:
         server = ThreadingHTTPServer(("127.0.0.1", port), OfficeHandler)
+        _start_hive_metrics_refresher()
         print(f"Office OS web server running at http://localhost:{port}")
         print("Users: aryan (owner), demo (user)")
         print("Press Ctrl+C to stop")

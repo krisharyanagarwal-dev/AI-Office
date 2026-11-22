@@ -160,9 +160,15 @@ def fleet_section() -> str:
         total = len(pools)
         pid_file = (Path.home() / ".openclaw" / "jev-dispatcher.pid")
         pid = pid_file.read_text().strip() if pid_file.exists() else "?"
+        er = jev.get("error_rate")
+        er_total = jev.get("error_rate_total")
+        if isinstance(er, (int, float)) and isinstance(er_total, (int, float)):
+            error_text = f"error rate {er:.1f}% in the last 24h (all-time {er_total:.1f}%)"
+        else:
+            error_text = "error rate unavailable"
         lines.append(
             f"  Dispatcher: running (PID {pid}) | {jev.get('tasks_done',0)}/{jev.get('tasks_created',0)} tasks done "
-            f"({jev.get('completion_rate',0):.0f}%) | error rate {jev.get('error_rate_total',0):.1f}% "
+            f"({jev.get('completion_rate',0):.0f}%) | {error_text} "
             f"| {jev.get('calls_today',0)} calls today | {available}/{total} pools available "
             f"| {data.get('free_ceiling',{}).get('headroom_pct',0):.0f}% free-tier headroom"
         )

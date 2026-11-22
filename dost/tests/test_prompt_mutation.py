@@ -126,7 +126,7 @@ def run_mutation_test(prompt: str, dispatch_func: Callable,
     }
 
 
-def test_prompt_stability(prompt: str, dispatch_func: Callable) -> dict:
+def check_prompt_stability(prompt: str, dispatch_func: Callable) -> dict:
     """Test prompt stability by running mutation test.
 
     Args:

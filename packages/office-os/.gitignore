@@ -1,6 +1,7 @@
 # Runtime state: never versioned
 logs/
 tasks/
+state/
 mailbox/
 memory/
 inbox/

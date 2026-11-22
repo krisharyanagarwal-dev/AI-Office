@@ -10,6 +10,10 @@
     "max_retries_per_task": 3,
     "task_timeout_sec": 300
   },
+  "cost_cap": {
+    "daily_units": 5000,
+    "mode": "advisory"
+  },
   "provider_pools": {
     "mlx_local": {
       "provider": "mlx",
@@ -238,7 +242,7 @@
         "drawdown-analyst"
       ],
       "sources": [
-        "dashboard-hub:/api/trading"
+        "paper-book"
       ],
       "brief": "Enforce position sizing, max drawdown protocol, daily loss limits and exposure limits. Verify kill switch status and PAPER-only restrictions on every cycle.",
       "guardrails": [
@@ -256,7 +260,7 @@
         "cost-analyst"
       ],
       "sources": [
-        "dashboard-hub:/api/trading"
+        "paper-book"
       ],
       "brief": "Model transaction costs, slippage, funding and basis. Run cost_sensitivity on every edge claim; state venue, fee and funding assumption. Binance spot maker and taker are both 0.1% at VIP 0 — limit orders save nothing there.",
       "guardrails": [
@@ -274,7 +278,7 @@
         "exposure-analyst"
       ],
       "sources": [
-        "dashboard-hub:/api/trading"
+        "paper-book"
       ],
       "brief": "Size allocations across strategies, monitor correlated exposure, and enforce diversification. Aggregate exposure must stay within risk-management limits.",
       "guardrails": [
@@ -310,7 +314,7 @@
         "research-archivist"
       ],
       "sources": [
-        "dashboard-hub:/api/trading"
+        "paper-book"
       ],
       "brief": "Guard the PAPER-only boundary. Verify live_orders_allowed stays false, no order path exists in research/executor code, and every claim states venue, fee and funding. Audit kill switch LOCKED status.",
       "guardrails": [
@@ -376,7 +380,8 @@
         "office-registry",
         "office-wiring",
         "office-cadence",
-        "office-pools"
+        "office-pools",
+        "job-records"
       ],
       "brief": "Audit the office itself. Every other department looks outward; this one checks the office's own wiring: agents that have no tier or no persona, departments citing survey sources no collector produces, provider pools whose key is absent, and an autopilot that is enabled but has produced no rounds. Configured is not running, and enabled is not working. Report the defect, the config line, and the exact check that would prove it fixed.",
       "guardrails": [
@@ -386,6 +391,29 @@
         "a producer never verifies its own work: name the independent check",
         "fail closed: unverifiable is NOT-VERIFIED, never 'fine'",
         "paper/testnet only; never touch kill switches or order paths"
+      ]
+    },
+    {
+      "id": "assistant",
+      "leads": [
+        "general-assistant"
+      ],
+      "sources": [
+        "office-hud",
+        "office-registry"
+      ],
+      "brief": "The human-facing entry point for the whole company. Take any request, answer directly what can be answered, route the rest to the right specialised department, and synthesise across departments when a request spans them. Every number comes from live context: an unverifiable claim is NOT-VERIFIED, never 'fine'. Facts only, no directional or timing calls on securities.",
+      "guardrails": [
+        "paper/testnet only",
+        "no order path ever",
+        "live_orders_allowed stays false",
+        "advisory only: never start/stop/restart/delete/deploy — route infrastructure work to infrastructure-reliability",
+        "presence-only on keys: never read, print or copy a key value",
+        "never copy keys between machines",
+        "never touch trading or kill-switch jobs",
+        "fail closed: unverifiable is NOT-VERIFIED, never 'fine'",
+        "no directional or timing calls on securities; facts only",
+        "fleet writes stay inside autonomy.repo_allowlist"
       ]
     }
   ]

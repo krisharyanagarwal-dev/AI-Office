@@ -74,7 +74,7 @@ def _compute_consistency(answers: list) -> float:
     return total_overlap / len(answers[1:])
 
 
-def test_semantic_consistency(answers: list) -> float:
+def check_semantic_consistency(answers: list) -> float:
     """Test semantic consistency of answers using keyword overlap.
 
     Args:

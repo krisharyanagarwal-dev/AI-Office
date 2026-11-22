@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -250,7 +251,8 @@ def fallback_converse(task: str, context: str) -> str:
             return (
                 "Fleet is live right now: "
                 f"{st['tasks_done']}/{st['tasks_created']} tasks done "
-                f"({st['completion_rate']:.0f}% complete), error rate {st['error_rate_total']:.1f}%, "
+                f"({st['completion_rate']:.0f}% complete), error rate {st['error_rate']:.1f}% in the last 24h "
+                f"(all-time {st['error_rate_total']:.1f}%), "
                 f"{st['calls_today']} calls today, {st['pools_available']} provider pools available. "
                 "Run 'python dost.py --status' for the full readout, or 'python dost.py --dispatch' "
                 "to send a prompt to the fleet."
@@ -377,6 +379,11 @@ for anything not covered):
 
 DISPATCHER_METRICS_URL = "http://127.0.0.1:8083/metrics"
 HIVE_DIR = (Path(__file__).resolve().parents[1] / "packages" / "office-os" / "tasks")
+
+# A measured metrics aggregate older than this is treated as stale. The
+# metrics server refreshes the aggregate every 30s, so this leaves room for
+# several missed refreshes before the doctor calls it an outage.
+METRICS_MAX_AGE_SEC = 300
 OFFICE_CONFIG_PATH = (Path(__file__).resolve().parents[1] / "packages" / "office-os" / "config" / "office.json")
 
 
@@ -411,6 +418,16 @@ def cost_cap_status(cost_units: float, limit: int | None = None) -> tuple[bool, 
     return True, f"{detail} (cap {limit} units)"
 
 
+def _ledger_day(now: datetime | None = None) -> str:
+    """The day key used to bucket P&L ledger entries.
+
+    office_pnl.json entries are stamped with local wall-clock time, so the day
+    key used to sum them must be local too. A UTC key reads the previous
+    local day's spend as "today" for part of every local day.
+    """
+    return (now or datetime.now()).strftime("%Y-%m-%d")
+
+
 def _daily_cost_check(pnl_path: Path) -> tuple[bool, str]:
     try:
         if not pnl_path.exists():
@@ -418,7 +435,7 @@ def _daily_cost_check(pnl_path: Path) -> tuple[bool, str]:
         pnl = json.loads(pnl_path.read_text())
         if not isinstance(pnl, list):
             return True, "no P&L data"
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = _ledger_day()
         today_cost = sum(
             t.get("cost_units", 0)
             for t in pnl
@@ -429,14 +446,59 @@ def _daily_cost_check(pnl_path: Path) -> tuple[bool, str]:
         return False, f"cost cap check failed ({e})"
 
 
+def _cost_anomaly_check(pnl_path: Path) -> tuple[bool, str]:
+    """Compare today's booked cost with the trailing seven-day average."""
+    try:
+        if not pnl_path.exists():
+            return True, "no P&L file"
+        pnl = json.loads(pnl_path.read_text())
+        if not isinstance(pnl, list) or len(pnl) <= 1:
+            return True, "insufficient history"
+        now = datetime.now()
+        today = _ledger_day(now)
+        today_cost = sum(
+            t.get("cost_units", 0)
+            for t in pnl
+            if isinstance(t, dict) and str(t.get("created_at", "")).startswith(today)
+        )
+        past_costs = []
+        for i in range(1, 8):
+            day = _ledger_day(now - timedelta(days=i))
+            past_costs.append(
+                sum(
+                    t.get("cost_units", 0)
+                    for t in pnl
+                    if isinstance(t, dict) and str(t.get("created_at", "")).startswith(day)
+                )
+            )
+        avg_cost = sum(past_costs) / max(1, len(past_costs))
+        detail = f"Today: {today_cost}, 7-day avg: {avg_cost:.1f}"
+        if today_cost > avg_cost * 1.5 and today_cost > 20:
+            return False, f"{detail} — SPIKE DETECTED"
+        if today_cost > avg_cost * 1.2 and today_cost > 20:
+            return True, f"{detail} — elevated"
+        return True, f"{detail} — normal"
+    except Exception as e:
+        return False, f"cost anomaly check failed ({e})"
+
+
 # --- Local provider verification ---------------------------------------------
 # The dispatcher reports pool availability from its own state, so a local pool
 # can read "available" while its server is down. Local pools are probed
 # directly so unverifiable is reported as not-verified, never as up.
+# A local server that answers too slowly is alive but saturated: that is a
+# third state ("busy"), not the same as down and not the same as healthy.
 
 LOCAL_POOL_ENDPOINTS = {
     "mlx_local": "http://127.0.0.1:11435/v1/models",
 }
+
+
+def _probe_state_for_exception(exc: Exception) -> str:
+    for candidate in (exc, getattr(exc, "reason", None)):
+        if isinstance(candidate, (TimeoutError, socket.timeout)):
+            return "busy"
+    return "not-verified"
 
 
 def probe_local_pools(timeout: float = 3.0) -> dict[str, str]:
@@ -445,8 +507,8 @@ def probe_local_pools(timeout: float = 3.0) -> dict[str, str]:
         try:
             with urllib.request.urlopen(url, timeout=timeout) as response:
                 status[name] = "up" if getattr(response, "status", 0) == 200 else "not-verified"
-        except Exception:
-            status[name] = "not-verified"
+        except Exception as exc:
+            status[name] = _probe_state_for_exception(exc)
     return status
 
 
@@ -1056,9 +1118,42 @@ def _fetch_dispatcher_status() -> dict | None:
             "calls_today": jev.get("calls_today", 0),
             "headroom_pct": data.get("free_ceiling", {}).get("headroom_pct", 0),
             "pools_available": f"{available}/{total}",
+            "metrics_data_ready": bool(jev.get("data_ready", False)),
+            "metrics_data_age_sec": jev.get("data_age_sec"),
         }
     except Exception:
         return None
+
+
+def _dispatcher_log_age_sec() -> float | None:
+    """Age of the dispatcher's activity log, or None if it cannot be read."""
+    try:
+        log_path = Path.home() / ".openclaw" / "jev-dispatcher.log"
+        return time.time() - log_path.stat().st_mtime
+    except Exception:
+        return None
+
+
+def _metrics_freshness(status: dict | None) -> tuple[bool, str]:
+    """Decide whether the metrics the doctor reports are fresh.
+
+    The metrics payload carries its own provenance: data_ready says the
+    aggregate was measured rather than a cold-start placeholder, and
+    data_age_sec says how old that measurement is. The dispatcher's activity
+    log is bursty — it can sit silent for 20+ minutes during a planning
+    cycle while it is alive and busy — so log silence is not evidence of
+    stale metrics. An unverifiable payload fails closed.
+    """
+    if not status:
+        return False, "data_ready=False data age=unknown"
+    data_ready = bool(status.get("metrics_data_ready"))
+    try:
+        data_age = float(status.get("metrics_data_age_sec"))
+    except (TypeError, ValueError):
+        data_age = None
+    age_text = "unknown" if data_age is None else f"{data_age:.0f}s"
+    fresh = data_ready and data_age is not None and data_age < METRICS_MAX_AGE_SEC
+    return fresh, f"data_ready={data_ready} data age={age_text}"
 
 
 def dispatch_prompt_to_fleet(
@@ -1433,7 +1528,8 @@ def dispatcher_status_line() -> str:
         return "Fleet status: unreachable (dispatcher may be down)."
     return (
         f"Fleet: {st['tasks_done']}/{st['tasks_created']} tasks done "
-        f"({st['completion_rate']:.0f}% complete), error rate {st['error_rate_total']:.1f}%, "
+        f"({st['completion_rate']:.0f}% complete), error rate {st['error_rate']:.1f}% in the last 24h "
+        f"(all-time {st['error_rate_total']:.1f}%), "
         f"{st['calls_today']} calls today, {st['pools_available']} provider pools available, "
         f"{st['headroom_pct']:.0f}% free-tier headroom."
     )
@@ -1833,19 +1929,14 @@ def doctor() -> tuple:
          f"reachable={reachable} pid={pid_text} alive={pid_ok}")
     )
 
-    # 2. Metrics fresh (<10 min) — dispatcher log updated within 10 min
-    log_path = (Path.home() / ".openclaw" / "jev-dispatcher.log")
-    fresh = False
-    age_text = "unknown"
-    try:
-        mtime = log_path.stat().st_mtime
-        age_sec = time.time() - mtime
-        fresh = reachable and age_sec < 600
-        age_text = f"{age_sec:.0f}s"
-    except Exception:
-        fresh = False
-    checks.append(("Metrics fresh (<10 min)", fresh,
-                   f"reachable={reachable} log age={age_text}"))
+    # 2. Metrics fresh — the metrics payload must carry a measured aggregate
+    #    that is recent. The dispatcher's activity log is bursty, so its
+    #    silence is reported as context but never used as the freshness gate.
+    fresh, fresh_detail = _metrics_freshness(st)
+    log_age = _dispatcher_log_age_sec()
+    log_age_text = "unknown" if log_age is None else f"{log_age:.0f}s"
+    checks.append(("Metrics fresh (<5 min)", fresh,
+                   f"{fresh_detail} dispatcher log age={log_age_text}"))
 
     # 3. office.json valid
     office_ok = False
@@ -1913,10 +2004,15 @@ def doctor() -> tuple:
     try:
         st = _fetch_dispatcher_status()
         if st:
-            er = st.get("error_rate_total", 0)
-            if er > 5.0:
+            # The last-24h rate is the current condition; the lifetime rate is
+            # supplementary and would almost never cross the threshold.
+            er = st.get("error_rate")
+            if er is None:
                 anomaly_ok = False
-                anomaly_parts.append(f"error rate {er:.1f}% (>5%)")
+                anomaly_parts.append("error rate unavailable")
+            elif er > 5.0:
+                anomaly_ok = False
+                anomaly_parts.append(f"error rate {er:.1f}% in the last 24h (>5%)")
         # Re-fetch metrics for pool cooldown detail
         try:
             with urllib.request.urlopen("http://127.0.0.1:8083/metrics", timeout=4) as r:
@@ -2028,47 +2124,9 @@ def doctor() -> tuple:
     checks.append(("Alert webhook", webhook_ok, webhook_detail))
 
     # 13. Cost anomaly detection — today's cost vs 7-day average.
-    cost_anomaly_ok = True
-    cost_anomaly_detail = "unknown"
-    try:
-        pnl_path = (Path.home() / ".openclaw" / "office_pnl.json")
-        if pnl_path.exists():
-            pnl = json.loads(pnl_path.read_text())
-            if isinstance(pnl, list) and len(pnl) > 1:
-                today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-                today_cost = sum(
-                    t.get("cost_units", 0)
-                    for t in pnl
-                    if t.get("created_at", "").startswith(today)
-                )
-                # 7-day average excluding today
-                past_costs = []
-                for i in range(2, 8):
-                    day = (datetime.now(timezone.utc) - timedelta(days=i)).strftime(
-                        "%Y-%m-%d"
-                    )
-                    day_cost = sum(
-                        t.get("cost_units", 0)
-                        for t in pnl
-                        if t.get("created_at", "").startswith(day)
-                    )
-                    past_costs.append(day_cost)
-                avg_cost = sum(past_costs) / max(1, len(past_costs))
-                cost_anomaly_detail = f"Today: {today_cost}, 7-day avg: {avg_cost:.1f}"
-                if today_cost > avg_cost * 1.5 and today_cost > 20:
-                    cost_anomaly_ok = False
-                    cost_anomaly_detail += " — SPIKE DETECTED"
-                elif today_cost > avg_cost * 1.2 and today_cost > 20:
-                    cost_anomaly_detail += " — elevated"
-                else:
-                    cost_anomaly_detail += " — normal"
-            else:
-                cost_anomaly_detail = "insufficient history"
-        else:
-            cost_anomaly_detail = "no P&L file"
-    except Exception as e:
-        cost_anomaly_ok = False
-        cost_anomaly_detail = f"cost anomaly check failed ({e})"
+    cost_anomaly_ok, cost_anomaly_detail = _cost_anomaly_check(
+        Path("/Users/aryanagarwal/.openclaw/office_pnl.json")
+    )
     checks.append(("Cost anomaly", cost_anomaly_ok, cost_anomaly_detail))
 
     # 14. Finding expiry reminder — pending findings > 7 days.

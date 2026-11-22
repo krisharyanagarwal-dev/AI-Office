@@ -30,6 +30,12 @@ OFFICE_CORE_API = os.getenv("OFFICE_CORE_API", "http://127.0.0.1:8080")
 HUD_PORT = int(os.getenv("HUD_PORT", "4747"))
 HUD_HOST = os.getenv("HUD_HOST", "127.0.0.1")
 
+# Combined portfolio feed path
+COMBINED_PORTFOLIO_PATH = os.getenv(
+    "COMBINED_PORTFOLIO_PATH",
+    "/Users/aryanagarwal/trading/openalice/ui/public/combined_portfolio.json"
+)
+
 # Prometheus metrics
 REQUEST_COUNT = Counter("hud_requests_total", "Total requests", ["method", "endpoint", "status"])
 REQUEST_LATENCY = Histogram("hud_request_duration_seconds", "Request latency", ["method", "endpoint"])
@@ -250,6 +256,21 @@ async def api_launchd(enabled_only: bool = False):
         if resp.status_code != 200:
             raise HTTPException(status_code=resp.status_code, detail="office-core API error")
         return resp.json()
+
+
+@app.get("/api/combined-portfolio")
+async def api_combined_portfolio():
+    """Fetch combined portfolio data with fundamentals."""
+    try:
+        path = Path(COMBINED_PORTFOLIO_PATH)
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="Combined portfolio file not found")
+        data = json.loads(path.read_text())
+        return data
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="Invalid JSON in combined portfolio file")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading combined portfolio: {str(e)}")
 
 
 @app.get("/api/health")

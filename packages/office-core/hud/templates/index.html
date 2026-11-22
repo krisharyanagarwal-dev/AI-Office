@@ -94,6 +94,22 @@
         <div class="card-footer">Enabled jobs only</div>
     </div>
 
+    <!-- Combined Portfolio -->
+    <div class="card grid-2">
+        <div class="card-header">
+            <h2>Combined Portfolio</h2>
+            <button class="btn-refresh" hx-get="/api/combined-portfolio" hx-target="#portfolio-body" hx-swap="innerHTML" hx-trigger="click, metrics-update">
+                <span class="loading" style="display:none"></span> Refresh
+            </button>
+        </div>
+        <div class="card-body" style="max-height: 500px; overflow:auto;">
+            <div id="portfolio-body" hx-get="/api/combined-portfolio" hx-trigger="load, metrics-update" hx-target="this" hx-swap="innerHTML">
+                <div class="empty">Loading...</div>
+            </div>
+        </div>
+        <div class="card-footer">Live combined portfolio with fundamentals</div>
+    </div>
+
     <!-- System Health -->
     <div class="card grid-2">
         <div class="card-header">
@@ -196,6 +212,14 @@
         if (target.id === 'git-body') {
             // Git status comes from Prometheus metrics, not health endpoint
             // We'll fetch it separately
+        }
+        
+        // Combined Portfolio rendering
+        if (target.id === 'portfolio-body') {
+            try {
+                const data = JSON.parse(target.innerText);
+                renderPortfolio(target, data);
+            } catch (e) {}
         }
     });
 
@@ -399,6 +423,155 @@
                 </div>
             </div>
         `).join('');
+    }
+
+    // Fundamentals badge color helpers
+    function valuationBadge(flag) {
+        const colors = { 'Expensive': 'critical', 'Cheap': 'ok', 'Fair': 'warning', 'N/A': 'muted' };
+        const color = colors[flag] || 'muted';
+        return `<span class="badge badge-${color}">${escapeHtml(flag)}</span>`;
+    }
+    
+    function leverageBadge(flag) {
+        const colors = { 'High': 'critical', 'Moderate': 'warning', 'Low': 'ok', 'N/A': 'muted' };
+        const color = colors[flag] || 'muted';
+        return `<span class="badge badge-${color}">${escapeHtml(flag)}</span>`;
+    }
+    
+    function liquidityBadge(flag) {
+        const colors = { 'Comfortable': 'ok', 'Adequate': 'warning', 'Tight': 'critical', 'N/A': 'muted' };
+        const color = colors[flag] || 'muted';
+        return `<span class="badge badge-${color}">${escapeHtml(flag)}</span>`;
+    }
+    
+    function momentumBadge(flag) {
+        const colors = { 'Near 52W high': 'ok', 'Mid range': 'muted', 'Deep below 52W high': 'critical' };
+        const color = colors[flag] || 'muted';
+        return `<span class="badge badge-${color}">${escapeHtml(flag)}</span>`;
+    }
+
+    function renderPortfolio(container, data) {
+        if (!data || !data.ok) {
+            container.innerHTML = `<div class="empty">Failed to load portfolio: ${escapeHtml(data?.error || 'Unknown error')}</div>`;
+            return;
+        }
+        
+        const components = data.components || {};
+        const combined = data.combined || {};
+        const audit = data.audit_reference || {};
+        
+        // Build component cards
+        const componentCards = Object.entries(components).map(([name, comp]) => {
+            const isIncluded = comp.included === true;
+            const fundamentals = comp.fundamentals || {};
+            const weight = (comp.weight * 100).toFixed(1);
+            const equity = comp.equity !== null ? comp.equity.toFixed(2) : '—';
+            const net = comp.net !== null ? comp.net.toFixed(2) : '—';
+            const status = comp.status || '—';
+            
+            let fundamentalsHtml = '';
+            if (Object.keys(fundamentals).length > 0) {
+                const valFlag = fundamentals.valuation_flag || 'N/A';
+                const levFlag = fundamentals.leverage_flag || 'N/A';
+                const liqFlag = fundamentals.liquidity_flag || 'N/A';
+                const momFlag = fundamentals.momentum_flag || 'N/A';
+                const turnover = fundamentals.turnover_ratio !== undefined ? (fundamentals.turnover_ratio * 100).toFixed(2) + '%' : '—';
+                const vol30d = fundamentals.volatility_30d_pct !== undefined ? fundamentals.volatility_30d_pct.toFixed(1) + '%' : '—';
+                const price = fundamentals.price !== undefined ? '$' + fundamentals.price.toFixed(2) : '—';
+                const marketCap = fundamentals.market_cap !== undefined ? '$' + (fundamentals.market_cap / 1e9).toFixed(1) + 'B' : '—';
+                
+                fundamentalsHtml = `
+                    <div class="fundamentals-grid">
+                        <div class="fundamental-item">
+                            <span class="fundamental-label">Valuation</span>
+                            ${valuationBadge(valFlag)}
+                        </div>
+                        <div class="fundamental-item">
+                            <span class="fundamental-label">Leverage</span>
+                            ${leverageBadge(levFlag)}
+                        </div>
+                        <div class="fundamental-item">
+                            <span class="fundamental-label">Liquidity</span>
+                            ${liquidityBadge(liqFlag)}
+                        </div>
+                        <div class="fundamental-item">
+                            <span class="fundamental-label">Momentum</span>
+                            ${momentumBadge(momFlag)}
+                        </div>
+                        <div class="fundamental-item">
+                            <span class="fundamental-label">Turnover</span>
+                            <span class="fundamental-value">${turnover}</span>
+                        </div>
+                        <div class="fundamental-item">
+                            <span class="fundamental-label">30d Vol</span>
+                            <span class="fundamental-value">${vol30d}</span>
+                        </div>
+                        <div class="fundamental-item">
+                            <span class="fundamental-label">Price</span>
+                            <span class="fundamental-value">${price}</span>
+                        </div>
+                        <div class="fundamental-item">
+                            <span class="fundamental-label">Mkt Cap</span>
+                            <span class="fundamental-value">${marketCap}</span>
+                        </div>
+                    </div>
+                `;
+            } else {
+                fundamentalsHtml = '<div class="empty" style="padding:8px;">No fundamentals data</div>';
+            }
+            
+            const statusClass = isIncluded ? 'badge-enabled' : 'badge-disabled';
+            const statusText = isIncluded ? 'Included' : 'Excluded';
+            
+            return `
+                <div class="portfolio-component ${isIncluded ? '' : 'excluded'}">
+                    <div class="component-header">
+                        <div>
+                            <span class="component-name">${escapeHtml(name)}</span>
+                            <span class="badge ${statusClass}">${statusText}</span>
+                        </div>
+                        <div class="component-metrics">
+                            <span>Weight: ${weight}%</span>
+                            <span>Equity: $${equity}</span>
+                            <span>Net: $${net}</span>
+                        </div>
+                    </div>
+                    <div class="component-status">${escapeHtml(status)}</div>
+                    ${fundamentalsHtml}
+                </div>
+            `;
+        }).join('');
+        
+        // Combined summary
+        const combinedEquity = combined.equity !== undefined ? combined.equity.toFixed(2) : '—';
+        const combinedNet = combined.net !== undefined ? combined.net.toFixed(2) : '—';
+        const combinedReturn = combined.return_pct !== undefined ? combined.return_pct.toFixed(2) + '%' : '—';
+        const effectiveWeight = (data.effective_weight || 0).toFixed(1);
+        const price = data.price !== undefined ? '$' + data.price.toFixed(2) : '—';
+        
+        container.innerHTML = `
+            <div class="portfolio-summary">
+                <div class="summary-card">
+                    <h3>Combined Portfolio</h3>
+                    <div class="metric-row"><span class="metric-label">Equity</span><span class="metric-value">$${combinedEquity}</span></div>
+                    <div class="metric-row"><span class="metric-label">Net P&L</span><span class="metric-value ${parseFloat(combinedNet) >= 0 ? 'ok' : 'critical'}">$${combinedNet}</span></div>
+                    <div class="metric-row"><span class="metric-label">Return</span><span class="metric-value ${parseFloat(combinedReturn) >= 0 ? 'ok' : 'critical'}">${combinedReturn}</span></div>
+                    <div class="metric-row"><span class="metric-label">Effective Weight</span><span class="metric-value">${effectiveWeight}%</span></div>
+                    <div class="metric-row"><span class="metric-label">BTC Price</span><span class="metric-value">${price}</span></div>
+                </div>
+                <div class="summary-card">
+                    <h3>Audit Reference</h3>
+                    <div class="metric-row"><span class="metric-label">Research Sharpe</span><span class="metric-value">${audit.sharpe !== null && audit.sharpe !== undefined ? audit.sharpe.toFixed(2) : 'N/A'}</span></div>
+                    <div class="metric-row"><span class="metric-label">Max DD</span><span class="metric-value">${audit.max_dd_pct !== undefined ? audit.max_dd_pct.toFixed(1) + '%' : 'N/A'}</span></div>
+                    <div class="metric-row"><span class="metric-label">Return</span><span class="metric-value">${audit.return_pct !== undefined ? audit.return_pct.toFixed(1) + '%' : 'N/A'}</span></div>
+                    <div class="metric-row"><span class="metric-label">Best Solo Sharpe</span><span class="metric-value">${audit.best_solo_sharpe !== null && audit.best_solo_sharpe !== undefined ? audit.best_solo_sharpe.toFixed(2) : 'N/A'}</span></div>
+                    <div class="metric-row"><span class="metric-label">Excluded</span><span class="metric-value">${(audit.excluded_components || []).join(', ') || 'None'}</span></div>
+                </div>
+            </div>
+            <div class="portfolio-components">
+                ${componentCards}
+            </div>
+        `;
     }
 
     // Initial fetch and periodic refresh
