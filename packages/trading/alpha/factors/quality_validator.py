@@ -120,8 +120,8 @@ class SignalQualityValidator:
     def validate_ic_stability(self, ic_std: float, n_obs: int) -> QualityResult:
         """Check IC stability (standard error of IC mean)"""
         # Standard error of IC mean
-        se_ic_mean = ic_std / np.sqrt(max(n_obs, 1))
-        passed = se_ic_mean <= self.thresholds.ic_stability_max
+        se_ic_mean = float(ic_std / np.sqrt(max(n_obs, 1)))
+        passed = bool(se_ic_mean <= self.thresholds.ic_stability_max)
         return QualityResult(
             check=QualityCheck.IC_STABILITY,
             passed=passed,

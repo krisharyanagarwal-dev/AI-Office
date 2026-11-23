@@ -103,11 +103,13 @@ def build_report(
     generated_at: str | None = None,
     data_summary: dict | None = None,
     reconciliation: dict | None = None,
+    venue: dict | None = None,
+    signals: list | None = None,
 ) -> dict:
     """Assemble the JSON-serialisable report for one bot run."""
     records = list(records)
     selected = select_tradable(records)
-    return {
+    report = {
         "generated_at": generated_at or datetime.now(timezone.utc).isoformat(),
         "mode": MODE_PAPER,
         "live": LIVE_FALSE,
@@ -121,7 +123,11 @@ def build_report(
         "reconciliation": jsonable(reconciliation) if reconciliation is not None else None,
         "caveats": list(CAVEATS),
         "data_summary": jsonable(data_summary) if data_summary is not None else None,
+        "signals": jsonable(signals or []),
     }
+    if venue is not None:
+        report["venue"] = jsonable(venue)
+    return report
 
 
 def _render_positions(lines: list[str], positions: list[dict]) -> None:
@@ -143,6 +149,61 @@ def _render_positions(lines: list[str], positions: list[dict]) -> None:
                 reason=position.get("reason", ""),
                 candidate=position.get("candidate", ""),
                 live=str(position.get("live", LIVE_FALSE)).lower(),
+            )
+        )
+    lines.append("")
+
+
+def _render_venue(lines: list[str], venue: dict | None) -> None:
+    if not venue:
+        return
+    lines.append("## Venue")
+    lines.append("")
+    lines.append(
+        f"- cash: {venue.get('cash', 0.0)} | "
+        f"paper_trading: {venue.get('paper_trading', False)} | "
+        f"live: {venue.get('live', False)} | "
+        f"fees: {venue.get('fees_total', 0.0)}"
+    )
+    positions = venue.get("positions") or {}
+    if positions:
+        lines.append("")
+        lines.append("| symbol | quantity | avg_entry_price | realised_pnl |")
+        lines.append("|---|---|---|---|")
+        for symbol, pos in positions.items():
+            lines.append(
+                "| {symbol} | {quantity} | {entry} | {pnl} |".format(
+                    symbol=symbol,
+                    quantity=pos.get("quantity", 0.0),
+                    entry=pos.get("avg_entry_price", 0.0),
+                    pnl=pos.get("realized_pnl", 0.0),
+                )
+            )
+    lines.append("")
+
+
+def _render_signals(lines: list[str], signals: list[dict] | None) -> None:
+    lines.append("## Signals")
+    lines.append("")
+    if not signals:
+        lines.append("No book-changing signals this run.")
+        lines.append("")
+        return
+    lines.append(
+        "| symbol | action | side | notional | reason | candidate | price | generated_at |"
+    )
+    lines.append("|---|---|---|---|---|---|---|---|")
+    for signal in signals:
+        lines.append(
+            "| {symbol} | {action} | {side} | {notional} | {reason} | {candidate} | {price} | {generated_at} |".format(
+                symbol=signal.get("symbol", ""),
+                action=signal.get("action", ""),
+                side=signal.get("side", 0),
+                notional=signal.get("notional", 0.0),
+                reason=signal.get("reason", ""),
+                candidate=signal.get("candidate", ""),
+                price=signal.get("price", 0.0),
+                generated_at=signal.get("generated_at", ""),
             )
         )
     lines.append("")
@@ -270,6 +331,10 @@ def render_markdown(report: dict) -> str:
         "resized one."
     )
     lines.append("")
+
+    _render_venue(lines, report.get("venue"))
+
+    _render_signals(lines, report.get("signals"))
 
     lines.append("## Selected candidate")
     lines.append("")

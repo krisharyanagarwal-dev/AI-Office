@@ -41,6 +41,14 @@
     "5b94415d-99c0-47": {
       "user_id": "aryan",
       "created_at": 1794779509.584866
+    },
+    "48f0a904-edd4-46": {
+      "user_id": "aryan",
+      "created_at": 1795427017.805362
+    },
+    "4a783de9-010f-47": {
+      "user_id": "demo",
+      "created_at": 1795427022.779754
     }
   },
   "session_timeout_sec": 86400

@@ -16,6 +16,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from best_signal.evidence import CandidateRecord, default_registry, select_tradable
+from best_signal.execution import (
+    ACTION_CLOSE,
+    ACTION_FLIP,
+    ACTION_HOLD,
+    ACTION_NO_TRADE,
+    ACTION_OPEN,
+    CarryPaperBroker,
+    ExecutionEngine,
+    ExecutionResult,
+    build_paper_venue,
+    load_price_at,
+    restore_venue,
+    risk_limits_for,
+    run_paper_execution,
+    venue_snapshot,
+)
 from best_signal.funding import (
     FundingPrint,
     annualized_funding,
@@ -26,11 +42,13 @@ from best_signal.position import RiskLimits, build_paper_position
 from best_signal.report import build_report, jsonable, write_report
 from best_signal.rules import AlwaysOnCarry, PersistenceFlipCarry, RegimeFilteredCarry
 from best_signal.validate import Candidate, reconcile_archive_audit, validate_candidate
+from risk import RiskGovernor
 
 DEFAULT_SYMBOLS = ("BTCUSDT", "ETHUSDT")
 STATE_FILENAME = "best_signal_state.json"
 VALIDATION_FILENAME = "best_signal_validation.json"
 RECONCILIATION_FILENAME = "best_signal_reconciliation.json"
+SIGNALS_FILENAME = "best_signal_signals.json"
 DEFAULT_OUT_DIR = Path(__file__).resolve().parents[1] / "reports" / "best_signal"
 
 VALIDATION_RULES = {
@@ -70,6 +88,10 @@ class BotConfig:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _now_ms() -> int:
+    return int(datetime.now(timezone.utc).timestamp() * 1000)
 
 
 def _load_state(path: Path) -> dict:
@@ -116,26 +138,18 @@ def _candidate_for(record: CandidateRecord) -> Candidate | None:
 
 
 def _apply_position(working: dict, symbol: str, position) -> None:
-    if position.action == "NO_TRADE":
-        entry = dict(working.get(symbol, {"side": 0, "notional": 0.0}))
-        entry["last_action"] = position.action
-        entry["last_reason"] = position.reason
-        working[symbol] = entry
-        return
+    entry = dict(working.get(symbol, {"side": 0, "notional": 0.0}))
+    entry["last_action"] = position.action
+    entry["last_reason"] = position.reason
     if position.action == "CLOSE":
-        working[symbol] = {
-            "side": 0,
-            "notional": 0.0,
-            "last_action": position.action,
-            "last_reason": position.reason,
-        }
-        return
-    working[symbol] = {
-        "side": position.side,
-        "notional": position.notional,
-        "last_action": position.action,
-        "last_reason": position.reason,
-    }
+        entry["side"] = 0
+        entry["notional"] = 0.0
+    elif position.action in (ACTION_OPEN, ACTION_HOLD, ACTION_FLIP):
+        entry["side"] = position.side
+        entry["notional"] = position.notional
+    # NO_TRADE and any other action: side/notional unchanged so a live carry
+    # is never liquidated by a stand-down, and last_funding_ts_ms is preserved.
+    working[symbol] = entry
 
 
 def run_bot(config: BotConfig) -> dict:
@@ -152,15 +166,34 @@ def run_bot(config: BotConfig) -> dict:
     }
 
     positions = []
+    signals = []
     validations = {}
     validation_payload = {}
     data_summary = {}
     prints_by_symbol = {}
 
+    # Day bookkeeping: reset the day counters when the UTC date changes so a
+    # losing day never stands the book down forever.
+    today = datetime.now(timezone.utc).date().isoformat()
+    day_state = dict(state.get("day") or {})
+    if day_state.get("date") != today:
+        day_state = {"date": today, "funding": 0.0, "fees": 0.0, "pnl": 0.0}
+
+    equity = config.equity
+    engine, broker = build_paper_venue(equity)
+    if state.get("venue"):
+        restore_venue(broker, state["venue"])
+    governor = RiskGovernor(risk_limits_for(config.limits, equity))
+    governor.limits.daily_pnl = day_state["pnl"]
+
+    price = 0.0
     for symbol in config.symbols:
         prints = load_symbol_prints(symbol, data_dir=config.data_dir)
         prints_by_symbol[symbol] = prints
-        current = working.get(symbol, {"side": 0, "notional": 0.0})
+        current = working.get(symbol)
+        if current is None:
+            current = {"side": 0, "notional": 0.0}
+            working[symbol] = current
         gross_notional = sum(
             float(entry.get("notional", 0.0))
             for entry in working.values()
@@ -169,6 +202,7 @@ def run_bot(config: BotConfig) -> dict:
         open_symbols = sum(
             1 for entry in working.values() if int(entry.get("side", 0)) != 0
         )
+        daily_loss_pct = day_state["pnl"] / equity if equity > 0 else 0.0
         position = build_paper_position(
             symbol,
             prints,
@@ -179,9 +213,83 @@ def run_bot(config: BotConfig) -> dict:
             current_notional=float(current.get("notional", 0.0)),
             gross_notional=gross_notional,
             open_symbols=open_symbols,
-            daily_loss_pct=config.daily_loss_pct,
+            daily_loss_pct=daily_loss_pct,
         )
         positions.append(position)
+
+        # Accrue funding for prints newer than the last accrued print, sized on
+        # the notional the book actually carries (a stand-down keeps the carry,
+        # so it keeps earning funding).
+        last_funding_ts = int(current.get("last_funding_ts_ms") or 0)
+        if last_funding_ts == 0 and len(prints) >= 2:
+            # No prior record: accrue only the most recent funding period.
+            last_funding_ts = prints[-2].ts_ms
+        new_prints = [fp for fp in prints if fp.ts_ms > last_funding_ts]
+        if new_prints:
+            current["last_funding_ts_ms"] = max(fp.ts_ms for fp in new_prints)
+        accrual_notional = (
+            position.notional
+            if position.side != 0
+            else (
+                float(current.get("notional", 0.0))
+                if int(current.get("side", 0)) != 0
+                else 0.0
+            )
+        )
+        funding = sum(fp.rate for fp in new_prints) * accrual_notional
+        day_state["funding"] += funding
+        broker.balances["USDT"] = round(
+            broker.balances.get("USDT", 0.0) + funding, 8
+        )
+
+        price, _source = load_price_at(symbol, _now_ms(), data_dir=config.data_dir)
+
+        realised_before = sum(broker.realized_pnl.values())
+        if position.action in (ACTION_OPEN, ACTION_FLIP, ACTION_CLOSE):
+            result = run_paper_execution(
+                engine,
+                broker,
+                symbol,
+                position.side,
+                position.notional,
+                price,
+                equity,
+                governor=governor,
+                action=position.action,
+                current_side=int(current.get("side", 0)),
+                current_notional=float(current.get("notional", 0.0)),
+            )
+        elif position.action == ACTION_HOLD:
+            result = ExecutionResult(symbol, ACTION_HOLD, (), 0.0, True, "held")
+        else:
+            result = ExecutionResult(
+                symbol, ACTION_NO_TRADE, (), 0.0, True, "stand_down"
+            )
+        day_state["fees"] += result.fees
+        day_state["pnl"] = (
+            day_state["funding"]
+            - day_state["fees"]
+            + sum(broker.realized_pnl.values())
+            - realised_before
+        )
+
+        # Send a signal when the emitted action changes the book: an OPEN, a
+        # CLOSE, or a FLIP is a difference worth sending. Holding or standing
+        # down with no change to the book is not a signal.
+        if position.action in (ACTION_OPEN, ACTION_CLOSE, ACTION_FLIP):
+            signals.append(
+                {
+                    "symbol": symbol,
+                    "action": position.action,
+                    "side": position.side,
+                    "notional": position.notional,
+                    "reason": position.reason,
+                    "candidate": position.candidate,
+                    "price": price,
+                    "generated_at": _now(),
+                }
+            )
+
         _apply_position(working, symbol, position)
         data_summary[symbol] = _symbol_summary(symbol, prints)
 
@@ -193,6 +301,7 @@ def run_bot(config: BotConfig) -> dict:
                 validation_payload[symbol] = result
 
     reconciliation = reconcile_archive_audit(prints_by_symbol)
+    venue = venue_snapshot(broker)
 
     report = build_report(
         records,
@@ -200,8 +309,13 @@ def run_bot(config: BotConfig) -> dict:
         validations=validations,
         data_summary=data_summary,
         reconciliation=reconciliation,
+        venue=venue,
+        signals=signals,
     )
     paths = write_report(report, out_dir)
+
+    signals_path = out_dir / SIGNALS_FILENAME
+    _write_json(signals_path, signals)
 
     validation_path = out_dir / VALIDATION_FILENAME
     if validation_payload:
@@ -216,8 +330,18 @@ def run_bot(config: BotConfig) -> dict:
         state_path,
         {
             "updated_at": _now(),
-            "mode": "PAPER",
+            "mode": "paper",
+            "execution_enabled": False,
+            "live_trading": False,
             "live": False,
+            "status": "ok",
+            "last_run": _now(),
+            "positions": [position.to_dict() for position in positions],
+            "closed": [],
+            "realized_pnl": sum(broker.realized_pnl.values()),
+            "price": price,
+            "day": day_state,
+            "venue": venue,
             "symbols": working,
         },
     )
@@ -232,6 +356,7 @@ def run_bot(config: BotConfig) -> dict:
             "state": state_path,
             "validation": validation_path,
             "reconciliation": reconciliation_path,
+            "signals": signals_path,
         },
     }
 
