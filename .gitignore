@@ -80,3 +80,6 @@ all_stocks_summary_*.csv
 # Compiled Swift/Mach-O helper, rebuilt from mac_app sources
 dost/mac_app/DostBinary
 *.pid
+
+# Skill deployer rollback snapshots — regenerated on every deploy
+dost/skills/.backups/
