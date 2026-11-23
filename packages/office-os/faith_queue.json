@@ -1,0 +1,154 @@
+{
+  "1": {
+    "id": "existing_1",
+    "verse": "Existing reel 1 - Hindi content",
+    "verse_ref": "existing_1",
+    "action": "Reflect on one thought that recurring occupies your mind today.",
+    "language": "hindi",
+    "posted": false
+  },
+  "2": {
+    "id": "existing_2",
+    "verse": "Existing reel 2 - English content",
+    "verse_ref": "existing_2",
+    "action": "Choose one routine task today and perform it with full awareness.",
+    "language": "english",
+    "posted": false
+  },
+  "3": {
+    "id": "existing_3",
+    "verse": "Existing reel 3 - Hindi content",
+    "verse_ref": "existing_3",
+    "action": "Notice one recurring thought today. Name it. Then choose one thought to replace it with.",
+    "language": "hindi",
+    "posted": false
+  },
+  "4": {
+    "id": "existing_4",
+    "verse": "Existing reel 4 - English content",
+    "verse_ref": "existing_4",
+    "action": "Before speaking, ask: 'Is this speech pure, kind, necessary?' If not, hold it.",
+    "language": "english",
+    "posted": false
+  },
+  "5": {
+    "id": "existing_5",
+    "verse": "Existing reel 5 - Hindi content",
+    "verse_ref": "existing_5",
+    "action": "Conduct yourself with pure deed. Speak pure speech. Think pure thought. Purify your mind.",
+    "language": "hindi",
+    "posted": false
+  },
+  "gita2_2.47": {
+    "id": "gita2_2.47",
+    "verse": "You have a right to your work — never to its results. Do the work fully. Release the outcome.",
+    "verse_ref": "2.47",
+    "action": "Today, pick the one result you're anxious about and name it out loud. Then do one action on it.",
+    "language": "english",
+    "posted": false
+  },
+  "gita2_2.47_hindi": {
+    "id": "gita2_2.47_hindi",
+    "verse": "कर्म करने में तुम्हारा अधिकार है, फल में नहीं। काम पूरा करो, नतीजा छोड़ दो।",
+    "verse_ref": "2.47",
+    "action": "आज, वह एक परिणाम जिसके बारे में चिंतित हो, उसे नाम ले कर बाहर निकालो। फिर उस पर एक क्रिया करो।",
+    "language": "hindi",
+    "posted": false
+  },
+  "gita2_2.50": {
+    "id": "gita2_2.50",
+    "verse": "Yoga is the skill of action. — When you act, ask: is this the most skillful way, or am I just reacting?",
+    "verse_ref": "2.50",
+    "action": "Before your next task, ask: 'Is this the most skillful way I could do this?' Then do it.",
+    "language": "english",
+    "posted": false
+  },
+  "gita2_2.50_hindi": {
+    "id": "gita2_2.50_hindi",
+    "verse": "योग कर्म कौशलम। इकर्म करते समय सर्वोत्तम विधि पूछो या सिर्फ प्रतिक्रिया कर रहे हो?",
+    "verse_ref": "2.50",
+    "action": "अगला कार्य करने से पहले: 'मैं ऐसा क्यों कर रहा हूँ?' फिर करो।",
+    "language": "hindi",
+    "posted": false
+  },
+  "gita2_2.54": {
+    "id": "gita2_2.54",
+    "verse": "The disciplined mind remains as steady as the flame in a windless place.",
+    "verse_ref": "2.54",
+    "action": "Identify one area where your focus wanders. Gently bring it back, once, and note the difference.",
+    "language": "english",
+    "posted": false
+  },
+  "gita2_2.54_hindi": {
+    "id": "gita2_2.54_hindi",
+    "verse": "विनाशकाले विपरीत बुद्धि: ध्यानस्थ रहने के लिए स्थिर मन।",
+    "verse_ref": "2.54",
+    "action": "एक क्षेत्र पहचानो जहाँ ध्यान भटके। इसे वापस लाओ, एक बार नोट करो।",
+    "language": "hindi",
+    "posted": false
+  },
+  "gita3_3.30": {
+    "id": "gita3_3.30",
+    "verse": "Better indeed is self-performed action than action done by duty without understanding.",
+    "verse_ref": "3.30",
+    "action": "Before starting your day's first task, clarify: 'Why am I doing this?' Write it down.",
+    "language": "english",
+    "posted": false
+  },
+  "gita3_3.30_hindi": {
+    "id": "gita3_3.30_hindi",
+    "verse": "स्वाध्याययोगात्मक कर्म स्वधिक्कते। अज्ञानेन निष्फलम कर्म कर्तव्यं शारीरिणाम।",
+    "verse_ref": "3.30",
+    "action": "दिन के पहले कार्य की शुरुआत से पहले, स्पष्ट करो: 'मैं ऐसा क्यों कर रहा हूँ?' इसे लिख लो।",
+    "language": "hindi",
+    "posted": false
+  },
+  "gita3_3.35": {
+    "id": "gita3_3.35",
+    "verse": "One is bound by action, even involuntary. Therefore one should not abandon action; the truly abandoned action is that which is done without attachment.",
+    "verse_ref": "3.35",
+    "action": "Choose one routine task today and perform it with full awareness — notice every detail as you do it.",
+    "language": "english",
+    "posted": false
+  },
+  "gita3_3.35_hindi": {
+    "id": "gita3_3.35_hindi",
+    "verse": "एक बंधन कर्म से है, भले ही अनैच्छिक। इसलिए कर्म का त्याग न करें; वास्तविक त्याग वह है जिसे आसक्ति किए बिना किया गया है।",
+    "verse_ref": "3.35",
+    "action": "आज एक नियमित कार्य चुनें औरपूरी जागरूकता के साथ करें — हर विवरण को नोट करते हुए।",
+    "language": "hindi",
+    "posted": false
+  },
+  "dhp_1.1": {
+    "id": "dhp_1.1",
+    "verse": "All that we are begins in what we have thought. Mind comes first. Mind leads. What you keep thinking, you slowly become.",
+    "verse_ref": "1.1",
+    "action": "Notice one recurring thought today. Name it. Then choose one thought to replace it with.",
+    "language": "english",
+    "posted": false
+  },
+  "dhp_1.1_hindi": {
+    "id": "dhp_1.1_hindi",
+    "verse": "सब कुछ सोच से शुरू होता है। मन पहले आता है। मन नेतृत्व करता है। जो सोचते हो, धीरे-धीरे बनते हो।",
+    "verse_ref": "1.1",
+    "action": "आज एक बार-बार आने वाला विचार नोट करो। उसका नाम लगाओ। फिर एक विचार चुन कर उससे प्रतिस्थापित करो।",
+    "language": "hindi",
+    "posted": false
+  },
+  "dhp_2.3": {
+    "id": "dhp_2.3",
+    "verse": "Conduct yourself with pure deed. Speak pure speech. Think pure thought. Purify your mind.",
+    "verse_ref": "2.3",
+    "action": "Before speaking, ask: 'Is this speech pure, kind, necessary?' If not, hold it.",
+    "language": "english",
+    "posted": false
+  },
+  "dhp_2.3_hindi": {
+    "id": "dhp_2.3_hindi",
+    "verse": "शुद्ध देह में शुद्ध आचरण। शुद्ध वाक्य में शुद्ध वचन। शुद्ध मन में शुद्ध विचार। मन को शुद्ध करो।",
+    "verse_ref": "2.3",
+    "action": "बोलने से पहले पूछो: 'क्या यह वचन शुद्ध, मधुर, आवश्यक है?' अगर नहीं, तो रोको।",
+    "language": "hindi",
+    "posted": false
+  }
+}

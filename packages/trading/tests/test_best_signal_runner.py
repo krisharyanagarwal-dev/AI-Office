@@ -1,0 +1,185 @@
+"""Tests for the one-command best-signal bot runner.
+
+The runner is what a human (or a scheduler) invokes: it loads the evidence
+registry, loads funding history, emits paper targets, runs the out-of-sample
+validation and writes every artifact. It must never place an order.
+"""
+import json
+
+import pandas as pd
+import pytest
+
+from best_signal.position import RiskLimits
+from best_signal.runner import BotConfig, main, run_bot
+
+EIGHT_HOURS_MS = 8 * 3_600_000
+START_MS = 1_500_000_000_000
+
+
+def write_funding(data_dir, symbol, rates, start_ms=START_MS):
+    data_dir.mkdir(parents=True, exist_ok=True)
+    frame = pd.DataFrame(
+        {
+            "fundingTime": [start_ms + index * EIGHT_HOURS_MS for index in range(len(rates))],
+            "fundingRate": rates,
+        }
+    )
+    frame.to_parquet(data_dir / f"{symbol}_funding.parquet")
+
+
+def make_data(data_dir, symbols=("BTCUSDT",), rate=0.0001, count=80):
+    for symbol in symbols:
+        write_funding(data_dir, symbol, [rate] * count)
+
+
+def make_config(tmp_path, **overrides):
+    data_dir = tmp_path / "data"
+    out_dir = tmp_path / "out"
+    settings = {
+        "symbols": ("BTCUSDT",),
+        "data_dir": data_dir,
+        "out_dir": out_dir,
+        "equity": 10_000.0,
+        "limits": RiskLimits(),
+        "validate": False,
+    }
+    settings.update(overrides)
+    return BotConfig(**settings)
+
+
+class TestRunBot:
+    def test_run_bot_opens_a_paper_position(self, tmp_path):
+        config = make_config(tmp_path)
+        make_data(config.data_dir)
+        result = run_bot(config)
+        position = result["positions"][0]
+        assert position.action == "OPEN"
+        assert position.side == 1
+        assert position.mode == "PAPER"
+        assert position.live is False
+
+    def test_run_bot_holds_the_position_on_the_next_run(self, tmp_path):
+        config = make_config(tmp_path)
+        make_data(config.data_dir)
+        run_bot(config)
+        second = run_bot(config)
+        assert second["positions"][0].action == "HOLD"
+        assert second["positions"][0].side == 1
+
+    def test_run_bot_persists_the_state_file(self, tmp_path):
+        config = make_config(tmp_path)
+        make_data(config.data_dir)
+        result = run_bot(config)
+        state = json.loads(result["paths"]["state"].read_text())
+        assert state["symbols"]["BTCUSDT"]["side"] == 1
+
+    def test_run_bot_writes_the_report_artifacts(self, tmp_path):
+        config = make_config(tmp_path)
+        make_data(config.data_dir)
+        result = run_bot(config)
+        assert result["paths"]["json"].exists()
+        assert result["paths"]["markdown"].exists()
+        assert json.loads(result["paths"]["json"].read_text())["mode"] == "PAPER"
+        assert result["paths"]["markdown"].read_text().startswith(
+            "# Best-signal bot report"
+        )
+
+    def test_run_bot_honours_the_kill_switch(self, tmp_path):
+        config = make_config(tmp_path, limits=RiskLimits(kill_switch=True))
+        make_data(config.data_dir)
+        result = run_bot(config)
+        position = result["positions"][0]
+        assert position.action == "NO_TRADE"
+        assert position.reason == "kill_switch"
+        assert position.notional == 0.0
+
+    def test_run_bot_honours_the_symbol_cap(self, tmp_path):
+        config = make_config(
+            tmp_path,
+            symbols=("BTCUSDT", "ETHUSDT"),
+            limits=RiskLimits(max_symbols=1),
+        )
+        make_data(config.data_dir, symbols=("BTCUSDT", "ETHUSDT"))
+        result = run_bot(config)
+        by_symbol = {position.symbol: position for position in result["positions"]}
+        assert by_symbol["BTCUSDT"].action == "OPEN"
+        assert by_symbol["ETHUSDT"].action == "NO_TRADE"
+        assert by_symbol["ETHUSDT"].reason == "max_symbols"
+
+    def test_run_bot_attaches_the_out_of_sample_validation(self, tmp_path):
+        config = make_config(tmp_path, validate=True)
+        make_data(config.data_dir, count=120)
+        result = run_bot(config)
+        validation = result["report"]["validation"]["BTCUSDT"]
+        assert validation["verdict"]
+        assert "frozen" in validation
+        assert "out_of_sample" in validation["frozen"]
+
+    def test_run_bot_writes_the_full_validation_artifact(self, tmp_path):
+        config = make_config(tmp_path, validate=True)
+        make_data(config.data_dir, count=120)
+        result = run_bot(config)
+        payload = json.loads(result["paths"]["validation"].read_text())
+        assert payload["BTCUSDT"]["frozen"]["out_of_sample"]["prints"]
+
+    def test_run_bot_raises_when_the_data_is_missing(self, tmp_path):
+        config = make_config(tmp_path)
+        with pytest.raises(FileNotFoundError):
+            run_bot(config)
+
+    def test_run_bot_reports_the_data_summary(self, tmp_path):
+        config = make_config(tmp_path)
+        make_data(config.data_dir, count=40)
+        result = run_bot(config)
+        summary = result["report"]["data_summary"]
+        assert summary["BTCUSDT"]["prints"] == 40
+
+    def test_run_bot_writes_the_archive_reconciliation_artifact(self, tmp_path):
+        config = make_config(tmp_path)
+        make_data(config.data_dir, count=40)
+        result = run_bot(config)
+        assert result["paths"]["reconciliation"].exists()
+        payload = json.loads(result["paths"]["reconciliation"].read_text())
+        assert payload["BTCUSDT"]["status"]
+
+    def test_run_bot_attaches_the_reconciliation_to_the_report(self, tmp_path):
+        config = make_config(tmp_path)
+        make_data(config.data_dir, count=40)
+        result = run_bot(config)
+        reconciliation = result["report"]["reconciliation"]
+        assert reconciliation["BTCUSDT"]["status"]
+
+
+class TestMain:
+    def test_main_returns_zero_on_success(self, tmp_path, capsys):
+        data_dir = tmp_path / "data"
+        out_dir = tmp_path / "out"
+        make_data(data_dir)
+        code = main(
+            [
+                "--symbols",
+                "BTCUSDT",
+                "--data-dir",
+                str(data_dir),
+                "--out-dir",
+                str(out_dir),
+                "--no-validate",
+            ]
+        )
+        assert code == 0
+        assert "PAPER" in capsys.readouterr().out
+
+    def test_main_returns_one_when_the_data_is_missing(self, tmp_path, capsys):
+        code = main(
+            [
+                "--symbols",
+                "BTCUSDT",
+                "--data-dir",
+                str(tmp_path / "empty"),
+                "--out-dir",
+                str(tmp_path / "out"),
+                "--no-validate",
+            ]
+        )
+        assert code == 1
+        assert "BTCUSDT" in capsys.readouterr().err

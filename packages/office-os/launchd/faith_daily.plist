@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/Property List 1.0/DTD">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aryan.faith.daily</string>
+    
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/aryanagarwal/office-os/packages/office-os/scripts/faith_daily_runner.py</string>
+    </array>
+    
+    <key>StartInterval</key>
+    <integer>32400</integer>
+    <!-- 32400 seconds = 9:00 AM UTC, adjust for user's timezone -->
+    <!-- This runs once daily at 9 AM -->
+    
+    <key>RunAtLoad</key>
+    <true/>
+    
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    
+    <key>StandardOutPath</key>
+    <string>/Users/aryanagarwal/AI-Office/faith_daily.log</string>
+    
+    <key>StandardErrorPath</key>
+    <string>/Users/aryanagarwal/AI-Office/faith_daily_error.log</string>
+    
+    <key>KeepAlive</key>
+    <false/>
+    
+    <key>ThrottleInterval</key>
+    <integer>86400</integer>
+    <!-- 24 hours -->
+</dict>
+</plist>

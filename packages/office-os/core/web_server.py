@@ -262,17 +262,17 @@ LOGIN_TEMPLATE = """<!DOCTYPE html>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Office OS - Login</title>
     <style>
-        * {{ box-sizing: border-box; }}
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 0; background: #0f0f0f; color: #e0e0e0; display: flex; justify-content: center; align-items: center; min-height: 100vh; }}
-        .card {{ background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px; padding: 2rem; width: 100%; max-width: 400px; }}
-        h1 {{ margin-top: 0; font-size: 1.25rem; color: #10b981; }}
-        .form-group {{ margin-bottom: 1rem; }}
-        .form-group label {{ display: block; margin-bottom: 0.25rem; font-size: 0.85rem; color: #94a3b8; }}
-        .form-group input {{ width: 100%; background: #0f0f0f; border: 1px solid #2a2a2a; border-radius: 4px; padding: 0.5rem; color: #e0e0e0; font-family: inherit; }}
-        .btn {{ background: #3b82f6; color: white; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; font-weight: 600; width: 100%; }}
-        .btn:hover {{ background: #2563eb; }}
-        .users {{ margin-top: 1rem; font-size: 0.8rem; color: #64748b; }}
-        .users div {{ margin-bottom: 0.25rem; }}
+        * { box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 0; background: #0f0f0f; color: #e0e0e0; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+        .card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px; padding: 2rem; width: 100%; max-width: 400px; }
+        h1 { margin-top: 0; font-size: 1.25rem; color: #10b981; }
+        .form-group { margin-bottom: 1rem; }
+        .form-group label { display: block; margin-bottom: 0.25rem; font-size: 0.85rem; color: #94a3b8; }
+        .form-group input { width: 100%; background: #0f0f0f; border: 1px solid #2a2a2a; border-radius: 4px; padding: 0.5rem; color: #e0e0e0; font-family: inherit; }
+        .btn { background: #3b82f6; color: white; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; font-weight: 600; width: 100%; }
+        .btn:hover { background: #2563eb; }
+        .users { margin-top: 1rem; font-size: 0.8rem; color: #64748b; }
+        .users div { margin-bottom: 0.25rem; }
     </style>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
@@ -296,123 +296,123 @@ LOGIN_TEMPLATE = """<!DOCTYPE html>
     // Chart.js charts
     const charts = {};
 
-    function initCharts() {{{{
+    function initCharts() {
         // Fetch metrics
         fetch('/metrics')
             .then(r => r.json())
-            .then(data => {{{{
-                const jev = data.jev || {{{{}}}};
-                const pools = data.provider_pools || {{{{}}}};
+            .then(data => {
+                const jev = data.jev || {};
+                const pools = data.provider_pools || {};
 
                 // Completion rate chart
                 const completionCtx = document.getElementById('completionChart');
-                if (completionCtx) {{{{
-                    charts.completion = new Chart(completionCtx.getContext('2d'), {{{{
+                if (completionCtx) {
+                    charts.completion = new Chart(completionCtx.getContext('2d'), {
                         type: 'gauge',
-                        data: {{{{
+                        data: {
                             labels: ['Completion Rate'],
-                            datasets: [{{{{
+                            datasets: [{
                                 data: [Math.min(100, jev.completion_rate || 0)],
                                 backgroundColor: '#10b981',
                                 borderColor: '#ffffff',
                                 borderWidth: 2
-                            }}}}]
-                        }}}},
-                        options: {{{{
+                            }]
+                        },
+                        options: {
                             responsive: true,
                             maintainAspectRatio: false,
-                            plugins: {{{{
-                                legend: {{{{ display: false }}}},
-                                title: {{{{ display: true, text: 'Task Completion Rate (%)' }}}}
-                            }}}},
-                            scales: {{{{
-                                y: {{{{ min: 0, max: 100 }}}}
-                            }}}}
-                        }}}}
-                    }}}});
-                }}}}
+                            plugins: {
+                                legend: { display: false },
+                                title: { display: true, text: 'Task Completion Rate (%)' }
+                            },
+                            scales: {
+                                y: { min: 0, max: 100 }
+                            }
+                        }
+                    });
+                }
 
                 // Error rate chart
                 const errorCtx = document.getElementById('errorChart');
-                if (errorCtx) {{{{
-                    charts.error = new Chart(errorCtx.getContext('2d'), {{{{
+                if (errorCtx) {
+                    charts.error = new Chart(errorCtx.getContext('2d'), {
                         type: 'gauge',
-                        data: {{{{
+                        data: {
                             labels: ['Error Rate (%)'],
-                            datasets: [{{{{
+                            datasets: [{
                                 data: [Math.min(100, jev.error_rate || 0)],
                                 backgroundColor: '#ef4444',
                                 borderColor: '#ffffff',
                                 borderWidth: 2
-                            ]
-                        }}}},
-                        options: {{{{
+                            }]
+                        },
+                        options: {
                             responsive: true,
                             maintainAspectRatio: false,
-                            plugins: {{{{
-                                legend: {{{{ display: false }}}},
-                                title: {{{{ display: true, text: 'Error Rate (%)' }}}}
-                            }}}},
-                            scales: {{{{ y: {{{{ min: 0, max: 100 }}}} }}}}
-                        }}}}
-                    }}}});
-                }}}}
+                            plugins: {
+                                legend: { display: false },
+                                title: { display: true, text: 'Error Rate (%)' }
+                            },
+                            scales: { y: { min: 0, max: 100 } }
+                        }
+                    });
+                }
 
                 // Pool status chart
                 const poolCtx = document.getElementById('poolChart');
-                if (poolCtx && pools) {{{{
+                if (poolCtx && pools) {
                     const poolNames = Object.keys(pools);
                     const poolValues = pools.map(p => p.available ? 1 : (p.cooldown_remaining > 0 ? 0.5 : 0));
-                    charts.pools = new Chart(poolCtx.getContext('2d'), {{{{
+                    charts.pools = new Chart(poolCtx.getContext('2d'), {
                         type: 'bar',
-                        data: {{{{
+                        data: {
                             labels: poolNames.map(p => p.split('_')[0]),
-                            datasets: [{{{{
+                            datasets: [{
                                 label: 'Pool Status',
                                 data: poolValues,
                                 backgroundColor: poolValues.map(v => v === 1 ? '#10b981' : (v === 0.5 ? '#f59e0b' : '#ef4444'))
-                            }}}}]
-                        }}}},
-                        options: {{{{
+                            }]
+                        },
+                        options: {
                             responsive: true,
-                            scales: {{{{
-                                y: {{{{ min: 0, max: 1, ticks: {{{{ display: false }}}} }}}}
-                            }}}},
-                            plugins: {{{{
-                                legend: {{{{ display: false }}}},
-                                title: {{{{ display: true, text: 'Provider Pool Status' }}}}
-                            }}}}
-                        }}}}
-                    }}}});
-                }}}}
-            }}}})
+                            scales: {
+                                y: { min: 0, max: 1, ticks: { display: false } }
+                            },
+                            plugins: {
+                                legend: { display: false },
+                                title: { display: true, text: 'Provider Pool Status' }
+                            }
+                        }
+                    });
+                }
+            })
             .catch(err => console.error('Failed to load metrics:', err));
-        }}}}
+        }
 
         // Initialize charts when page loads
         document.addEventListener('DOMContentLoaded', initCharts);
         // Refresh charts every 30 seconds
-        setInterval(() => {{{{
+        setInterval(() => {
             fetch('/metrics')
                 .then(r => r.json())
-                .then(data => {{{{
-                    const jev = data.jev || {{{{}}}};
-                    const pools = data.provider_pools || {{{{}}}};
+                .then(data => {
+                    const jev = data.jev || {};
+                    const pools = data.provider_pools || {};
                     
                     // Update completion chart
-                    if (charts.completion) {{{{
+                    if (charts.completion) {
                         charts.completion.data.datasets[0].data = [Math.min(100, jev.completion_rate || 0)];
                         charts.completion.update();
-                    }}}}
+                    }
                     
                     // Update error chart
-                    if (charts.error) {{{{
+                    if (charts.error) {
                         charts.error.data.datasets[0].data = [Math.min(100, jev.error_rate || 0)];
                         charts.error.update();
-                    }}}}
-                }}}})
-                .catch(() => {{{{}}}});
-        }}}}, 30000);
+                    }
+                })
+                .catch(() => {});
+        }, 30000);
     </script>
 
     <script>
@@ -438,7 +438,7 @@ LOGIN_TEMPLATE = """<!DOCTYPE html>
                                     backgroundColor: '#10b981',
                                     borderColor: '#ffffff',
                                     borderWidth: 2
-                                ]
+                                }]
                             },
                             options: {
                                 responsive: true,
@@ -466,7 +466,7 @@ LOGIN_TEMPLATE = """<!DOCTYPE html>
                                     backgroundColor: '#ef4444',
                                     borderColor: '#ffffff',
                                     borderWidth: 2
-                                ]
+                                }]
                             },
                             options: {
                                 responsive: true,
@@ -566,7 +566,7 @@ LOGIN_TEMPLATE = """<!DOCTYPE html>
                                     backgroundColor: '#10b981',
                                     borderColor: '#ffffff',
                                     borderWidth: 2
-                                ]
+                                }]
                             },
                             options: {
                                 responsive: true,
@@ -594,7 +594,7 @@ LOGIN_TEMPLATE = """<!DOCTYPE html>
                                     backgroundColor: '#ef4444',
                                     borderColor: '#ffffff',
                                     borderWidth: 2
-                                ]
+                                }]
                             },
                             options: {
                                 responsive: true,
@@ -694,7 +694,7 @@ LOGIN_TEMPLATE = """<!DOCTYPE html>
                                     backgroundColor: '#10b981',
                                     borderColor: '#ffffff',
                                     borderWidth: 2
-                                ]
+                                }]
                             },
                             options: {
                                 responsive: true,
@@ -722,7 +722,7 @@ LOGIN_TEMPLATE = """<!DOCTYPE html>
                                     backgroundColor: '#ef4444',
                                     borderColor: '#ffffff',
                                     borderWidth: 2
-                                ]
+                                }]
                             },
                             options: {
                                 responsive: true,
@@ -822,7 +822,7 @@ LOGIN_TEMPLATE = """<!DOCTYPE html>
                                     backgroundColor: '#10b981',
                                     borderColor: '#ffffff',
                                     borderWidth: 2
-                                ]
+                                }]
                             },
                             options: {
                                 responsive: true,
@@ -850,7 +850,7 @@ LOGIN_TEMPLATE = """<!DOCTYPE html>
                                     backgroundColor: '#ef4444',
                                     borderColor: '#ffffff',
                                     borderWidth: 2
-                                ]
+                                }]
                             },
                             options: {
                                 responsive: true,
@@ -950,7 +950,7 @@ LOGIN_TEMPLATE = """<!DOCTYPE html>
                                     backgroundColor: '#10b981',
                                     borderColor: '#ffffff',
                                     borderWidth: 2
-                                ]
+                                }]
                             },
                             options: {
                                 responsive: true,
@@ -978,7 +978,7 @@ LOGIN_TEMPLATE = """<!DOCTYPE html>
                                     backgroundColor: '#ef4444',
                                     borderColor: '#ffffff',
                                     borderWidth: 2
-                                ]
+                                }]
                             },
                             options: {
                                 responsive: true,
@@ -1771,6 +1771,7 @@ _HIVE_METRICS_CACHE: dict = {}
 _HIVE_METRICS_FILE_STATE: dict = {}
 _HIVE_METRICS_STATE_LOADED_PATH = None
 _HIVE_METRICS_LAST_PERSIST_TS = 0.0
+_HIVE_METRICS_LAST_PERSIST_PATH = None
 _HIVE_METRICS_REFRESH_RUNNING = False
 _HIVE_METRICS_LOCK = threading.Lock()
 _HIVE_METRICS_SCAN_LOCK = threading.Lock()
@@ -1830,7 +1831,7 @@ def _ensure_hive_metrics_state_loaded() -> None:
 
 
 def _save_hive_metrics_state(data: dict) -> None:
-    global _HIVE_METRICS_LAST_PERSIST_TS
+    global _HIVE_METRICS_LAST_PERSIST_TS, _HIVE_METRICS_LAST_PERSIST_PATH
     try:
         path = Path(HIVE_METRICS_STATE_FILE)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1840,6 +1841,7 @@ def _save_hive_metrics_state(data: dict) -> None:
         )
         tmp.replace(path)
         _HIVE_METRICS_LAST_PERSIST_TS = time.time()
+        _HIVE_METRICS_LAST_PERSIST_PATH = str(path)
     except Exception:
         pass
 
@@ -1880,7 +1882,7 @@ def _refresh_hive_metrics() -> dict:
             previous = state.get(name)
             if (
                 isinstance(previous, list)
-                and len(previous) >= 2
+                and len(previous) >= 6
                 and previous[0] == stat.st_mtime_ns
                 and previous[1] == stat.st_size
             ):
@@ -1895,6 +1897,7 @@ def _refresh_hive_metrics() -> dict:
                 continue
 
             is_jev = task.get("metadata", {}).get("source") == "jev-cloud-orchestrator"
+            is_dost = (task.get("metadata") or {}).get("source") == "dost"
             status = task.get("status")
             if not isinstance(status, str):
                 status = ""
@@ -1905,7 +1908,14 @@ def _refresh_hive_metrics() -> dict:
                     task_time = time.mktime(time.strptime(raw_ts, "%Y-%m-%dT%H:%M:%SZ"))
                 except (TypeError, ValueError):
                     task_time = None
-            state[name] = [stat.st_mtime_ns, stat.st_size, 1 if is_jev else 0, status, task_time]
+            state[name] = [
+                stat.st_mtime_ns,
+                stat.st_size,
+                1 if is_jev else 0,
+                status,
+                task_time,
+                task if is_dost else None,
+            ]
             changed = True
 
         for name in list(state.keys()):
@@ -1957,7 +1967,10 @@ def _refresh_hive_metrics() -> dict:
         _HIVE_METRICS_CACHE["ts"] = now
         _HIVE_METRICS_CACHE["data"] = data
         _HIVE_METRICS_CACHE["ready"] = True
-        if changed and now - _HIVE_METRICS_LAST_PERSIST_TS >= HIVE_METRICS_PERSIST_INTERVAL_SEC:
+        if changed and (
+            now - _HIVE_METRICS_LAST_PERSIST_TS >= HIVE_METRICS_PERSIST_INTERVAL_SEC
+            or _HIVE_METRICS_LAST_PERSIST_PATH != str(HIVE_METRICS_STATE_FILE)
+        ):
             _save_hive_metrics_state(data)
         return data
 
@@ -2023,6 +2036,27 @@ def _hive_task_metrics() -> dict:
     if time.time() - _HIVE_METRICS_CACHE.get("ts", 0.0) >= HIVE_METRICS_CACHE_TTL_SEC:
         _schedule_hive_metrics_refresh()
     return cached
+
+
+def _recent_dost_tasks(limit: int = 20) -> list:
+    """Return the most recent dost tasks from the background-maintained index.
+
+    The refresher already visits every task file, so the request path reads the
+    index it keeps instead of opening the whole hive on every request.
+    """
+    _ensure_hive_metrics_state_loaded()
+    tasks = []
+    for entry in _HIVE_METRICS_FILE_STATE.values():
+        if not isinstance(entry, list) or len(entry) < 6:
+            continue
+        task = entry[5]
+        if not isinstance(task, dict):
+            continue
+        if (task.get("metadata") or {}).get("source") != "dost":
+            continue
+        tasks.append(task)
+    tasks.sort(key=lambda t: t.get("updated_at", "") or t.get("created_at", ""), reverse=True)
+    return tasks[:limit]
 
 
 class OfficeHandler(BaseHTTPRequestHandler):
@@ -3308,17 +3342,7 @@ class OfficeHandler(BaseHTTPRequestHandler):
         # Recent dost tasks (last 10, source=="dost") with status and result preview
         dost_rows = ""
         try:
-            dost_tasks = []
-            for hive_file in glob.glob(os.path.join(HIVE_DIR, "*.json")):
-                try:
-                    with open(hive_file) as f:
-                        t = json.load(f)
-                    if t.get("metadata", {}).get("source") == "dost":
-                        dost_tasks.append(t)
-                except Exception:
-                    pass
-            dost_tasks.sort(key=lambda x: x.get("updated_at", "") or x.get("created_at", ""), reverse=True)
-            for t in dost_tasks[:10]:
+            for t in _recent_dost_tasks(10):
                 result = t.get("result")
                 if not isinstance(result, str):
                     result = str(result) if result else ""
@@ -3471,19 +3495,7 @@ class OfficeHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            HIVE_DIR = Path("/Users/aryanagarwal/AI-Office/packages/office-os/tasks")
-            tasks = []
-            if HIVE_DIR.exists():
-                for hive_file in glob.glob(os.path.join(HIVE_DIR, "*.json")):
-                    try:
-                        with open(hive_file) as f:
-                            task = json.load(f)
-                        if (task.get("metadata") or {}).get("source") == "dost":
-                            tasks.append(task)
-                    except Exception:
-                        continue
-                tasks.sort(key=lambda x: x.get("updated_at", "") or x.get("created_at", ""), reverse=True)
-                tasks = tasks[:20]
+            tasks = _recent_dost_tasks(20)
         except Exception:
             tasks = []
         self._send_json({"tasks": tasks, "total": len(tasks)})
@@ -3832,19 +3844,7 @@ class OfficeHandler(BaseHTTPRequestHandler):
     def _serve_results_page(self):
         """Results page — recent dispatch results."""
         try:
-            HIVE_DIR = Path("/Users/aryanagarwal/AI-Office/packages/office-os/tasks")
-            tasks = []
-            if HIVE_DIR.exists():
-                for hive_file in glob.glob(os.path.join(HIVE_DIR, "*.json")):
-                    try:
-                        with open(hive_file) as f:
-                            task = json.load(f)
-                        if (task.get("metadata") or {}).get("source") == "dost":
-                            tasks.append(task)
-                    except Exception:
-                        continue
-                tasks.sort(key=lambda x: x.get("updated_at", "") or x.get("created_at", ""), reverse=True)
-                tasks = tasks[:30]
+            tasks = _recent_dost_tasks(30)
         except Exception:
             tasks = []
         rows = ""

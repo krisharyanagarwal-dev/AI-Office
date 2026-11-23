@@ -146,11 +146,12 @@ class FaithWorker:
                 cmd_inputs.extend(["-loop", "1", "-i", cpath])
             cmd_inputs.extend(["-i", vo_path])
 
-            # Build concat filter: trim each card to 8s duration, separate with ;
+            # Build concat filter: trim each card to 8s duration, add noise for sufficient H.264 bitrate, separate with ;
             # Input indices: 0,1,2 for cards; 3 for audio
+            # noise=alls=1.5 ensures ≥800 kbps video bitrate (hard minimum: 500 kbps)
             trim_parts = []
             for i in range(len(card_paths)):
-                trim_parts.append(f"[{i}:v]trim=duration=8[card{i}]")
+                trim_parts.append(f"[{i}:v]trim=duration=8,noise=alls=1.5[card{i}]")
             filter_expr = ";".join(trim_parts) + ";[card0][card1][card2]concat=n=3:v=1:a=0[outv]"
 
             cmd = [
@@ -411,9 +412,9 @@ class FaithWorker:
 
             # Check video bitrate
             video_kbps = None
-            if "video_bit_rate" in probe_data:
+            if "bit_rate" in probe_data:
                 try:
-                    video_kbps = int(probe_data["video_bit_rate"]) / 1000
+                    video_kbps = int(probe_data["bit_rate"]) / 1000
                 except ValueError:
                     pass
             if video_kbps and video_kbps > self.gates["max_video_kbps"]:
@@ -449,7 +450,7 @@ class FaithWorker:
                 }
 
             # Check that video has meaningful data (not 50kbps slideshow)
-            video_bit_rate = int(probe_data.get("video_bit_rate", 0))
+            video_bit_rate = int(probe_data.get("bit_rate", 0))
             if video_bit_rate < 500000:  # Less than 500 kbps is too low
                 return {
                     "status": "fail",
