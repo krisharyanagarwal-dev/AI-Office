@@ -2117,6 +2117,8 @@ class OfficeHandler(BaseHTTPRequestHandler):
             self._serve_health_providers()
         elif path == "/api/health":
             self._serve_health()
+        elif path == "/events":
+            self._serve_sse_events()
         else:
             self.send_error(404)
 
@@ -3002,6 +3004,49 @@ class OfficeHandler(BaseHTTPRequestHandler):
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         self._send_json(payload)
+
+    def _serve_sse_events(self):
+        """GET /events - Server-Sent Events stream for real-time metrics."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+
+        import queue
+        import threading
+
+        # Create a queue for this connection
+        event_queue = queue.Queue()
+
+        # Background thread to push metrics updates
+        def metrics_pusher():
+            last_metrics = None
+            while True:
+                try:
+                    # Build metrics payload (same as /api/metrics)
+                    payload = self._build_metrics_payload()
+                    if payload != last_metrics:
+                        data = json.dumps(payload)
+                        self.wfile.write(f"data: {data}\n\n".encode("utf-8"))
+                        self.wfile.flush()
+                        last_metrics = payload
+                    time.sleep(5)  # Push every 5 seconds
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    break
+                except Exception:
+                    time.sleep(5)
+
+        pusher_thread = threading.Thread(target=metrics_pusher, daemon=True)
+        pusher_thread.start()
+
+        # Keep connection alive until client disconnects
+        try:
+            while pusher_thread.is_alive():
+                time.sleep(1)
+        except Exception:
+            pass
 
     def build_activity_panel_html(self, workspace_id: str = "default") -> str:
         """Build the activity feed panel HTML from workspace activity JSONL logs.
