@@ -149,14 +149,21 @@ class RiskGovernor:
         return LimitResult(status=LimitStatus.PASS)
 
     def check_symbol_exposure(self, symbol: str, equity: float) -> LimitResult:
-        """Check max exposure to a single symbol."""
-        # Current notional for this symbol from open positions
+        """Check max exposure to a single symbol.
+
+        Uses the recorded gross notional when present so a delta-flat
+        carry book (long spot + short perp, net zero) is measured by its
+        true gross exposure rather than netting to zero.
+        """
         pos_notional = 0.0
         if symbol in self.limits.positions:
             pos = self.limits.positions[symbol]
-            qty = pos.get("quantity", 0) or 0
-            entry = pos.get("avg_entry_price", 0) or 0
-            pos_notional = abs(qty * entry)
+            if pos.get("gross_notional") is not None:
+                pos_notional = float(pos.get("gross_notional"))
+            else:
+                qty = pos.get("quantity", 0) or 0
+                entry = pos.get("avg_entry_price", 0) or 0
+                pos_notional = abs(qty * entry)
 
         total_symbol_notional = pos_notional  # no hedging netting in this simple guard
         pct = total_symbol_notional / equity if equity > 0 else 0.0
@@ -168,11 +175,21 @@ class RiskGovernor:
         return LimitResult(status=LimitStatus.PASS)
 
     def check_total_exposure(self, equity: float) -> LimitResult:
-        """Check aggregate exposure across all open symbols."""
-        total_notional = sum(
-            (pos.get("avg_entry_price", 0) * pos.get("quantity", 0) or 0)
-            for pos in self.limits.positions.values()
-        )
+        """Check aggregate exposure across all open symbols.
+
+        Sums gross notionals when recorded so delta-flat books (gross
+        exposure far above net) are not hidden by signed netting.
+        """
+        total_notional = 0.0
+        for pos in self.limits.positions.values():
+            gross = pos.get("gross_notional")
+            if gross is not None:
+                total_notional += float(gross)
+            else:
+                entry = pos.get("avg_entry_price", 0) or 0
+                qty = pos.get("quantity", 0) or 0
+                total_notional += entry * qty
+
         pct = total_notional / equity if equity > 0 else 0.0
         if pct > self.limits.max_total_exposure_pct:
             return LimitResult(
@@ -191,8 +208,16 @@ class RiskGovernor:
         return LimitResult(status=LimitStatus.PASS)
 
     def check_daily_loss(self) -> LimitResult:
-        """Check max daily loss limit."""
-        loss_pct = abs(self.limits.daily_pnl) / self.limits.start_of_day_equity if self.limits.start_of_day_equity > 0 else 0.0
+        """Check max daily loss limit.
+
+        Only a losing day (negative daily P&L) can trip the cap — a
+        profitable day must never be treated as a loss.
+        """
+        loss_pct = (
+            max(-self.limits.daily_pnl, 0.0) / self.limits.start_of_day_equity
+            if self.limits.start_of_day_equity > 0
+            else 0.0
+        )
         if loss_pct > self.limits.max_daily_loss_pct:
             return LimitResult(
                 status=LimitStatus.FAIL,

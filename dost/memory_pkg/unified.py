@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+
 def _default_paths() -> tuple[Path, Path]:
     """Get default memory directory paths."""
     DOST_DIR = Path(__file__).resolve().parent.parent
@@ -30,6 +31,37 @@ def _default_paths() -> tuple[Path, Path]:
     JARVIS_DIR.mkdir(parents=True, exist_ok=True)
     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
     return JARVIS_DIR, MEMORY_DIR
+
+
+@dataclass
+class Fact:
+    """Extracted fact from conversation."""
+    id: str
+    type: str  # entity, preference, decision, action_item
+    content: str
+    confidence: float
+    source: str  # voice, web, cli, telegram
+    conversation_id: str
+    timestamp: str
+    metadata: dict = field(default_factory=dict)
+
+
+@dataclass
+class Session:
+    """Conversation session."""
+    id: str
+    interface: str  # voice, web, cli, telegram
+    user_id: Optional[str]
+    created_at: str
+    updated_at: str
+    messages: list[dict] = field(default_factory=list)
+    facts: list[Fact] = field(default_factory=list)
+    metadata: dict = field(default_factory=dict)
+    # Cross-interface tracking
+    interface_history: list[dict] = field(default_factory=list)  # [{"interface": str, "at": str, "message_count": int}]
+    summary: str = ""  # Auto-generated conversation summary
+    last_summary_at: str = ""
+    context_window: int = 20  # Max messages to keep in context
 
 
 class UnifiedMemory:
@@ -59,44 +91,11 @@ class UnifiedMemory:
         self.vector_index_file = self.memory_dir / "vector_index.json"
         self.preferences_file = self.memory_dir / "preferences.json"
 
-        self._load_facts()
-        self._load_vector_index()
+        # Ensure directories and files exist
+        self.jarvis_dir.mkdir(parents=True, exist_ok=True)
+        self.memory_dir.mkdir(parents=True, exist_ok=True)
+        self.conversations_file.touch(exist_ok=True)
 
-
-@dataclass
-class Fact:
-    """Extracted fact from conversation."""
-    id: str
-    type: str  # entity, preference, decision, action_item
-    content: str
-    confidence: float
-    source: str  # voice, web, cli, telegram
-    conversation_id: str
-    timestamp: str
-    metadata: dict = field(default_factory=dict)
-
-
-@dataclass
-class Session:
-    """Conversation session."""
-    id: str
-    interface: str  # voice, web, cli, telegram
-    user_id: Optional[str]
-    created_at: str
-    updated_at: str
-    messages: list[dict] = field(default_factory=list)
-    facts: list[Fact] = field(default_factory=list)
-    metadata: dict = field(default_factory=dict)
-
-
-class UnifiedMemory:
-    """Unified memory layer for Dost."""
-
-    def __init__(self, workspace_id: str = "default"):
-        self.workspace_id = workspace_id
-        self._sessions: dict[str, Session] = {}
-        self._facts_cache: list[Fact] = []
-        self._vector_index: dict[str, list[float]] = {}  # fact_id -> embedding
         self._load_facts()
         self._load_vector_index()
 
@@ -300,7 +299,7 @@ class UnifiedMemory:
 
         # Action items
         action_patterns = [
-            (r"(?:need to|have to|should|must|todo:|action:)\s+([^.!?]+)", "action_item"),
+            (r"(?:need to|have to|should|must|todo:|action:)\s+(.+?)(?:\.|!|\?|$)", "action_item"),
         ]
         for pattern, ftype in action_patterns:
             for match in re.finditer(pattern, text, re.IGNORECASE):
@@ -315,9 +314,10 @@ class UnifiedMemory:
                 )
                 facts.append(fact)
 
-        # Add to cache and save
+        # Add to cache, vector index, and save
         for fact in facts:
             self._facts_cache.append(fact)
+            self.add_to_index(fact)
         self._save_facts()
 
         return facts
@@ -420,6 +420,17 @@ class UnifiedMemory:
         session = self.load_session(conversation_id)
         if not session:
             session = self.create_session(conversation_id, interface=interface)
+        else:
+            # Track interface switch
+            prev_interface = session.interface
+            if prev_interface != interface:
+                session.interface_history.append({
+                    "from_interface": prev_interface,
+                    "to_interface": interface,
+                    "at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "message_count": len(session.messages),
+                })
+            session.interface = interface
 
         for msg in messages:
             self.add_message(
@@ -445,6 +456,141 @@ class UnifiedMemory:
             "messages": session.messages[-limit:],
             "facts": [f.__dict__ for f in self.get_facts(conversation_id)],
             "preferences": self._load_preferences(),
+            "summary": session.summary,
+            "interface_history": session.interface_history,
+        }
+
+    def build_context_prompt(self, conversation_id: str, current_query: str, limit: int = 20) -> str:
+        """Build context-aware prompt with memory injection for LLM.
+
+        Injects:
+        - Conversation summary
+        - Recent messages
+        - Relevant facts (entities, preferences, decisions)
+        - Interface context
+        """
+        context = self.get_all_context(conversation_id, limit=limit)
+        session = self._sessions.get(conversation_id) or self.load_session(conversation_id)
+
+        if not session or not session.messages:
+            return current_query
+
+        parts = []
+
+        # 1. Conversation summary
+        if session.summary:
+            parts.append(f"=== Conversation Summary ===\n{session.summary}\n")
+
+        # 2. Relevant facts
+        facts = self.search(current_query, limit=5)
+        if facts:
+            fact_lines = [f"- {f.type}: {f.content} (confidence: {f.confidence:.0%})" for f in facts]
+            parts.append("=== Relevant Facts ===\n" + "\n".join(fact_lines) + "\n")
+
+        # 3. User preferences
+        prefs = context.get("preferences", {})
+        if prefs:
+            pref_lines = [f"- {k}: {v}" for k, v in prefs.items()]
+            parts.append("=== User Preferences ===\n" + "\n".join(pref_lines) + "\n")
+
+        # 4. Recent conversation
+        recent_msgs = context.get("messages", [])
+        if recent_msgs:
+            msg_lines = []
+            for msg in recent_msgs[-10:]:  # Last 10 messages
+                role = msg.get("role", "unknown")
+                content = msg.get("content", "")[:200]
+                src = msg.get("metadata", {}).get("source_interface", "")
+                src_tag = f" [{src}]" if src else ""
+                msg_lines.append(f"{role}{src_tag}: {content}")
+            parts.append("=== Recent Conversation ===\n" + "\n".join(msg_lines) + "\n")
+
+        # 5. Current query
+        parts.append(f"=== Current Query ===\n{current_query}")
+
+        return "\n".join(parts)
+
+    def summarize_session(self, conversation_id: str) -> str:
+        """Generate conversation summary using LLM (or simple extraction)."""
+        session = self._sessions.get(conversation_id) or self.load_session(conversation_id)
+        if not session or not session.messages:
+            return ""
+
+        # Extract key topics from messages
+        all_text = " ".join(m.get("content", "") for m in session.messages)
+
+        # Simple extractive summary: top entities, decisions, action items
+        entities = self.get_facts(conversation_id, fact_type="entity", limit=10)
+        decisions = self.get_facts(conversation_id, fact_type="decision", limit=5)
+        actions = self.get_facts(conversation_id, fact_type="action_item", limit=5)
+        prefs = self.get_facts(conversation_id, fact_type="preference", limit=5)
+
+        summary_parts = []
+        if entities:
+            summary_parts.append(f"Entities discussed: {', '.join(e.content for e in entities[:5])}")
+        if decisions:
+            summary_parts.append(f"Decisions: {'; '.join(d.content for d in decisions[:3])}")
+        if actions:
+            summary_parts.append(f"Action items: {'; '.join(a.content for a in actions[:3])}")
+        if prefs:
+            summary_parts.append(f"Preferences noted: {'; '.join(p.content for p in prefs[:3])}")
+
+        summary = ". ".join(summary_parts)
+
+        # Update session
+        session.summary = summary
+        session.last_summary_at = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.save_session(session)
+
+        return summary
+
+    def merge_sessions(self, primary_id: str, secondary_id: str) -> Session:
+        """Merge secondary session into primary (for cross-interface continuity)."""
+        primary = self._sessions.get(primary_id) or self.load_session(primary_id)
+        secondary = self._sessions.get(secondary_id) or self.load_session(secondary_id)
+
+        if not primary or not secondary:
+            raise ValueError("Both sessions must exist")
+
+        # Merge messages chronologically
+        all_messages = primary.messages + secondary.messages
+        all_messages.sort(key=lambda m: m.get("timestamp", ""))
+
+        # Keep within context window
+        if len(all_messages) > primary.context_window:
+            all_messages = all_messages[-primary.context_window:]
+
+        primary.messages = all_messages
+        primary.updated_at = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+        primary.interface_history.extend(secondary.interface_history)
+
+        # Merge facts
+        for fact in secondary.facts:
+            if fact not in primary.facts:
+                primary.facts.append(fact)
+
+        self.save_session(primary)
+        return primary
+
+    def get_session_stats(self, conversation_id: str) -> dict:
+        """Get statistics for a session."""
+        session = self._sessions.get(conversation_id) or self.load_session(conversation_id)
+        if not session:
+            return {}
+
+        interfaces = set(m.get("metadata", {}).get("source_interface", "") for m in session.messages)
+        interfaces.discard("")
+
+        return {
+            "conversation_id": session.id,
+            "message_count": len(session.messages),
+            "fact_count": len(self.get_facts(conversation_id)),
+            "interfaces_used": list(interfaces),
+            "interface_switches": len(session.interface_history),
+            "created_at": session.created_at,
+            "updated_at": session.updated_at,
+            "has_summary": bool(session.summary),
+            "context_window": session.context_window,
         }
 
 

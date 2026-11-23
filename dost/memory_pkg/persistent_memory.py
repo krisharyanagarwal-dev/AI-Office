@@ -40,11 +40,13 @@ def _save_json(path: Path, data: Any) -> None:
 class ConversationMemory:
     """Persistent conversation memory for Dost."""
 
-    def __init__(self, workspace_id: str = "default"):
+    def __init__(self, workspace_id: str = "default", memory_dir: Path | None = None):
         self.workspace_id = workspace_id
-        self.conversations_file = MEMORY_DIR / f"conversations_{workspace_id}.json"
-        self.pending_items_file = MEMORY_DIR / f"pending_items_{workspace_id}.json"
-        self.preferences_file = MEMORY_DIR / f"preferences_{workspace_id}.json"
+        base = memory_dir or MEMORY_DIR
+        base.mkdir(parents=True, exist_ok=True)
+        self.conversations_file = base / f"conversations_{workspace_id}.json"
+        self.pending_items_file = base / f"pending_items_{workspace_id}.json"
+        self.preferences_file = base / f"preferences_{workspace_id}.json"
 
     def add_interaction(
         self,
