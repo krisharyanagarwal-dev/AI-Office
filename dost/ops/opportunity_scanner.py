@@ -11,6 +11,7 @@ Hourly scans for trading/research opportunities:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time

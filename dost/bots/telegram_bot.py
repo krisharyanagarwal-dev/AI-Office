@@ -34,7 +34,7 @@ DOST_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(COMPANY_DIR))
 sys.path.insert(0, str(DOST_DIR))
 
-from dost import companion_respond, generate_daily_briefing, MEMORY  # noqa: E402  (dost/dost.py; DOST_DIR is first on sys.path)
+from dost import companion_respond, generate_daily_briefing, MEMORY  # noqa: E402  (dost package now uses dost_main)
 from openai_components import provider_health, speech_to_text, text_to_speech  # noqa: E402
 
 

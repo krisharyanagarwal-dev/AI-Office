@@ -146,6 +146,10 @@ class UnifiedMemory:
                             updated_at=data.get("updated_at", ""),
                             messages=data.get("messages", []),
                             metadata=data.get("metadata", {}),
+                            interface_history=data.get("interface_history", []),
+                            summary=data.get("summary", ""),
+                            last_summary_at=data.get("last_summary_at", ""),
+                            context_window=data.get("context_window", 20),
                         )
                 except json.JSONDecodeError:
                     continue
@@ -184,6 +188,10 @@ class UnifiedMemory:
             "updated_at": session.updated_at,
             "messages": session.messages,
             "metadata": session.metadata,
+            "interface_history": session.interface_history,
+            "summary": session.summary,
+            "last_summary_at": session.last_summary_at,
+            "context_window": session.context_window,
         }
         # Append to JSONL (one line per session update)
         with open(self.conversations_file, "a") as f:

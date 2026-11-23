@@ -188,10 +188,16 @@ class SkillRegistry:
             spec = importlib.util.spec_from_file_location(name, module_path)
             if spec and spec.loader:
                 module = importlib.util.module_from_spec(spec)
+                # Add to sys.modules BEFORE exec to allow dataclass to find module
+                sys.modules[name] = module
+                module.__module__ = name
                 spec.loader.exec_module(module)
                 return module
         except Exception as e:
             print(f"[registry] Failed to load module for {name}: {e}")
+        finally:
+            # Clean up sys.modules
+            sys.modules.pop(name, None)
         return None
 
     def run_skill(self, name: str, *args, **kwargs) -> Any:

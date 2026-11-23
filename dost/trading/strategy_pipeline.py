@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from dost.dost import dispatch_prompt_to_fleet
+from dost.dost_main import dispatch_prompt_to_fleet
 from dost.trading.strategy_engine import generate_all_signals
 from dost.trading.backtest_engine import run_backtest
 from dost.trading.position_sizer import calculate_position_size
