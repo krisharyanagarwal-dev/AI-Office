@@ -106,6 +106,7 @@ class UnifiedMemory:
         conversation_id: str | None = None,
         interface: str = "cli",
         user_id: str | None = None,
+        context_window: int = 20,
     ) -> Session:
         """Create a new conversation session."""
         cid = conversation_id or f"conv-{uuid.uuid4().hex[:8]}"
@@ -117,6 +118,7 @@ class UnifiedMemory:
             user_id=user_id,
             created_at=now,
             updated_at=now,
+            context_window=context_window,
         )
         self._sessions[cid] = session
         return session
@@ -128,6 +130,7 @@ class UnifiedMemory:
     def load_session(self, conversation_id: str) -> Session | None:
         """Load session from disk."""
         # Try jarvis_memory conversations.jsonl first
+        session = None
         if self.conversations_file.exists():
             for line in self.conversations_file.read_text().strip().split("\n"):
                 if not line:
@@ -144,14 +147,15 @@ class UnifiedMemory:
                             messages=data.get("messages", []),
                             metadata=data.get("metadata", {}),
                         )
-                        self._sessions[conversation_id] = session
-                        return session
                 except json.JSONDecodeError:
                     continue
+            if session:
+                self._sessions[conversation_id] = session
+                return session
 
-        # Fallback to memory_pkg conversations
+        # Fallback to memory_pkg conversations (use instance memory_dir for isolation)
         from memory_pkg.persistent_memory import ConversationMemory
-        conv_mem = ConversationMemory(self.workspace_id)
+        conv_mem = ConversationMemory(self.workspace_id, memory_dir=self.memory_dir)
         interactions = conv_mem.get_recent_context(limit=50)
         if interactions:
             session = Session(
@@ -562,6 +566,14 @@ class UnifiedMemory:
 
         primary.messages = all_messages
         primary.updated_at = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+        # Add secondary's initial interface as a history entry if not already present
+        if secondary.interface and (not primary.interface_history or primary.interface_history[-1].get("to_interface") != secondary.interface):
+            primary.interface_history.append({
+                "from_interface": primary.interface,
+                "to_interface": secondary.interface,
+                "at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "message_count": len(primary.messages),
+            })
         primary.interface_history.extend(secondary.interface_history)
 
         # Merge facts

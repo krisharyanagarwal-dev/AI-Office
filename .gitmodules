@@ -1,0 +1,3 @@
+[submodule "packages/qoder-session-floor"]
+	path = packages/qoder-session-floor
+	url = https://github.com/krisharyanagarwal-dev/qoder-session-floor.git
