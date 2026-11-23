@@ -67,7 +67,8 @@ packages/_archive/
 
 # Vendored sibling project — src/openalice-fleet is its own git repo (481MB,
 # ~30k files incl. node_modules). Committing it would embed a broken gitlink.
-src/
+# Anchored to the repo root so dashboard-ui/src and unified-api/src stay tracked.
+/src/
 
 # Runtime artifacts, not source
 packages/office-core/pids/
