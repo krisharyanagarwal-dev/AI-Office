@@ -74,7 +74,7 @@ def _equity_ticker():
             "priceToBook": 2.0,
             "returnOnEquity": 0.25,
             "profitMargins": 0.20,
-            "debtToEquity": 0.2,
+            "debtToEquity": 20.0,
             "currentRatio": 2.5,
             "totalVolume": 10_000_000,
             "fiftyTwoWeekHigh": 120.0,
@@ -147,6 +147,48 @@ def test_equity_analysis_keeps_its_existing_flags(monkeypatch):
     assert result["valuation_flag"] == "Cheap"
     assert result["roe_flag"] == "High"
     assert result["volatility_30d_pct"] is None
+    # Provider debtToEquity is a percentage (20.0 = 20%), normalized to a ratio.
+    assert result["debt_to_equity"] == 0.2
+    assert result["debt_to_equity_unit"] == "ratio"
+    assert result["leverage_flag"] == "Low"
+
+
+def _ratio_fallback_ticker():
+    """Yahoo omits debtToEquity; balance-sheet totals must be used instead."""
+    return FakeTicker(
+        fast_info={"lastPrice": 100.0},
+        info={
+            "quoteType": "EQUITY",
+            "longName": "Example Corp",
+            "regularMarketPrice": 100.0,
+            "marketCap": 5_000_000_000,
+            "totalDebt": 800_000_000,
+            "totalStockholderEquity": 1_000_000_000,
+        },
+        closes=[100.0, 99.0, 101.0],
+    )
+
+
+def test_equity_debt_to_equity_falls_back_to_balance_sheet_ratio(monkeypatch):
+    """Computed totalDebt/totalEquity is already a ratio and is kept as-is."""
+    monkeypatch.setattr(producer.yf, "Ticker", lambda symbol: _ratio_fallback_ticker())
+    result = producer.analyze_symbol("EXAMPLE")
+
+    assert result["debt_to_equity"] == pytest.approx(0.8)
+    assert result["debt_to_equity_unit"] == "ratio"
+    assert result["leverage_flag"] == "Moderate"
+
+
+def test_equity_debt_to_equity_provider_percent_normalizes_to_ratio(monkeypatch):
+    """Provider percentage (e.g. 150 = 150%) divides by 100 into a ratio."""
+    ticker = _ratio_fallback_ticker()
+    ticker._info["debtToEquity"] = 150.0
+    monkeypatch.setattr(producer.yf, "Ticker", lambda symbol: ticker)
+    result = producer.analyze_symbol("EXAMPLE")
+
+    assert result["debt_to_equity"] == 1.5
+    assert result["debt_to_equity_unit"] == "ratio"
+    assert result["leverage_flag"] == "High"
 
 
 def test_alias_map_covers_every_symbol_spelling_used_by_bots():

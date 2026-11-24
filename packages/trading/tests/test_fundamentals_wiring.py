@@ -338,6 +338,33 @@ def test_execution_engine_works_without_fundamentals(monkeypatch):
     assert order.status == ee_mod.OrderStatus.SUBMITTED
 
 
+def test_execution_engine_portfolio_summary_emits_currency(monkeypatch):
+    """Portfolio summary snapshot always carries the quote currency."""
+    import packages.trading.alpha.execution.execution_engine as ee_mod
+
+    monkeypatch.setattr(
+        ee_mod, "symbol_fundamentals",
+        lambda metrics, symbol: None,
+        raising=False,
+    )
+
+    engine = ee_mod.ExecutionEngine()
+
+    class MockBroker:
+        positions = {}
+        balances = {"USDT": 1000.0}
+
+        def get_market_price(self, symbol):
+            return None
+
+    engine.add_broker("mock", MockBroker(), is_default=True)
+
+    snapshot = engine.get_portfolio_summary("mock")
+
+    assert snapshot["currency"] == "USDT"
+    assert snapshot["equity"] == 1000.0
+
+
 def test_risk_manager_kelly_sizing():
     """Test Kelly criterion position sizing."""
     from alpha.risk.risk_manager import RiskManager, RiskLimits

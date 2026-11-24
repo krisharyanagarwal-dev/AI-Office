@@ -756,6 +756,7 @@ class ExecutionEngine:
 
         snapshot = {
             "broker": broker_name,
+            "currency": "USDT",
             "cash": cash,
             "market_value": market_value,
             "equity": equity,
