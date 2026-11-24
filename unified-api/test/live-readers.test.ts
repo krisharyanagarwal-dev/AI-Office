@@ -6,6 +6,8 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { DatabaseSync } from 'node:sqlite'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 
 const projectRoot = path.resolve(import.meta.dirname, '..')
 
@@ -503,6 +505,54 @@ describe('read-only API routes', () => {
       assert.deepEqual(mutation.json(), { error: 'Read-only API' })
     } finally {
       await app.close()
+    }
+  })
+})
+
+describe('service health self-probe', () => {
+  it('reports the API itself without issuing an HTTP request to its own port', async () => {
+    const { loadServiceHealth } = await import('../src/index.ts')
+
+    const selfHits: string[] = []
+    const peerHits: string[] = []
+
+    const selfServer = createServer((req, res) => {
+      selfHits.push(req.url ?? '')
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true }))
+    })
+    const peerServer = createServer((req, res) => {
+      peerHits.push(req.url ?? '')
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true }))
+    })
+
+    await new Promise<void>((resolve) => selfServer.listen(0, '127.0.0.1', resolve))
+    await new Promise<void>((resolve) => peerServer.listen(0, '127.0.0.1', resolve))
+
+    const selfPort = (selfServer.address() as AddressInfo).port
+    const peerPort = (peerServer.address() as AddressInfo).port
+
+    try {
+      const statuses = await loadServiceHealth({
+        registry: [
+          { name: 'Unified API', port: selfPort, probePath: '/api/health' },
+          { name: 'Peer', port: peerPort, probePath: '/peer' },
+        ],
+        selfPort,
+      })
+
+      assert.deepEqual(selfHits, [])
+      assert.deepEqual(peerHits, ['/peer'])
+
+      const selfStatus = statuses.find((status) => status.name === 'Unified API')
+      const peerStatus = statuses.find((status) => status.name === 'Peer')
+      assert.equal(selfStatus?.status, 'healthy')
+      assert.equal(peerStatus?.status, 'healthy')
+      assert.equal(peerStatus?.responseTimeMs >= 0, true)
+    } finally {
+      await new Promise<void>((resolve) => selfServer.close(() => resolve()))
+      await new Promise<void>((resolve) => peerServer.close(() => resolve()))
     }
   })
 })

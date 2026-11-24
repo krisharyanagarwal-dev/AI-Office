@@ -190,8 +190,16 @@ const STATE_DATABASE_PATH = '/Users/aryanagarwal/AI-Office/data/all_in_one_state
 const ALERT_STATE_PATH = '/Users/aryanagarwal/.openclaw/fundamentals_alert_state.json'
 
 // Loopback services that make up the trading stack, each with a real route to probe.
-const SERVICE_REGISTRY: Array<{ name: string; port: number; probePath: string }> = [
-  { name: 'Unified API', port: 4749, probePath: '/api/health' },
+const API_PORT = 4749
+
+interface ServiceRegistryEntry {
+  name: string
+  port: number
+  probePath: string
+}
+
+const SERVICE_REGISTRY: ServiceRegistryEntry[] = [
+  { name: 'Unified API', port: API_PORT, probePath: '/api/health' },
   { name: 'Office HUD', port: 4747, probePath: '/api/health' },
   { name: 'OpenClaw Control', port: 18789, probePath: '/' },
   { name: 'Fleet Console', port: 4790, probePath: '/' },
@@ -663,10 +671,11 @@ function normalizeIsoDate(value: unknown): string | null {
 
 function loadFleet(
   sessions: Session[],
-  paths: { fleetPath?: string; terminalsPath?: string } = {},
+  paths: { fleetPath?: string; terminalsPath?: string; now?: number } = {},
 ): FleetState {
   const fleetPath = paths.fleetPath ?? HIVE_FLEET_PATH
   const terminalsPath = paths.terminalsPath ?? HIVE_TERMINALS_PATH
+  const nowMs = paths.now ?? Date.now()
   let fleetData: RawRecord
   let terminalData: RawRecord
   try {
@@ -742,7 +751,7 @@ function loadFleet(
   }
 
   const observedAtMs = observedAt ? new Date(observedAt).getTime() : null
-  const ageMinutes = observedAtMs === null ? null : Math.max(0, Math.round((Date.now() - observedAtMs) / 60000))
+  const ageMinutes = observedAtMs === null ? null : Math.max(0, Math.round((nowMs - observedAtMs) / 60000))
 
   return {
     agents,
@@ -1093,9 +1102,7 @@ function loadRiskAlerts(
   return alerts.map((alert) => ({ ...alert, id: stableAlertId(alert) }))
 }
 
-function probeService(
-  service: { name: string; port: number; probePath: string }
-): Promise<ServiceStatus> {
+function probeService(service: ServiceRegistryEntry): Promise<ServiceStatus> {
   const started = Date.now()
   return new Promise((resolve) => {
     const req = http.get(
@@ -1140,11 +1147,30 @@ function probeService(
   })
 }
 
-async function loadServiceHealth(): Promise<ServiceStatus[]> {
-  const settled = await Promise.allSettled(SERVICE_REGISTRY.map(probeService))
+function localServiceStatus(service: ServiceRegistryEntry): ServiceStatus {
+  return {
+    name: service.name,
+    port: service.port,
+    path: service.probePath,
+    status: 'healthy',
+    lastCheck: new Date().toISOString(),
+    responseTimeMs: 0,
+  }
+}
+
+async function loadServiceHealth(
+  options: { registry?: ServiceRegistryEntry[]; selfPort?: number } = {}
+): Promise<ServiceStatus[]> {
+  const registry = options.registry ?? SERVICE_REGISTRY
+  const selfPort = options.selfPort ?? API_PORT
+  const settled = await Promise.allSettled(
+    registry.map((service) =>
+      service.port === selfPort ? Promise.resolve(localServiceStatus(service)) : probeService(service)
+    )
+  )
   return settled.map((result, index) => {
     if (result.status === 'fulfilled') return result.value
-    const service = SERVICE_REGISTRY[index]
+    const service = registry[index]
     return {
       name: service.name,
       port: service.port,
@@ -1332,11 +1358,30 @@ export async function createApi() {
     }
   })
 
-  fastify.get('/api/health', async () => ({
-    ok: true,
-    service: 'unified-api',
-    timestamp: new Date().toISOString(),
-  }))
+  fastify.get('/api/health', async (_request, reply) => {
+    try {
+      const services = await loadServiceHealth()
+      const down = services.some((service) => service.status === 'down')
+      const degraded = services.some((service) => service.status === 'degraded')
+      return reply
+        .code(down ? 503 : 200)
+        .send({
+          ok: !down,
+          service: 'unified-api',
+          status: down ? 'down' : degraded ? 'degraded' : 'healthy',
+          timestamp: new Date().toISOString(),
+          services: services.map(({ name, status }) => ({ name, status })),
+        })
+    } catch {
+      return reply.code(503).send({
+        ok: false,
+        service: 'unified-api',
+        status: 'down',
+        timestamp: new Date().toISOString(),
+        services: [],
+      })
+    }
+  })
 
   fastify.get('/api/sessions', async (_request, reply) => {
     try {
@@ -1462,7 +1507,13 @@ export async function createApi() {
     return fundamental
   })
 
-  fastify.get('/api/health/services', async () => loadServiceHealth())
+  fastify.get('/api/health/services', async (_request, reply) => {
+    try {
+      return await loadServiceHealth()
+    } catch {
+      return reply.code(503).send({ error: 'Service health is unavailable' })
+    }
+  })
 
   fastify.get('/api/health/launchd', async () => {
     try {
@@ -1472,7 +1523,13 @@ export async function createApi() {
     }
   })
 
-  fastify.get('/api/health/resources', async () => loadResourceMetrics())
+  fastify.get('/api/health/resources', async (_request, reply) => {
+    try {
+      return await loadResourceMetrics()
+    } catch {
+      return reply.code(503).send({ error: 'Resource metrics are unavailable' })
+    }
+  })
 
   fastify.get('/api/ws', { websocket: true }, (connection) => {
     try {
@@ -1514,7 +1571,7 @@ function resolveApiHost(configured = process.env.UNIFIED_API_HOST ?? '127.0.0.1'
 export async function startApi() {
   const host = resolveApiHost()
   const fastify = await createApi()
-  const started = await fastify.listen({ port: 4749, host })
+  const started = await fastify.listen({ port: API_PORT, host })
   fastify.log.level = 'info'
   fastify.log.info(`Unified API server listening on ${started}`)
 }
