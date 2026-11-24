@@ -189,7 +189,11 @@ def _report_summary() -> str:
 
 def _dost_reply(user_text: str, chat_id: int, want_voice: bool = False) -> tuple[str, Optional[str]]:
     """Run companion_respond (same brain as the pet) and return (text, voice_path_or_None)."""
-    reply = companion_respond(user_text)
+    reply = companion_respond(
+        user_text,
+        conversation_id=f"telegram-{chat_id}",
+        interface="telegram",
+    )
     # Strip the greeting line for a cleaner chat feel (keep the substance)
     lines = reply.split("\n")
     body = "\n".join(l for l in lines if not l.startswith("Good "))

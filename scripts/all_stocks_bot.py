@@ -337,7 +337,16 @@ def analyze_symbol(symbol: str) -> dict:
     current_ratio = safe_get(info_full, "currentRatio")
     quick_ratio = safe_get(info_full, "quickRatio")
     debt_to_equity = safe_get(info_full, "debtToEquity")
+    debt_to_equity_unit = "ratio"
+    if debt_to_equity is not None:
+        try:
+            # Yahoo Finance quotes debt/equity as a percentage (e.g. 150 = 150%);
+            # normalize to a ratio so flags and scoring use one consistent scale.
+            debt_to_equity = float(debt_to_equity) / 100.0
+        except (TypeError, ValueError):
+            debt_to_equity = None
     if debt_to_equity is None and total_debt and total_equity:
+        # Computed from balance-sheet totals: already a ratio, keep as-is.
         try:
             debt_to_equity = total_debt / total_equity
         except (TypeError, ZeroDivisionError):
@@ -431,6 +440,7 @@ def analyze_symbol(symbol: str) -> dict:
         "total_debt": total_debt,
         "total_equity": total_equity,
         "debt_to_equity": debt_to_equity,
+        "debt_to_equity_unit": debt_to_equity_unit,
         "current_ratio": current_ratio,
         "quick_ratio": quick_ratio,
         "operating_cf": operating_cf,
@@ -550,6 +560,7 @@ def build_alias_map(results: list[dict]) -> dict:
         "valuation_flag", "leverage_flag", "liquidity_flag", "liquidity_basis",
         "profitability_flag", "roe_flag", "momentum_flag",
         "turnover_ratio", "volatility_30d_pct", "analyzed_at",
+        "debt_to_equity", "debt_to_equity_unit",
     )
     alias_map: dict[str, dict] = {}
     for r in results:

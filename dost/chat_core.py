@@ -58,6 +58,8 @@ class ChatStore:
         self._lock = threading.Lock()
 
     def path(self, session_id="default"):
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", str(session_id)):
+            raise ValueError("invalid session ID")
         return self.directory / (session_id + ".json")
 
     def load(self, session_id="default"):
@@ -88,10 +90,10 @@ class Handler(BaseHTTPRequestHandler):
     STORE = None  # set by DostChatServer before use
 
     # ---- overridable hooks ------------------------------------------------
-    def answer(self, text, history, backend):
+    def answer(self, text, history, backend, session_id="default"):
         raise NotImplementedError
 
-    def stream_answer(self, text, history, backend):
+    def stream_answer(self, text, history, backend, session_id="default"):
         """Return an iterator of text chunks for SSE, or None if unsupported."""
         return None
 
@@ -267,7 +269,7 @@ class Handler(BaseHTTPRequestHandler):
                 if backend == "compare":
                     self._json(200, {"answers": self.compare_models(text, history)})
                     return
-                reply = self.answer(text, history or [], backend)
+                reply = self.answer(text, history or [], backend, session_id=session_id)
                 self._persist(text, reply, session_id, branch_id)
                 self._json(200, {"reply": str(reply)})
             except Exception:  # noqa: BLE001
@@ -278,8 +280,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Connection", "keep-alive")
+        self.send_header("Connection", "close")
         self.send_header("X-Accel-Buffering", "no")
+        self.close_connection = True
         self.end_headers()
 
         def send_event(event_type, data):
@@ -294,9 +297,9 @@ class Handler(BaseHTTPRequestHandler):
                 answers = self.compare_models(text, history)
                 send_event("content", {"type": "compare", "answers": answers})
             else:
-                stream = self.stream_answer(text, history or [], backend)
+                stream = self.stream_answer(text, history or [], backend, session_id=session_id)
                 if stream is None:
-                    full = self.answer(text, history or [], backend)
+                    full = self.answer(text, history or [], backend, session_id=session_id)
                     stream = chunk_text(full)
                     reply = ""
                 for chunk in stream:

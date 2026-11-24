@@ -124,7 +124,7 @@ class DostMiniHandler(Handler):
     def voice_status(self):
         return False
 
-    def answer(self, text, history, backend):
+    def answer(self, text, history, backend, session_id="default"):
         if backend not in MODELS:
             backend = DOST_MODEL
         if backend == DOST_MODEL:

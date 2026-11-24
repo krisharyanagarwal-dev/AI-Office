@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { RefreshCw, TriangleExclamationPoint } from 'lucide-react'
 import { usePolling } from '@/lib/use-polling'
+import { formatAge } from '@/lib/format'
 import type { Fundamentals } from '@/types'
 
 interface FundamentalsTableProps {
@@ -91,6 +92,7 @@ export function FundamentalsTable({ data, onSelect }: FundamentalsTableProps = {
     { key: 'marketCap', label: 'Market Cap' },
     { key: 'revenueGrowth', label: 'Revenue Growth' },
     { key: 'sector', label: 'Sector' },
+    { key: 'updatedAt', label: 'Updated' },
   ]
 
   const headerClass = 'p-3 text-left text-sm font-medium text-foreground cursor-pointer select-none'
@@ -103,6 +105,12 @@ export function FundamentalsTable({ data, onSelect }: FundamentalsTableProps = {
       notation: 'compact',
       maximumFractionDigits: 1,
     }).format(value)
+  }
+
+  const formatUpdated = (updatedAt: string | null): string => {
+    if (!updatedAt) return 'Unavailable'
+    const minutes = Math.floor((Date.now() - new Date(updatedAt).getTime()) / 60_000)
+    return formatAge(minutes)
   }
 
   if (loading) {
@@ -177,7 +185,7 @@ export function FundamentalsTable({ data, onSelect }: FundamentalsTableProps = {
         <tbody>
           {sortedData.length === 0 && (
             <tr>
-              <td colSpan={6} className="p-6 text-center text-sm text-muted-foreground">
+              <td colSpan={7} className="p-6 text-center text-sm text-muted-foreground">
                 {searchQuery ? 'No fundamentals match your search.' : 'No fundamentals available.'}
               </td>
             </tr>
@@ -211,6 +219,7 @@ export function FundamentalsTable({ data, onSelect }: FundamentalsTableProps = {
               <td className="p-3">{formatMarketCap(fundamental.marketCap, fundamental.symbol)}</td>
               <td className="p-3">{fundamental.revenueGrowth ?? 'N/A'}</td>
               <td className="p-3">{fundamental.sector}</td>
+              <td className="p-3 text-muted-foreground">{formatUpdated(fundamental.updatedAt)}</td>
               <td className="p-3 font-medium">{fundamental.symbol}</td>
             </tr>
           ))}

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import time
 import uuid
@@ -24,6 +25,9 @@ from pathlib import Path
 
 # Add office-os to path for existing dispatcher imports
 sys.path.insert(0, str(Path(__file__).resolve().parents[0] / "packages" / "office-os"))
+
+# Task registry integration
+from tasks import create_task, update_status, assign_task, set_result, get_task, list_tasks, queue_tasks
 
 COMPANY_DIR = Path(__file__).resolve().parent
 RESEARCH_DIR = (Path.home() / "Documents" / "indian-paper-trading")
@@ -305,13 +309,39 @@ DEPARTMENT_HANDLERS = {
 
 
 def dispatch(task: str, department: str | None = None) -> dict:
-    """Dispatch a task to the right department."""
+    """Dispatch a task to the right department. Persists to tasks.db."""
     dept = department or route_department(task)
+
+    # Create task in SUBMITTED state
+    db_task = create_task(task, dept, metadata={"source": "dispatch"})
+
     handler = DEPARTMENT_HANDLERS.get(dept, handle_assistant)
     result = handler(task)
+
     result["routed_department"] = dept
-    result["task_id"] = f"c-{uuid.uuid4().hex[:8]}"
+    result["task_id"] = db_task.task_id
     result["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+    result["db_task_id"] = db_task.task_id
+
+    # Update task to QUEUED state
+    update_status(db_task.task_id, "QUEUED")
+
+    return result
+
+
+def dispatch_with_leasing(task: str, department: str | None = None) -> dict:
+    """Dispatch a task and immediately lease it to an agent."""
+    result = dispatch(task, department)
+    task_id = result.get("db_task_id") or result.get("task_id", "").replace("c-", "t-")
+
+    if task_id:
+        # Get the actual task_id format
+        actual_task = get_task(task_id) if task_id.startswith("t-") else None
+        if not actual_task:
+            for t in queue_tasks(result["routed_department"], 1):
+                assign_task(t.task_id, f"agent-{uuid.uuid4().hex[:6]}")
+                break
+
     return result
 
 

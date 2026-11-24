@@ -16,11 +16,13 @@ from __future__ import annotations
 import argparse
 import json
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import wave
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -34,8 +36,8 @@ if str(OFFICE_OS) not in sys.path:
 
 from core.subs.cloud_orchestrator import CloudModelOrchestrator  # noqa: E402
 from context_builder import build_context  # noqa: E402
-from dost import (
-    dost_respond,
+from dost.dost_main import (
+    companion_respond,
     _call_with_retry,
     _check_pool_cooldowns,
     _cost_units_for_pool,
@@ -55,6 +57,42 @@ LAST_DISPATCH_PATH = DOST_DIR / "last_dispatch.json"
 
 # Set by the SIGINT handler to request a clean exit (also interrupts playback).
 STOP = threading.Event()
+
+
+class SpeechEndDetector:
+    """Detect a natural pause after real speech in mono PCM16 audio."""
+
+    def __init__(
+        self,
+        sample_rate: int = SAMPLE_RATE,
+        threshold: int = 500,
+        silence_seconds: float = 0.8,
+        min_speech_seconds: float = 0.25,
+    ):
+        self.threshold = threshold
+        self.silence_bytes = int(sample_rate * 2 * silence_seconds)
+        self.min_speech_bytes = int(sample_rate * 2 * min_speech_seconds)
+        self.heard_speech = False
+        self._speech_bytes = 0
+        self._silence_bytes = 0
+
+    def feed(self, pcm: bytes) -> bool:
+        samples = [sample for (sample,) in struct.iter_unpack("<h", pcm)]
+        if not samples:
+            return False
+        rms = (sum(sample * sample for sample in samples) / len(samples)) ** 0.5
+        if rms >= self.threshold:
+            self.heard_speech = True
+            self._speech_bytes += len(pcm)
+            self._silence_bytes = 0
+            return False
+        if not self.heard_speech:
+            return False
+        self._silence_bytes += len(pcm)
+        return (
+            self._speech_bytes >= self.min_speech_bytes
+            and self._silence_bytes >= self.silence_bytes
+        )
 
 
 def load_last_dispatch() -> dict | None:
@@ -84,24 +122,50 @@ def save_last_dispatch(task_id: str, prompt: str, answer: str) -> None:
 
 
 def record_audio(duration: int, wav_path: str) -> bool:
-    """Record `duration` seconds of mic audio to wav_path. Returns True on success."""
+    """Record until a natural pause or the maximum duration is reached."""
     if STOP.is_set():
         return False
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",
         "-f", "avfoundation", "-i", MIC_DEVICE,
-        "-t", str(duration),
         "-ar", str(SAMPLE_RATE),
         "-ac", str(CHANNELS),
-        wav_path,
+        "-f", "s16le", "pipe:1",
     ]
+    detector = SpeechEndDetector()
+    started_at = time.monotonic()
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=duration + 10)
-    except subprocess.TimeoutExpired:
-        print("  [voice] mic capture timed out")
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        with wave.open(wav_path, "wb") as wav:
+            wav.setnchannels(CHANNELS)
+            wav.setsampwidth(2)
+            wav.setframerate(SAMPLE_RATE)
+            while not STOP.is_set() and time.monotonic() - started_at < duration:
+                chunk = proc.stdout.read(1024)
+                if not chunk:
+                    break
+                wav.writeframesraw(chunk)
+                if detector.feed(chunk):
+                    break
+        if proc.poll() is None:
+            proc.terminate()
+        try:
+            _, stderr = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            _, stderr = proc.communicate()
+    except Exception as exc:
+        print(f"  [voice] mic capture failed: {type(exc).__name__}")
         return False
-    if proc.returncode != 0:
-        print(f"  [voice] mic capture failed: {(proc.stderr or '')[-300:]}")
+    if proc.returncode not in (0, -15):
+        print(f"  [voice] mic capture failed: {(stderr or '')[-300:]}")
+        return False
+    if not detector.heard_speech:
+        print("  [voice] no speech detected")
         return False
     return Path(wav_path).exists() and Path(wav_path).stat().st_size > 0
 
@@ -133,7 +197,7 @@ def run_once(duration: int, language: str = "en"):
     try:
         if STOP.is_set():
             return None
-        print(f"\n[voice] recording {duration}s... speak now")
+        print("\n[voice] listening... speak naturally")
         if not record_audio(duration, wav_path):
             return None
         print("[voice] transcribing...")
@@ -148,7 +212,11 @@ def run_once(duration: int, language: str = "en"):
             return None
         print(f"  [voice] heard ({provider}): {transcript}")
         print("[voice] dost thinking...")
-        reply = dost_respond(transcript)
+        reply = companion_respond(
+            transcript,
+            conversation_id="voice-owner",
+            interface="voice",
+        )
         # Translate common greetings for Hindi mode
         if language == "hi":
             reply = reply.replace("Good afternoon, Aryan.", "नमस्ते, आर्यन।")
@@ -187,7 +255,7 @@ def run_dispatch_turn(duration: int, language: str = "en"):
     try:
         if STOP.is_set():
             return None
-        print(f"\n[voice-dispatch] recording {duration}s... speak now")
+        print("\n[voice-dispatch] listening... speak naturally")
         if not record_audio(duration, wav_path):
             return None
         print("[voice-dispatch] transcribing...")
@@ -322,8 +390,8 @@ def run_dispatch_turn(duration: int, language: str = "en"):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Dost voice CLI loop")
-    parser.add_argument("--seconds", type=int, default=5,
-                        help="seconds to record each turn (default: 5)")
+    parser.add_argument("--seconds", type=int, default=15,
+                        help="maximum seconds per turn; stops after a natural pause (default: 15)")
     parser.add_argument("--once", action="store_true",
                         help="run a single turn then exit")
     parser.add_argument("--dispatch", action="store_true",
@@ -341,7 +409,7 @@ def main() -> None:
     if args.dispatch:
         print("Mode:    fleet dispatch (direct cloud call per turn)")
     else:
-        print("Mode:    dost conversation (dost_respond)")
+        print("Mode:    dost conversation (shared memory)")
     print("Press Ctrl+C to exit.\n")
 
     def handle_sigint(signum, frame):

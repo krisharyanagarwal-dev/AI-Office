@@ -11,6 +11,7 @@ Modules:
   + monthly public record
   - calibration ledger
   - fleet health (from running dispatcher)
+  - portfolio, performance, fleet agents (from unified-api read-only endpoints)
   - provider health
   - dost memory + recent conversation history
 
@@ -19,6 +20,7 @@ Output: a context string injected into the LLM system prompt.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -39,6 +41,9 @@ PNL_FILE = (Path.home() / ".openclaw" / "office_pnl.json")
 
 MAX_TOKENS = 4000  # rough cap for the context block
 
+UNIFIED_API_BASE = os.environ.get("DOST_UNIFIED_API_URL", "http://127.0.0.1:4749")
+UNIFIED_API_TIMEOUT = 4
+
 
 def _load_json(path: Path, default: Any) -> Any:
     try:
@@ -51,6 +56,27 @@ def _truncate(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + " ..."
+
+
+def _fetch_unified(path: str) -> Any:
+    """Fetch a JSON payload from the read-only unified-api.
+
+    Returns None on any failure so the caller can degrade gracefully —
+    the LLM works with stale-or-missing data rather than fabricating it.
+    """
+    try:
+        with urllib.request.urlopen(UNIFIED_API_BASE + path, timeout=UNIFIED_API_TIMEOUT) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return None
+
+
+def _money(value: Any) -> str:
+    """Format a money value as ₹ with 2 decimals, or 'n/a' when missing."""
+    try:
+        return f"₹{float(value):,.2f}"
+    except (TypeError, ValueError):
+        return "n/a"
 
 
 def hypothesis_section() -> str:
@@ -184,6 +210,109 @@ def fleet_section() -> str:
     return "\n".join(lines)
 
 
+def portfolio_section() -> str:
+    """Summarize the live paper portfolio snapshot from unified-api."""
+    lines = ["PORTFOLIO (paper trading):"]
+    data = _fetch_unified("/api/portfolio")
+    if not data:
+        lines.append("  Unified API portfolio: unreachable.")
+        return "\n".join(lines)
+    if not data.get("available"):
+        lines.append("  Portfolio data unavailable.")
+        return "\n".join(lines)
+    lines.append(
+        f"  Broker: {data.get('broker', '?')} | Currency: {data.get('currency', 'INR')}"
+    )
+    lines.append(
+        f"  Cash: {_money(data.get('cash'))} | Market value: {_money(data.get('marketValue'))}"
+    )
+    lines.append(
+        f"  Equity: {_money(data.get('equity'))} | Total PnL: {_money(data.get('totalPnl'))} "
+        f"(realized {_money(data.get('realizedPnl'))}, unrealized {_money(data.get('unrealizedPnl'))})"
+    )
+    dd = data.get("drawdownPercent")
+    try:
+        dd_pct = float(dd) * 100
+        lines.append(f"  Drawdown: {dd_pct:.2f}% | Peak equity: {_money(data.get('peakEquity'))}")
+    except (TypeError, ValueError):
+        lines.append(f"  Drawdown: n/a | Peak equity: {_money(data.get('peakEquity'))}")
+    positions = data.get("positions") or []
+    lines.append(f"  Positions: {len(positions)}")
+    for pos in positions[:8]:
+        sym = pos.get("symbol", "?")
+        side = pos.get("side", "?")
+        qty = pos.get("quantity")
+        entry = pos.get("avgEntryPrice")
+        notional = pos.get("notional")
+        lines.append(
+            f"  - {sym} {side} qty={qty} entry={_money(entry)} notional={_money(notional)} "
+            f"unrealized={_money(pos.get('unrealizedPnl'))}"
+        )
+    lines.append(
+        f"  As of: {data.get('asOf', '?')} | age: {data.get('ageMinutes', '?')} min | "
+        f"stale: {data.get('stale', '?')}"
+    )
+    return "\n".join(lines)
+
+
+def performance_section() -> str:
+    """Summarize live performance runs from unified-api."""
+    lines = ["PERFORMANCE:"]
+    data = _fetch_unified("/api/performance")
+    if not data:
+        lines.append("  Unified API performance: unreachable.")
+        return "\n".join(lines)
+    if not data.get("available"):
+        lines.append("  Performance data unavailable.")
+        return "\n".join(lines)
+    lines.append(
+        f"  Latest equity: {_money(data.get('latestEquity'))} | "
+        f"Best: {_money(data.get('bestEquity'))} | Worst: {_money(data.get('worstEquity'))}"
+    )
+    runs = data.get("runs") or []
+    lines.append(f"  Runs: {len(runs)}")
+    for run in runs[-5:]:
+        rid = run.get("runId", "?")
+        status = run.get("status", "?")
+        equity = _money(run.get("equity"))
+        pnl = _money(run.get("totalPnl"))
+        filled = run.get("filledOrders", 0)
+        rejected = run.get("rejectedOrders", 0)
+        paper = run.get("paperOnly", "?")
+        lines.append(
+            f"  - {rid} [{status}] equity={equity} pnl={pnl} filled={filled} "
+            f"rejected={rejected} paper_only={paper}"
+        )
+    return "\n".join(lines)
+
+
+def unified_fleet_section() -> str:
+    """Summarize live fleet agents from unified-api."""
+    lines = ["FLEET AGENTS (unified-api):"]
+    data = _fetch_unified("/api/fleet")
+    if not data:
+        lines.append("  Unified API fleet: unreachable.")
+        return "\n".join(lines)
+    agents = data.get("agents") or []
+    sessions = data.get("sessions") or []
+    terminals = data.get("terminals") or []
+    busy = sum(1 for a in agents if str(a.get("status", "")).lower() == "busy")
+    healthy = sum(1 for a in agents if str(a.get("status", "")).lower() == "healthy")
+    lines.append(
+        f"  Agents: {len(agents)} ({busy} busy, {healthy} healthy) | "
+        f"Sessions: {len(sessions)} | Terminals: {len(terminals)}"
+    )
+    for a in agents[:6]:
+        lines.append(
+            f"  - {a.get('id', '?')} {a.get('name', '?')} [{a.get('role', '?')}] "
+            f"{a.get('status', '?')} | {a.get('activity', '?')} | "
+            f"last active {a.get('lastActiveSecAgo', '?')}s ago"
+        )
+    if len(agents) > 6:
+        lines.append(f"  ... and {len(agents) - 6} more agents")
+    return "\n".join(lines)
+
+
 def provider_section() -> str:
     """Summarize provider health."""
     lines = ["PROVIDER HEALTH:"]
@@ -294,6 +423,12 @@ def build_context() -> str:
         monthly_report_section(),
         "",
         fleet_section(),
+        "",
+        portfolio_section(),
+        "",
+        performance_section(),
+        "",
+        unified_fleet_section(),
         "",
         provider_section(),
         "",

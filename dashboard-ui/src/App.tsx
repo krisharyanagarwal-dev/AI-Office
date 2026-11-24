@@ -21,6 +21,7 @@ const DashboardPage = lazy(() => import('@/app/page'))
 const PositionsPage = lazy(() => import('@/pages/PositionsPage'))
 const AlertsPage = lazy(() => import('@/pages/AlertsPage'))
 const PerformancePage = lazy(() => import('@/pages/PerformancePage'))
+const PnLPage = lazy(() => import('@/pages/PnLPage'))
 const RiskPage = lazy(() => import('@/pages/RiskPage'))
 const SettingsPage = lazy(() => import('@/pages/SettingsPage'))
 
@@ -73,6 +74,7 @@ export default function App() {
               <Route path="/risk" element={<RiskPage acknowledgedAlertIds={acknowledgedAlertIds} onAcknowledge={acknowledgeAlert} />} />
               <Route path="/alerts" element={<AlertsPage acknowledgedAlertIds={acknowledgedAlertIds} onAcknowledge={acknowledgeAlert} />} />
               <Route path="/performance" element={<PerformancePage />} />
+              <Route path="/pnl" element={<PnLPage />} />
               <Route path="/settings" element={<SettingsPage isDarkMode={isDarkMode} onToggleTheme={setTheme} />} />
               <Route path="/sessions" element={<SessionList />} />
               <Route path="/sessions/:provider/:id" element={<SessionDetail />} />

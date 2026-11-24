@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -46,6 +47,7 @@ sys.path.insert(0, str(DOST_DIR))
 from company_dispatcher import dispatch, route_department  # noqa: E402
 from openai_components import chat_completion, provider_health  # noqa: E402
 from context_builder import build_context  # noqa: E402
+from memory_pkg.unified import get_unified_memory  # noqa: E402
 from collab.workspace import (  # noqa: E402
     create_workspace,
     get_workspace,
@@ -181,12 +183,66 @@ Narrate this in your warm, honest voice. Ground every number in the data. Don't 
 """
 
 
+# ---------------------------------------------------------------------------
+# Local-first LLM: MLX (keyless, private) ahead of any external provider
+# ---------------------------------------------------------------------------
+
+MLX_CHAT_URL = os.environ.get("DOST_MLX_URL", "http://127.0.0.1:11436/v1/chat/completions")
+# Qwen3.5-9B-Uncensored follows the grounding constraints ("don't invent
+# numbers"); smaller local models hallucinate financial figures, so it stays
+# the default. Override with DOST_MLX_MODEL to use another model on this
+# endpoint (e.g. mlx-community/Llama-3.2-3B-Instruct-4bit for clean content
+# without Qwen's reasoning trace).
+MLX_MODEL = os.environ.get(
+    "DOST_MLX_MODEL",
+    "TheCluster/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-MLX-mxfp4",
+)
+
+
+def mlx_chat_completion(messages: list[dict], temperature: float = 0.3,
+                        max_tokens: int = 1000, timeout: int = 60) -> dict | None:
+    """Call the local MLX endpoint (Qwen3.5-9B-Uncensored). No API key needed.
+
+    Returns a chat_completion-shaped dict, or None if the local server is
+    unreachable so the caller can fall back to external providers.
+    """
+    payload = json.dumps({"model": MLX_MODEL, "messages": messages,
+                          "temperature": temperature, "max_tokens": max_tokens}).encode()
+    req = urllib.request.Request(MLX_CHAT_URL, data=payload, headers={
+        "Content-Type": "application/json", "Authorization": "Bearer dost-local"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read())
+    except Exception:
+        return None
+    choices = data.get("choices") or []
+    message = (choices[0].get("message", {}) or {}) if choices else {}
+    text = message.get("content") or ""
+    if not text:
+        # Some MLX servers (thinking models) emit the answer in `reasoning`
+        # when `content` is null; surface it as a last resort.
+        text = message.get("reasoning") or ""
+    text = text.strip()
+    if not text:
+        return None
+    return {"text": text, "provider": "mlx_local", "model": MLX_MODEL}
+
+
+def _chat(messages: list[dict], temperature: float, max_tokens: int) -> dict:
+    """Local MLX first, then the external OpenAI-compatible chain."""
+    result = mlx_chat_completion(messages, temperature=temperature, max_tokens=max_tokens)
+    if result is not None:
+        return result
+    log("MLX local unavailable, falling back to external providers")
+    return chat_completion(messages, temperature=temperature, max_tokens=max_tokens)
+
+
 def llm_decide(task: str, context: str, style: str = "") -> str:
     """Ask the LLM whether this is a command or conversation. Returns 'COMMAND:<name>' or natural text."""
     prompt = DECIDE_SYSTEM.format(context=context, task=task)
     if style:
         prompt += "\n\nSTYLE:\n" + style
-    result = chat_completion(
+    result = _chat(
         [
             {"role": "system", "content": prompt},
             {"role": "user", "content": task},
@@ -201,7 +257,7 @@ def llm_decide(task: str, context: str, style: str = "") -> str:
 def llm_narrate(command: str, output: str, context: str) -> str:
     """Ask the LLM to narrate command output in its warm voice."""
     prompt = NARRATE_SYSTEM.format(context=context, command=command, output=output)
-    result = chat_completion(
+    result = _chat(
         [
             {"role": "system", "content": prompt},
             {"role": "user", "content": f"Narrate the output of the {command} command."},
@@ -1737,13 +1793,86 @@ def _asked_for_command(task: str, command: str) -> bool:
     return command in t
 
 
-def companion_respond(task: str) -> str:
-    """Pet-style reply: no greeting or boilerplate, shorter and warmer. Same routing as dost_respond."""
-    if wants_audit(task):
-        return audit_reply()
-    context = build_context()
+def sanitize_response(text: str) -> str:
+    """Keep internal routing details and unsafe trading claims out of speech."""
+    if not text:
+        return text
+    unsafe_claim = re.search(
+        r"kill\s+switch\s+(?:is\s+|was\s+|has\s+been\s+)?unlocked"
+        r"|live\s+orders?\s+(?:are\s+|is\s+|have\s+been\s+)?(?:enabled|allowed|unlocked)",
+        text,
+        re.IGNORECASE,
+    )
+    if unsafe_claim:
+        return "The kill switch is locked and live orders remain disabled."
 
-    # Surface critical alerts proactively so the pet never hides a problem.
+    text = re.sub(
+        r"\b(?:gsk_|sk-|nvapi-|ghp_|github_pat_)[A-Za-z0-9_-]+",
+        "[redacted]",
+        text,
+    )
+    text = re.sub(
+        r"\b(?:model|provider|pool|task[_ ]?id|agent[_ ]?id|cost[_ ]?units?)\s*[:=]\s*[^\s,;|)]+",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"\b(?:OpenAI|Groq|Anthropic|Gemini|Qwen|Llama|Mistral|DeepSeek|MLX|NVIDIA|"
+        r"CloudModelOrchestrator|gpt[- ]?[A-Za-z0-9._:-]*)\b",
+        "the assistant",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\bjev-[0-9a-f]{8}\b", "that request", text, flags=re.IGNORECASE)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return re.sub(r" +([.,;:!?])", r"\1", text).strip()
+
+
+def _history_context(history: list[dict] | None) -> str:
+    if not history:
+        return ""
+    lines = ["RECENT CONVERSATION:"]
+    for message in history[-10:]:
+        role = "User" if message.get("role") == "user" else "Dost"
+        content = str(message.get("content", ""))[:300]
+        if content:
+            lines.append(f"{role}: {content}")
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def companion_respond(
+    task: str,
+    conversation_id: str | None = None,
+    interface: str = "web",
+    history: list[dict] | None = None,
+) -> str:
+    """Pet-style reply with shared memory and speech-safe output."""
+    def finish(response: str) -> str:
+        safe_response = sanitize_response(response)
+        if conversation_id:
+            try:
+                get_unified_memory().record_turn(
+                    conversation_id, interface, task, safe_response
+                )
+            except Exception as exc:
+                log(f"Conversation memory update failed: {type(exc).__name__}")
+        return safe_response
+
+    if wants_audit(task):
+        return finish(audit_reply())
+    context = build_context()
+    remembered = _history_context(history)
+    if not remembered and conversation_id:
+        try:
+            remembered = get_unified_memory().build_context_prompt(
+                conversation_id, task
+            )
+        except Exception as exc:
+            log(f"Conversation memory lookup failed: {type(exc).__name__}")
+    if remembered:
+        context = f"{context}\n\n{remembered}"
+
     try:
         from ops.proactive_monitor import check_fleet_health
         live_alerts = check_fleet_health()
@@ -1751,7 +1880,7 @@ def companion_respond(task: str) -> str:
         alert_prefix = ""
         if critical:
             alert_prefix = "⚠️ " + "; ".join(a.get("message", "")[:80] for a in critical[:3]) + ". "
-    except Exception:  # pragma: no cover - defensive
+    except Exception:
         alert_prefix = ""
 
     decision = llm_decide(task, context, style=COMPANION_STYLE)
@@ -1759,7 +1888,6 @@ def companion_respond(task: str) -> str:
     if decision and decision.startswith("COMMAND:"):
         command = decision[len("COMMAND:"):].strip()
         if command not in RESEARCH_COMMANDS or not _asked_for_command(task, command):
-            # The model wanted to run something the person did not ask for. Reply in words instead.
             decision = llm_decide(task, context, style=COMPANION_STYLE +
                                   "\n- Do NOT reply with COMMAND. Answer in plain words.")
             if decision and decision.startswith("COMMAND:"):
@@ -1768,15 +1896,15 @@ def companion_respond(task: str) -> str:
             output = run_research_command(command)
             MEMORY.add_interaction(task, "research", f"Executed research command: {command}")
             narration = llm_narrate(command, output, context)
-            return narration or fallback_narrate(command, output)
+            return finish(narration or fallback_narrate(command, output))
 
     if decision and not decision.startswith("COMMAND:"):
         MEMORY.add_interaction(task, route_department(task), "Conversational response")
-        return alert_prefix + decision
+        return finish(alert_prefix + decision)
 
     response = fallback_converse(task, context)
     MEMORY.add_interaction(task, route_department(task), "Conversational response (fallback)")
-    return alert_prefix + response
+    return finish(alert_prefix + response)
 
 
 def generate_daily_briefing():
@@ -2491,13 +2619,8 @@ def main():
                         help="List all workspaces")
     parser.add_argument("--add-user", nargs=2, metavar=("EMAIL", "ROLE"),
                         help="Add a user (email role) to the current/default workspace")
-
-    # `dost workspace` subcommand group for workspace management
-    subparsers = parser.add_subparsers(dest="command", help="Subcommands")
-    ws_parser = subparsers.add_parser("workspace", help="Workspace management")
-    ws_parser.add_argument("action", choices=["list", "create", "add-user"],
-                           help="Workspace action: list | create <name> | add-user <workspace_id> <email> [role]")
-    ws_parser.add_argument("rest", nargs="*", help="Additional arguments for the workspace action")
+    parser.add_argument("--priority", choices=["normal", "high", "urgent"], default=None,
+                        help="Priority for dispatch (normal/high/urgent, default: normal)")
 
     args = parser.parse_args()
 
@@ -2507,8 +2630,6 @@ def main():
         sys.exit(code)
     if args.push_telegram:
         _push_telegram_briefing()
-    elif args.command == "workspace":
-        _handle_workspace_command(args)
     elif args.briefing:
         print(generate_daily_briefing())
     elif args.status:
@@ -2562,7 +2683,11 @@ def main():
     elif args.dispatch is not None:
         workspace_id = args.workspace or ensure_default_workspace()
         prompt = args.dispatch if args.dispatch else input("Prompt to send to fleet: ")
-        result = dispatch_prompt_to_fleet(prompt, workspace_id=workspace_id)
+        result = dispatch_prompt_to_fleet(
+            prompt,
+            priority=args.priority or "normal",
+            workspace_id=workspace_id,
+        )
         print(json.dumps(result, indent=2))
     elif args.debate is not None:
         prompt = args.debate if args.debate else input("Debate question: ")
@@ -2576,7 +2701,7 @@ def main():
         else:
             prompt = template.get("prompt", "")
             agent_id = template.get("agent_id")
-            priority = template.get("priority", "normal")
+            priority = args.priority or template.get("priority", "normal")
             workspace_id = args.workspace or ensure_default_workspace()
             result = dispatch_prompt_to_fleet(prompt, agent_id=agent_id, priority=priority, workspace_id=workspace_id)
             print(json.dumps(result, indent=2))
@@ -2587,7 +2712,11 @@ def main():
     elif args.health:
         print(json.dumps(provider_health(), indent=2))
     elif args.message:
-        print(dost_respond(args.message, args.department))
+        print(companion_respond(
+            args.message,
+            conversation_id="cli-default",
+            interface="cli",
+        ))
     else:
         print(dost_greeting())
         print("\nI'm your dost. Tell me what you need: research, trading, code, writing, strategy.")

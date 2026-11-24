@@ -423,9 +423,10 @@ if (location.protocol === 'file:') { location.replace('http://127.0.0.1:8787/');
         const lines = buffer.split('\n\n');
         buffer = lines.pop() || '';
         for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
+          const dataLine = line.split('\n').find(part => part.startsWith('data: '));
+          if (!dataLine) continue;
           try {
-            const evt = JSON.parse(line.slice(6));
+            const evt = JSON.parse(dataLine.slice(6));
             if (evt.type === 'text' || evt.type === 'model') {
               if (!currentAssistantEl) {
                 currentAssistantEl = document.createElement('div');

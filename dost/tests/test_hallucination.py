@@ -27,10 +27,10 @@ sys_path_inserted = False
 
 
 def _load_dost():
-    """Import dost_respond by path (root dost.py shadows the dost package)."""
+    """Import dost_respond by path (the dost package shadows a same-named module)."""
     import importlib.util
 
-    p = DOST_DIR / "dost.py"
+    p = DOST_DIR / "dost_main.py"
     spec = importlib.util.spec_from_file_location("dost_module_test", p)
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)

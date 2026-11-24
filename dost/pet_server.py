@@ -55,7 +55,12 @@ def openclaw_reply(text: str) -> str:
     return "(openclaw backend not available — try a different model.)"
 
 
-def dost_or_jarvis(text: str) -> str:
+def dost_or_jarvis(
+    text: str,
+    conversation_id: str | None = None,
+    interface: str = "web",
+    history: list[dict] | None = None,
+) -> str:
     """Route through Jarvis when DOST_JARVIS=1, else plain companion.
 
     Read-only tools (fleet, tasks, alerts, recall) run unattended.
@@ -63,13 +68,17 @@ def dost_or_jarvis(text: str) -> str:
     an explicit "yes" before writing anything to the fleet.
     """
     if not JARVIS:
-        return companion_respond(text)
+        return companion_respond(
+            text, conversation_id=conversation_id, interface=interface, history=history
+        )
     resolved = resolve_pending(text)
     if resolved is not None:
         return resolved
     call = route(text)
     if call is None:
-        return companion_respond(text)
+        return companion_respond(
+            text, conversation_id=conversation_id, interface=interface, history=history
+        )
     if call.name in ("fleet_status", "recent_tasks", "alerts", "recall"):
         return execute(call)
     store_pending(text, call)
@@ -116,7 +125,7 @@ class PetHandler(Handler):
         return models.compare(text)
 
     # ---- answers ------------------------------------------------------------
-    def answer(self, text, history, backend):
+    def answer(self, text, history, backend, session_id="default"):
         if ":" in backend:
             ans = models.ask_model(backend, text, history)
             if ans["error"]:
@@ -124,11 +133,15 @@ class PetHandler(Handler):
             return ans["reply"]
         if backend == "openclaw":
             return openclaw_reply(text)
-        # default: dost companion
         with MODEL_LOCK:
-            return dost_or_jarvis(text)
+            return dost_or_jarvis(
+                text,
+                conversation_id=f"web-{session_id}",
+                interface="web",
+                history=history,
+            )
 
-    def stream_answer(self, text, history, backend):
+    def stream_answer(self, text, history, backend, session_id="default"):
         """Yield SSE chunks. Each chunk is str or dict {type, text, label, ms}."""
         if ":" in backend:
             ans = models.ask_model(backend, text, history)
@@ -144,7 +157,12 @@ class PetHandler(Handler):
             ms = 0
         else:
             with MODEL_LOCK:
-                reply = dost_or_jarvis(text)
+                reply = dost_or_jarvis(
+                    text,
+                    conversation_id=f"web-{session_id}",
+                    interface="web",
+                    history=history,
+                )
             label = None
             ms = 0
 

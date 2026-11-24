@@ -37,44 +37,5 @@
     "last_test_passed": null,
     "deploy_status": "pending",
     "deploy_ts": null
-  },
-  "compound_interest": {
-    "name": "compound_interest",
-    "version": "1.0.0",
-    "description": "Calculator skill for basic arithmetic operations",
-    "author": "dost-generator",
-    "created_at": "2026-11-23T09:02:51.546110+00:00",
-    "updated_at": "2026-11-23T09:02:51.546132+00:00",
-    "dependencies": [],
-    "entry_point": "main",
-    "module_file": "compound_interest.py",
-    "test_file": "test_compound_interest.py",
-    "config_schema": {
-      "type": "object",
-      "properties": {
-        "precision": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 10
-        },
-        "allow_negative": {
-          "type": "boolean"
-        }
-      }
-    },
-    "default_config": {
-      "precision": 2,
-      "allow_negative": true
-    },
-    "tags": [
-      "math",
-      "utility",
-      "demo"
-    ],
-    "enabled": true,
-    "last_test_run": "2026-11-23T09:02:53.629461+00:00",
-    "last_test_passed": true,
-    "deploy_status": "deployed",
-    "deploy_ts": "2026-11-23T09:02:53.631164+00:00"
   }
 }

@@ -1,18 +1,9 @@
-import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { ArrowLeft, Bot, RefreshCw, TriangleExclamationPoint } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { formatSeconds } from '@/lib/format'
+import { usePolling } from '@/lib/use-polling'
 import type { Message, Session } from '@/types'
-
-type SessionDetailState = {
-  key: string
-  session: Session | null
-  messages: Message[]
-  sessionError: boolean
-  messagesError: boolean
-  loading: boolean
-}
 
 const stateClass: Record<string, string> = {
   idle: 'border-border bg-muted/60 text-muted-foreground',
@@ -22,81 +13,70 @@ const stateClass: Record<string, string> = {
 }
 
 export function SessionDetail() {
-  const { provider, id } = useParams()
-  const [result, setResult] = useState<SessionDetailState | null>(null)
-  const [reloadKey, setReloadKey] = useState(0)
-  const requestKey = `${provider ?? ''}:${id ?? ''}:${reloadKey}`
-  const current = result?.key === requestKey ? result : null
-  const session = current?.session ?? null
-  const messages = current?.messages ?? []
-  const sessionError = current?.sessionError ?? false
-  const messagesError = current?.messagesError ?? false
-  const loading = provider && id ? current?.loading ?? true : false
+  const { provider, id } = useParams<{ provider: string; id: string }>()
   const navigate = useNavigate()
+  const providerSegment = encodeURIComponent(provider ?? '')
+  const idSegment = encodeURIComponent(id ?? '')
 
-  useEffect(() => {
-    const sessionProvider = provider
-    const sessionId = id
-    if (!sessionProvider || !sessionId) return
-    const providerSegment = encodeURIComponent(sessionProvider)
-    const idSegment = encodeURIComponent(sessionId)
-    let cancelled = false
+  const {
+    data,
+    isLoading: loading,
+    isError: error,
+    retry,
+  } = usePolling<{
+    session: Session | null
+    messages: Message[]
+    messagesError: boolean
+  }>({
+    fetch: (signal) =>
+      (async () => {
+        let session: Session | null = null
+        let messages: Message[] = []
+        let messagesFailed = false
 
-    async function fetchSessionAndMessages() {
-      let sessionData: Session | null = null
-      let sessionFailed = false
-      let messagesData: Message[] = []
-      let messagesFailed = false
-
-      try {
-        const sessionResponse = await fetch(`/api/sessions/${providerSegment}/${idSegment}`)
-        if (sessionResponse.status !== 404) {
-          if (!sessionResponse.ok) throw new Error(`Session request failed (${sessionResponse.status})`)
-          const responseData = await sessionResponse.json() as Session
-          if (!responseData?.id) throw new Error('Session response was invalid')
-          sessionData = responseData
-        }
-      } catch (error) {
-        console.error('Failed to fetch session:', error)
-        sessionFailed = true
-      }
-
-      if (sessionData) {
         try {
-          const messagesResponse = await fetch(`/api/sessions/${providerSegment}/${idSegment}/messages`)
-          if (!messagesResponse.ok) throw new Error(`Transcript request failed (${messagesResponse.status})`)
-          const responseMessages = await messagesResponse.json() as Message[]
-          if (!Array.isArray(responseMessages)) throw new Error('Transcript response was invalid')
-          messagesData = responseMessages
-        } catch (error) {
-          console.error('Failed to fetch messages:', error)
-          messagesFailed = true
+          const sessionResponse = await fetch(`/api/sessions/${providerSegment}/${idSegment}`, { signal })
+          if (sessionResponse.status === 404) {
+            session = null
+          } else {
+            if (!sessionResponse.ok) throw new Error(`Session request failed (${sessionResponse.status})`)
+            const responseData = await sessionResponse.json() as Session
+            if (!responseData?.id) throw new Error('Session response was invalid')
+            session = responseData
+          }
+        } catch (caught) {
+          console.error('Failed to fetch session:', caught)
+          throw caught
         }
-      }
 
-      if (!cancelled) {
-        setResult({
-          key: requestKey,
-          session: sessionData,
-          messages: messagesData,
-          sessionError: sessionFailed,
-          messagesError: messagesFailed,
-          loading: false,
-        })
-      }
-    }
+        if (session) {
+          try {
+            const messagesResponse = await fetch(`/api/sessions/${providerSegment}/${idSegment}/messages`, { signal })
+            if (!messagesResponse.ok) throw new Error(`Transcript request failed (${messagesResponse.status})`)
+            const responseMessages = await messagesResponse.json() as Message[]
+            if (!Array.isArray(responseMessages)) throw new Error('Transcript response was invalid')
+            messages = responseMessages
+          } catch (caught) {
+            console.error('Failed to fetch messages:', caught)
+            messagesFailed = true
+          }
+        }
 
-    fetchSessionAndMessages()
-    return () => {
-      cancelled = true
-    }
-  }, [provider, id, requestKey])
+        return { session, messages, messagesError: messagesFailed }
+      })(),
+    interval: 60_000,
+    maxFailureCount: 5,
+  })
+
+  const session = data?.session ?? null
+  const messages = data?.messages ?? []
+  const messagesError = data?.messagesError ?? false
 
   if (loading) {
     return <div className="surface p-8 text-sm text-muted-foreground">Loading session detail…</div>
   }
 
-  if (sessionError) {
+  if (error) {
     return (
       <div className="surface flex flex-col items-center px-6 py-12 text-center">
         <TriangleExclamationPoint className="mb-3 h-7 w-7 text-warning" />
@@ -104,7 +84,7 @@ export function SessionDetail() {
         <p className="mt-1 text-xs text-muted-foreground">The session hive could not be reached.</p>
         <button
           type="button"
-          onClick={() => setReloadKey((value) => value + 1)}
+          onClick={retry}
           className="mt-4 inline-flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs font-medium text-foreground hover:bg-muted"
         >
           <RefreshCw className="h-3.5 w-3.5" />

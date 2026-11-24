@@ -80,3 +80,23 @@ def test_dispatch_runs_successfully():
     with mock.patch.object(dost, "dispatch_prompt_to_fleet", return_value={"ok": True, "task_id": "abc"}):
         code, out = _run(["--dispatch", "Analyze AAPL valuation"])
     assert code == 0
+
+
+def test_dispatch_forwards_requested_priority():
+    with mock.patch.object(dost, "ensure_default_workspace", return_value="default"), \
+         mock.patch.object(dost, "dispatch_prompt_to_fleet", return_value={"ok": True}) as dispatch:
+        code, _ = _run(["--dispatch", "Analyze AAPL valuation", "--priority", "high"])
+
+    assert code == 0
+    assert dispatch.call_args.kwargs["priority"] == "high"
+
+
+def test_template_priority_is_used_when_flag_is_omitted():
+    template = {"prompt": "Review fleet", "agent_id": "ops", "priority": "urgent"}
+    with mock.patch.object(dost, "ensure_default_workspace", return_value="default"), \
+         mock.patch.object(dost, "load_template", return_value=template), \
+         mock.patch.object(dost, "dispatch_prompt_to_fleet", return_value={"ok": True}) as dispatch:
+        code, _ = _run(["--template", "daily"])
+
+    assert code == 0
+    assert dispatch.call_args.kwargs["priority"] == "urgent"

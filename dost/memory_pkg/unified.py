@@ -231,6 +231,68 @@ class UnifiedMemory:
         self.save_session(session)
         return session
 
+    def record_turn(
+        self,
+        conversation_id: str,
+        interface: str,
+        user_message: str,
+        dost_response: str,
+    ) -> Session:
+        """Persist one complete turn without duplicating legacy interactions."""
+        session = self._sessions.get(conversation_id) or self.load_session(conversation_id)
+        if not session:
+            session = self.create_session(conversation_id, interface=interface)
+        elif session.interface != interface:
+            session.interface_history.append({
+                "from_interface": session.interface,
+                "to_interface": interface,
+                "at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "message_count": len(session.messages),
+            })
+        session.interface = interface
+
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+        session.messages.extend([
+            {
+                "role": "user",
+                "content": user_message,
+                "timestamp": now,
+                "metadata": {"source_interface": interface},
+            },
+            {
+                "role": "assistant",
+                "content": dost_response,
+                "timestamp": now,
+                "metadata": {"source_interface": interface},
+            },
+        ])
+        session.updated_at = now
+
+        data = {
+            "conversation_id": session.id,
+            "interface": session.interface,
+            "user_id": session.user_id,
+            "created_at": session.created_at,
+            "updated_at": session.updated_at,
+            "messages": session.messages,
+            "metadata": session.metadata,
+            "interface_history": session.interface_history,
+            "summary": session.summary,
+            "last_summary_at": session.last_summary_at,
+            "context_window": session.context_window,
+        }
+        with open(self.conversations_file, "a") as f:
+            f.write(json.dumps(data) + "\n")
+
+        from memory_pkg.persistent_memory import ConversationMemory
+        ConversationMemory(self.workspace_id, memory_dir=self.memory_dir).add_interaction(
+            user_message=user_message,
+            dost_response=dost_response,
+            metadata={"session_id": session.id, "interface": interface},
+        )
+        self.extract_facts(user_message, conversation_id, interface)
+        return session
+
     def get_context(self, conversation_id: str, limit: int = 10) -> list[dict]:
         """Get recent conversation context for LLM."""
         session = self._sessions.get(conversation_id) or self.load_session(conversation_id)
@@ -266,7 +328,7 @@ class UnifiedMemory:
                     id=f"fact-{uuid.uuid4().hex[:8]}",
                     type="entity",
                     content=entity,
-                    confidence=0.7,
+                    confidence=0.9,
                     source=source,
                     conversation_id=conversation_id,
                     timestamp=now,
@@ -278,14 +340,19 @@ class UnifiedMemory:
         pref_patterns = [
             (r"(?:i prefer|i like|i want|my preference is)\s+([^.]+)", "preference"),
             (r"(?:always|never)\s+([^.]+)", "preference"),
+            # Additional preference patterns
+            (r"(?:i don't want|i dont want)\s+([^.]+)", "preference"),
+            (r"(?:i plan to)\s+([^.]+)", "decision"),
+            (r"(?:i must)\s+([^.]+)", "decision"),
         ]
-        for pattern, ftype in pref_patterns:
+        pref_confidences = [0.8, 0.8, 0.85, 0.85, 0.9]
+        for i, (pattern, ftype) in enumerate(pref_patterns):
             for match in re.finditer(pattern, text, re.IGNORECASE):
                 fact = Fact(
                     id=f"fact-{uuid.uuid4().hex[:8]}",
                     type=ftype,
                     content=match.group(1).strip(),
-                    confidence=0.8,
+                    confidence=pref_confidences[i],
                     source=source,
                     conversation_id=conversation_id,
                     timestamp=now,

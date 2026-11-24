@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>Label</key>
+	<string>com.aryan.mini-services-fwd</string>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/ssh</string>
+		<string>-N</string>
+		<string>-o</string>
+		<string>BatchMode=yes</string>
+		<string>-o</string>
+		<string>ExitOnForwardFailure=yes</string>
+		<string>-o</string>
+		<string>ServerAliveInterval=30</string>
+		<string>-o</string>
+		<string>ServerAliveCountMax=3</string>
+		<string>-L</string>
+		<string>4750:127.0.0.1:4750</string>
+		<string>-L</string>
+		<string>3003:127.0.0.1:3003</string>
+		<string>-L</string>
+		<string>4748:127.0.0.1:4747</string>
+		<string>-L</string>
+		<string>19593:127.0.0.1:19593</string>
+		<string>-L</string>
+		<string>4950:127.0.0.1:4950</string>
+		<string>-R</string>
+		<string>14747:127.0.0.1:4747</string>
+		<string>a@macmini</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Users/aryanagarwal/Library/Logs/mini-services-fwd.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/aryanagarwal/Library/Logs/mini-services-fwd.log</string>
+	<key>ThrottleInterval</key>
+	<integer>30</integer>
+</dict>
+</plist>

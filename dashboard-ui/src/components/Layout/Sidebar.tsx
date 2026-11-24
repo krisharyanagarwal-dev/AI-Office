@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils"
 import {
   Bell,
   Folder,
+  DollarSign,
   HeartPulse,
   LayoutDashboard,
   Menu,
@@ -39,6 +40,7 @@ const navigationGroups = [
       { name: "Positions", href: "/positions", icon: Wallet },
       { name: "Alerts", href: "/alerts", icon: Bell },
       { name: "Performance", href: "/performance", icon: TrendingUp },
+      { name: "P&L", href: "/pnl", icon: DollarSign },
       { name: "Risk", href: "/risk", icon: ShieldAlert },
     ],
   },

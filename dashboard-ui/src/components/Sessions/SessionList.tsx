@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { usePolling } from '@/lib/use-polling'
 import { Bot, RefreshCw, TriangleExclamationPoint } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { formatSeconds } from '@/lib/format'
@@ -13,42 +13,37 @@ const stateClass: Record<string, string> = {
   idle: 'border-border bg-muted/60 text-muted-foreground',
   busy: 'border-info/20 bg-info/10 text-info',
   blocked: 'border-destructive/20 bg-destructive/10 text-destructive',
-  unknown: 'border-warning/20 bg-warning/10 text-warning',
+  unknown: 'border-warning/20 border-warning/10 text-warning',
 }
 
 export function SessionList({ onSelect }: SessionListProps = {}) {
-  const [sessions, setSessions] = useState<Session[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState(false)
-  const [reloadKey, setReloadKey] = useState(0)
   const navigate = useNavigate()
-
-  useEffect(() => {
-    let cancelled = false
-
-    async function fetchSessions() {
-      try {
-        const response = await fetch('/api/sessions')
+  const {
+    data: fetchedSessions,
+    isLoading: loading,
+    isError: error,
+    retry,
+  } = usePolling<Session[]>({
+    fetch: (signal) =>
+      fetch('/api/sessions', { signal }).then(async (response) => {
         if (!response.ok) throw new Error(`Sessions request failed (${response.status})`)
         const data = await response.json() as Session[]
         if (!Array.isArray(data)) throw new Error('Sessions response was invalid')
-        if (!cancelled) {
-          setSessions(data)
-          setError(false)
-        }
-      } catch (fetchError) {
-        console.error('Failed to fetch sessions:', fetchError)
-        if (!cancelled) setError(true)
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
-    }
+        return data
+      }),
+    interval: 60_000,
+    maxFailureCount: 5,
+  })
 
-    fetchSessions()
-    return () => {
-      cancelled = true
+  const sessions = fetchedSessions ?? []
+
+  const handleRowSelect = (session: Session) => {
+    if (onSelect) {
+      onSelect(session)
+      return
     }
-  }, [reloadKey])
+    navigate(`/sessions/${encodeURIComponent(session.provider)}/${encodeURIComponent(session.id)}`)
+  }
 
   if (loading) {
     return <div className="surface p-8 text-sm text-muted-foreground">Loading sessions…</div>
@@ -62,10 +57,7 @@ export function SessionList({ onSelect }: SessionListProps = {}) {
         <p className="mt-1 text-xs text-muted-foreground">The session hive could not be reached.</p>
         <button
           type="button"
-          onClick={() => {
-            setLoading(true)
-            setReloadKey((value) => value + 1)
-          }}
+          onClick={retry}
           className="mt-4 inline-flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs font-medium text-foreground hover:bg-muted"
         >
           <RefreshCw className="h-3.5 w-3.5" />
@@ -98,10 +90,7 @@ export function SessionList({ onSelect }: SessionListProps = {}) {
             <li key={`${session.provider}-${session.id}`}>
               <button
                 type="button"
-                onClick={() => {
-                  onSelect?.(session)
-                  navigate(`/sessions/${session.provider}/${session.id}`)
-                }}
+                onClick={() => handleRowSelect(session)}
                 className="flex w-full items-center gap-3 px-4 py-3.5 text-left transition-colors hover:bg-primary/[0.035]"
               >
                 <span className="min-w-0 flex-1">

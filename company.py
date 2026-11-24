@@ -35,6 +35,9 @@ STOCKS_BOT = COMPANY_DIR / "scripts" / "all_stocks_bot.py"
 STOCKS_METRICS_FILE = (Path.home() / ".openclaw" / "stocks_metrics.json")
 PNL_FILE = (Path.home() / ".openclaw" / "office_pnl.json")
 METRICS_URL = "http://127.0.0.1:8083/metrics"
+OFFICE_OS_PATH = Path.home() / "AI-Office" / "packages" / "office-os"
+SESSION_PATH = OFFICE_OS_PATH / "session"
+SHARED_PATH = OFFICE_OS_PATH.parent / "shared"
 
 
 def cmd_dispatch(task: str, department: str | None) -> None:
@@ -92,7 +95,7 @@ def cmd_metrics() -> None:
         print(json.dumps(data, indent=2))
     except Exception as e:
         print(f"Dashboard not reachable at {METRICS_URL}: {e}")
-        print("Start it: cd /Users/aryanagarwal/AI-Office/packages/office-os && python core/web_server.py")
+        print(f"Start it: cd {OFFICE_OS_PATH} && python core/web_server.py")
 
 
 def cmd_stocks(args) -> None:
@@ -126,12 +129,70 @@ def cmd_stock_metrics() -> None:
     print(STOCKS_METRICS_FILE.read_text())
 
 
+def cmd_tasks(list_all: bool, status: str | None, department: str | None, limit: int) -> None:
+    """List or query tasks from the task registry."""
+    import sys
+    sys.path.insert(0, str(COMPANY_DIR))
+    from tasks import list_tasks, queue_tasks
+
+    if list_all:
+        tasks = list_tasks(status, department, limit)
+    elif status == "queued":
+        # queue_tasks needs a department - if none specified, get all queued tasks
+        if department:
+            tasks = queue_tasks(department, limit)
+        else:
+            # Get all queued tasks by department
+            import sqlite3
+            from tasks import TASKS_DB
+            conn = sqlite3.connect(TASKS_DB)
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM tasks
+                WHERE status = 'QUEUED'
+                ORDER BY created_at ASC
+                LIMIT ?
+            """, (limit,))
+            rows = cursor.fetchall()
+            conn.close()
+
+            tasks = []
+            for r in rows:
+                from tasks import Task
+                tasks.append(Task(
+                    task_id=r[0], description=r[1], department=r[2], status=r[3],
+                    created_at=r[4], updated_at=r[5], assigned_agent=r[6],
+                    result=r[7], error=r[8]
+                ))
+    else:
+        tasks = list_tasks(status, department, limit)
+
+    print(f"=== Task Registry ({len(tasks)} tasks) ===")
+    for t in tasks:
+        print(f"[{t.status:12}] {t.task_id} | {t.description[:50]}...")
+
+    if not tasks:
+        print("No tasks found")
+
+
 def cmd_status() -> None:
     print("=== THE CLAUDE COMPANY — Status ===")
     print()
 
+    # Task Registry
+    import sys
+    sys.path.insert(0, str(COMPANY_DIR))
+    from tasks import list_tasks
+
+    tasks = list_tasks(limit=10)
+    print(f"--- Tasks ({len(tasks)} total) ---")
+    for t in tasks[:5]:
+        print(f"  {t.task_id}: {t.status:12} | {t.description[:40]}...")
+    if len(tasks) > 5:
+        print(f"  ... and {len(tasks) - 5} more")
+
     # Dispatcher
-    print("--- Fleet Dispatcher ---")
+    print("\n--- Fleet Dispatcher ---")
     subprocess.run([sys.executable, str(UPGRADE), "--test"])
 
     # Stocks
@@ -175,8 +236,18 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command")
 
     p_dispatch = sub.add_parser("dispatch", help="Dispatch a task to a department")
-    p_dispatch.add_argument("task", help="Task description")
+    p_dispatch.add_argument("task", nargs="?", help="Task description")
     p_dispatch.add_argument("--department", choices=["research", "trading", "fleet", "upgrade", "ops", "assistant"])
+
+    p_tasks = sub.add_parser("tasks", help="Query task registry")
+    p_tasks.add_argument("--all", "-a", action="store_true", help="List all tasks")
+    p_tasks.add_argument("--status", "-s", choices=["SUBMITTED", "VALIDATING", "QUEUED", "LEASED", "RUNNING", "VERIFYING", "SUCCEEDED", "FAILED"])
+    p_tasks.add_argument("--department", "-d", choices=["research", "trading", "fleet", "upgrade", "ops", "assistant", "stocks"])
+    p_tasks.add_argument("--limit", "-l", type=int, default=10, help="Max tasks to show")
+
+    p_queue = sub.add_parser("queue", help="Show queued tasks")
+    p_queue.add_argument("--department", "-d", choices=["research", "trading", "fleet", "upgrade", "ops", "assistant", "stocks"])
+    p_queue.add_argument("--limit", "-l", type=int, default=10, help="Max tasks to show")
 
     p_dost = sub.add_parser("dost", help="Talk to your dost")
     p_dost.add_argument("message", nargs="?")
@@ -209,6 +280,10 @@ def main() -> None:
 
     if args.command == "dispatch":
         cmd_dispatch(args.task, args.department)
+    elif args.command == "tasks":
+        cmd_tasks(args.all, args.status, args.department, args.limit)
+    elif args.command == "queue":
+        cmd_tasks(False, "QUEUED", args.department, args.limit)
     elif args.command == "dost":
         cmd_dost(args.message, args.department, args.briefing, args.push_telegram,
                  args.memory, args.context, args.health)

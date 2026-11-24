@@ -1,0 +1,101 @@
+# office-core Model Router Configuration
+# Single source of truth for all model routing
+
+# Backend definitions
+backends:
+  - name: mlx-local
+    type: mlx
+    endpoint: "http://127.0.0.1:11435"  # Mini's MLX server via SSH tunnel
+    models:
+      - "TheCluster/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-MLX-mxfp4"
+      - "qwen3:8b"
+      - "qwen2.5:7b"
+      - "qwen2.5:0.5b"
+      - "llama3.2:3b"
+      - "gemma3:1b"
+    priority: 100
+    enabled: true
+    config:
+      timeout: 180
+      max_tokens: 8192
+      # SSH tunnel: localhost:11434 -> mini:11434 (ollama_shim) -> mini:11435 (MLX)
+
+  - name: nim-cloud
+    type: nim
+    endpoint: "http://127.0.0.1:4200"  # Mini's NIM proxy
+    models:
+      - "nvidia/nemotron-3.5-lightning-30b-a3b"
+      - "nvidia/nemotron-3-ultra-550b-a55b"
+      - "nvidia/nemotron-3.5-super-vl-120b-a12b"
+      - "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
+    priority: 50
+    enabled: true
+    config:
+      timeout: 90
+      max_tokens: 4096
+      api_key_env: "NVIDIA_API_KEY"
+
+  - name: free-harness
+    type: free-harness
+    endpoint: "http://127.0.0.1:19593"  # qwen9 bridge
+    models:
+      - "qwen9"
+      - "qwen3:8b"
+    priority: 10
+    enabled: true
+    config:
+      timeout: 60
+      max_tokens: 4096
+
+  - name: ollama-local
+    type: ollama
+    endpoint: "http://127.0.0.1:11434"
+    models: []  # Dynamic from /api/tags
+    priority: 5
+    enabled: false  # Disabled - using MLX via shim
+    config:
+      timeout: 120
+
+# Routing rules (evaluated in order)
+routing_rules:
+  - name: "mlx-preferred"
+    condition: "model in mlx-local.models"
+    backend: "mlx-local"
+    fallback: "nim-cloud"
+
+  - name: "nim-large"
+    condition: "model in nim-cloud.models"
+    backend: "nim-cloud"
+    fallback: "mlx-local"
+
+  - name: "free-harness-fallback"
+    condition: "true"
+    backend: "free-harness"
+    fallback: null
+
+# Default model aliases
+aliases:
+  "qwen": "TheCluster/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-MLX-mxfp4"
+  "qwen3": "qwen3:8b"
+  "qwen2.5": "qwen2.5:7b"
+  "llama3": "llama3.2:3b"
+  "nemotron": "nvidia/nemotron-3.5-lightning-30b-a3b"
+  "nemotron-ultra": "nvidia/nemotron-3-ultra-550b-a55b"
+
+# Health check intervals (seconds)
+health_check:
+  interval: 60
+  timeout: 10
+  unhealthy_after: 3  # consecutive failures
+
+# Rate limiting
+rate_limits:
+  mlx-local:
+    requests_per_minute: 30
+    concurrent: 1
+  nim-cloud:
+    requests_per_minute: 100
+    concurrent: 5
+  free-harness:
+    requests_per_minute: 60
+    concurrent: 2

@@ -1,18 +1,11 @@
-import { useState, useEffect } from 'react'
 import { useParams } from 'react-router-dom'
 import { RefreshCw, TriangleExclamationPoint } from 'lucide-react'
+import { usePolling } from '@/lib/use-polling'
 import type { Fundamentals } from '@/types'
 
 interface FundamentalsCardProps {
   symbol?: string
   initialData?: Fundamentals[]
-}
-
-type FundamentalsState = {
-  key: string
-  data: Fundamentals | null
-  error: boolean
-  loading: boolean
 }
 
 function formatRatio(value: number | null, digits = 2): string {
@@ -63,48 +56,35 @@ function FlagRow({ label, value }: { label: string; value: string | null }) {
 export function FundamentalsCard({ symbol: symbolProp, initialData }: FundamentalsCardProps = {}) {
   const { symbol: symbolParam } = useParams<{ symbol: string }>()
   const symbol = symbolProp ?? symbolParam
-  const [result, setResult] = useState<FundamentalsState | null>(null)
-  const [reloadKey, setReloadKey] = useState(0)
-  const requestKey = `${symbol ?? ''}:${reloadKey}`
   const seeded = initialData?.find((row) => row.symbol === symbol)
-  const current = result?.key === requestKey ? result : null
-  const data = seeded ?? current?.data ?? null
-  const loading = !symbol ? false : seeded ? false : current?.loading ?? true
-  const error = !seeded && (current?.error ?? false)
 
-  useEffect(() => {
-    if (!symbol || seeded) return
-    let cancelled = false
-    const target = symbol
-
-    async function fetchFundamentals() {
-      try {
-        const response = await fetch(`/api/fundamentals/${encodeURIComponent(target)}`)
-        if (response.status === 404) {
-          if (!cancelled) setResult({ key: requestKey, data: null, error: false, loading: false })
-          return
-        }
+  const {
+    data: fetched,
+    isLoading: loading,
+    isError: error,
+    retry,
+  } = usePolling<Fundamentals | null>({
+    fetch: (signal) =>
+      fetch(`/api/fundamentals/${encodeURIComponent(symbol ?? '')}`, { signal }).then(async (response) => {
+        if (response.status === 404) return null
         if (!response.ok) throw new Error(`Fundamentals request failed (${response.status})`)
         const fundamental = await response.json() as Fundamentals
         if (!fundamental?.symbol) throw new Error('Fundamentals response was invalid')
-        if (!cancelled) setResult({ key: requestKey, data: fundamental, error: false, loading: false })
-      } catch (fetchError) {
-        console.error(`Failed to fetch fundamentals for ${target}:`, fetchError)
-        if (!cancelled) setResult({ key: requestKey, data: null, error: true, loading: false })
-      }
-    }
+        return fundamental
+      }),
+    interval: 60_000,
+    immediate: Boolean(symbol) && !seeded,
+    maxFailureCount: 5,
+  })
 
-    fetchFundamentals()
-    return () => {
-      cancelled = true
-    }
-  }, [symbol, seeded, requestKey])
+  const data = seeded ?? fetched ?? null
+  const hasError = !seeded && error
 
   if (loading) {
     return <div className="surface p-8 text-sm text-muted-foreground">Loading fundamentals for {symbol}…</div>
   }
 
-  if (error) {
+  if (hasError) {
     return (
       <div className="surface flex flex-col items-center px-6 py-12 text-center">
         <TriangleExclamationPoint className="mb-3 h-7 w-7 text-warning" />
@@ -112,7 +92,7 @@ export function FundamentalsCard({ symbol: symbolProp, initialData }: Fundamenta
         <p className="mt-1 text-xs text-muted-foreground">The published fundamentals feed could not be reached.</p>
         <button
           type="button"
-          onClick={() => setReloadKey((value) => value + 1)}
+          onClick={retry}
           className="mt-4 inline-flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs font-medium text-foreground hover:bg-muted"
         >
           <RefreshCw className="h-3.5 w-3.5" />
