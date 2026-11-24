@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pandas as pd
+
 from best_signal.evidence import CandidateRecord, default_registry, select_tradable
 from best_signal.execution import (
     ACTION_CLOSE,
@@ -33,6 +35,7 @@ from best_signal.execution import (
     venue_snapshot,
 )
 from best_signal.funding import (
+    DEFAULT_DATA_DIR,
     FundingPrint,
     annualized_funding,
     load_symbol_prints,
@@ -124,6 +127,41 @@ def _symbol_summary(symbol: str, prints: list[FundingPrint]) -> dict:
     }
 
 
+def _causal_price_returns(
+    symbol: str, prints: list[FundingPrint], data_dir: Path | None
+) -> pd.Series:
+    """Causal 15m close-to-close returns aligned to each funding print.
+
+    The price used for print ``i`` is the last 15m close at or before print
+    ``i``'s timestamp, so no regime decision can use future price information.
+    Returns an empty series when the price file is unavailable, which leaves
+    the rule's regime gate inactive (backward compatible).
+    """
+    if not prints:
+        return pd.Series(dtype=float)
+    root = Path(data_dir) if data_dir is not None else DEFAULT_DATA_DIR
+    path = root / f"{symbol}_15m.parquet"
+    if not path.is_file():
+        return pd.Series(dtype=float)
+    frame = pd.read_parquet(path)
+    if "open_time" not in frame.columns or "close" not in frame.columns:
+        return pd.Series(dtype=float)
+
+    closes: list[float | None] = []
+    for fp in prints:
+        bars = frame[frame["open_time"] <= fp.ts_ms]
+        if bars.empty:
+            closes.append(None)
+        else:
+            closes.append(
+                float(bars.sort_values("open_time")["close"].iloc[-1])
+            )
+    series = pd.Series(closes, index=[fp.ts_ms for fp in prints]).dropna()
+    if series.empty:
+        return pd.Series(dtype=float)
+    return series.pct_change().fillna(0.0)
+
+
 def _candidate_for(record: CandidateRecord) -> Candidate | None:
     factory = VALIDATION_RULES.get(record.rule_key)
     if factory is None:
@@ -189,6 +227,7 @@ def run_bot(config: BotConfig) -> dict:
     price = 0.0
     for symbol in config.symbols:
         prints = load_symbol_prints(symbol, data_dir=config.data_dir)
+        returns = _causal_price_returns(symbol, prints, config.data_dir)
         prints_by_symbol[symbol] = prints
         current = working.get(symbol)
         if current is None:
@@ -214,6 +253,7 @@ def run_bot(config: BotConfig) -> dict:
             gross_notional=gross_notional,
             open_symbols=open_symbols,
             daily_loss_pct=daily_loss_pct,
+            returns=returns,
         )
         positions.append(position)
 

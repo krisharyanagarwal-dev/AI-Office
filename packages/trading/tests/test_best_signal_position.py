@@ -5,6 +5,8 @@ describe a paper target: no exchange, no credential, no live order. Every
 risk cap and the kill switch have to turn into an explicit NO_TRADE rather
 than a silently resized position.
 """
+import numpy as np
+import pandas as pd
 import pytest
 
 from best_signal.evidence import CARRY_OOS_AUDIT, CandidateRecord, Citation
@@ -43,7 +45,7 @@ class FlatRule:
     def new_state(self):
         return RuleState(side=0)
 
-    def step(self, prints, state):
+    def step(self, prints, state, returns=None):
         return RuleDecision(side=0, reason="stand_down")
 
 
@@ -223,3 +225,25 @@ class TestActions:
             "BTCUSDT", make_prints([-0.0001] * 3), [ACCEPTED_RECORD], RiskLimits()
         )
         assert position.side in (-1, 0, 1)
+
+
+class TestRegimeAwarePosition:
+    def test_volatile_returns_stand_down_always_on_carry(self):
+        rule_returns = pd.Series(np.random.default_rng(7).normal(0.0, 0.05, 150))
+        position = build_paper_position(
+            "BTCUSDT",
+            make_prints([0.0001] * 3),
+            [ACCEPTED_RECORD],
+            RiskLimits(),
+            returns=rule_returns,
+        )
+        assert position.action == "NO_TRADE"
+        assert position.side == 0
+        assert position.reason == "volatile_regime_stand_down"
+
+    def test_none_returns_collects_funding_backward_compatible(self):
+        position = build_paper_position(
+            "BTCUSDT", make_prints([0.0001] * 3), [ACCEPTED_RECORD], RiskLimits()
+        )
+        assert position.action == "OPEN"
+        assert position.side == 1

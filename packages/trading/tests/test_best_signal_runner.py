@@ -6,6 +6,7 @@ validation and writes every artifact. It must never place an order.
 """
 import json
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -13,6 +14,7 @@ from best_signal.position import RiskLimits
 from best_signal.runner import BotConfig, main, run_bot
 
 EIGHT_HOURS_MS = 8 * 3_600_000
+FIFTEEN_MIN_MS = 15 * 60 * 1000
 START_MS = 1_500_000_000_000
 
 
@@ -30,6 +32,21 @@ def write_funding(data_dir, symbol, rates, start_ms=START_MS):
 def make_data(data_dir, symbols=("BTCUSDT",), rate=0.0001, count=80):
     for symbol in symbols:
         write_funding(data_dir, symbol, [rate] * count)
+
+
+def write_prices(data_dir, symbol, n_bars, start_ms=START_MS, vol=0.05, drift=0.0, seed=1):
+    """Write 15m close bars whose close-to-close returns match ``vol``/``drift``."""
+    data_dir.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(seed)
+    returns = rng.normal(drift, vol, n_bars)
+    closes = 100.0 * np.exp(np.cumsum(returns))
+    frame = pd.DataFrame(
+        {
+            "open_time": [start_ms + index * FIFTEEN_MIN_MS for index in range(n_bars)],
+            "close": closes,
+        }
+    )
+    frame.to_parquet(data_dir / f"{symbol}_15m.parquet")
 
 
 def make_config(tmp_path, **overrides):
@@ -148,6 +165,35 @@ class TestRunBot:
         result = run_bot(config)
         reconciliation = result["report"]["reconciliation"]
         assert reconciliation["BTCUSDT"]["status"]
+
+
+class TestRunBotRegime:
+    def test_volatile_regime_stands_down(self, tmp_path):
+        config = make_config(tmp_path)
+        write_funding(config.data_dir, "BTCUSDT", [0.0001] * 150)
+        write_prices(config.data_dir, "BTCUSDT", n_bars=5000, vol=0.05, seed=7)
+        result = run_bot(config)
+        position = result["positions"][0]
+        assert position.action == "NO_TRADE"
+        assert position.side == 0
+
+    def test_trend_regime_opens(self, tmp_path):
+        config = make_config(tmp_path)
+        write_funding(config.data_dir, "BTCUSDT", [0.0001] * 150)
+        write_prices(config.data_dir, "BTCUSDT", n_bars=5000, drift=0.002, vol=0.001, seed=3)
+        result = run_bot(config)
+        position = result["positions"][0]
+        assert position.action == "OPEN"
+        assert position.side == 1
+
+    def test_mean_reversion_regime_collects(self, tmp_path):
+        config = make_config(tmp_path)
+        write_funding(config.data_dir, "BTCUSDT", [0.0001] * 150)
+        write_prices(config.data_dir, "BTCUSDT", n_bars=5000, vol=0.001, drift=0.0, seed=5)
+        result = run_bot(config)
+        position = result["positions"][0]
+        assert position.action == "OPEN"
+        assert position.side == 1
 
 
 class TestMain:

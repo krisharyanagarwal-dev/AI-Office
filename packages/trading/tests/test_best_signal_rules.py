@@ -5,6 +5,8 @@ Every rule must be causal: the decision for print i may only use prints
 0..i. These tests pin that property, because a rule that peeks one print
 ahead would manufacture out-of-sample edge that cannot be traded.
 """
+import numpy as np
+import pandas as pd
 import pytest
 
 from best_signal.funding import FundingPrint, PERIODS_PER_YEAR
@@ -13,6 +15,21 @@ from best_signal.rules import (
     PersistenceFlipCarry,
     RegimeFilteredCarry,
 )
+
+
+def make_volatile_returns(n=150, seed=7):
+    """High-volatility, zero-mean returns that register as the VOLATILE regime."""
+    return pd.Series(np.random.default_rng(seed).normal(0.0, 0.05, n))
+
+
+def make_trend_returns(n=150, seed=3):
+    """Strong positive drift, moderate vol -> TREND_UP regime."""
+    return pd.Series(np.random.default_rng(seed).normal(0.02, 0.01, n))
+
+
+def make_mean_reversion_returns(n=150, seed=5):
+    """Low vol, no drift -> MEAN_REVERSION regime."""
+    return pd.Series(np.random.default_rng(seed).normal(0.0, 0.005, n))
 
 
 def make_prints(rates, start_ms=0, step_ms=8 * 3600 * 1000):
@@ -46,6 +63,47 @@ class TestAlwaysOnCarry:
             sides.append(rule.step(make_prints([rate] * (index + 1)), state).side)
         assert set(sides) == {1}
 
+    def test_collects_when_returns_is_none(self):
+        rule = AlwaysOnCarry()
+        state = rule.new_state()
+        decision = rule.step(make_prints([0.001]), state, returns=None)
+        assert decision.side == 1
+        assert decision.reason == "always_collect"
+
+    def test_stands_down_in_volatile_regime(self):
+        rule = AlwaysOnCarry()
+        state = rule.new_state()
+        decision = rule.step(
+            make_prints([0.001]), state, returns=make_volatile_returns()
+        )
+        assert decision.side == 0
+        assert decision.reason == "volatile_regime_stand_down"
+
+    def test_stands_down_in_volatile_regime_even_with_negative_funding(self):
+        rule = AlwaysOnCarry()
+        state = rule.new_state()
+        decision = rule.step(
+            make_prints([-0.001]), state, returns=make_volatile_returns()
+        )
+        assert decision.side == 0
+        assert decision.reason == "volatile_regime_stand_down"
+
+    def test_collects_in_trend_up_regime(self):
+        rule = AlwaysOnCarry()
+        state = rule.new_state()
+        decision = rule.step(make_prints([0.001]), state, returns=make_trend_returns())
+        assert decision.side == 1
+        assert decision.reason == "always_collect"
+
+    def test_collects_in_mean_reversion_regime(self):
+        rule = AlwaysOnCarry()
+        state = rule.new_state()
+        decision = rule.step(
+            make_prints([0.001]), state, returns=make_mean_reversion_returns()
+        )
+        assert decision.side == 1
+        assert decision.reason == "always_collect"
+
 
 class TestRegimeFilteredCarry:
     def test_starts_in_carry_when_trailing_funding_positive(self):
@@ -76,6 +134,30 @@ class TestRegimeFilteredCarry:
         decision = rule.step(make_prints([-0.001, 0.001]), state)
         assert decision.side == 1
         assert decision.reason == "reenter_carry"
+
+    def test_stands_down_in_volatile_regime_even_with_positive_funding(self):
+        rule = RegimeFilteredCarry(lookback_prints=60, stand_down_ann=0.0, reenter_ann=0.03)
+        state = rule.new_state()
+        rule.step(make_prints([0.001]), state)
+        decision = rule.step(
+            make_prints([0.001, 0.001]),
+            state,
+            returns=make_volatile_returns(),
+        )
+        assert decision.side == 0
+        assert decision.reason == "stand_down_volatile_regime"
+
+    def test_reentry_blocked_in_volatile_regime(self):
+        rule = RegimeFilteredCarry(lookback_prints=60, stand_down_ann=0.0, reenter_ann=0.0)
+        state = rule.new_state()
+        rule.step(make_prints([-0.001]), state)
+        decision = rule.step(
+            make_prints([-0.001, 0.001]),
+            state,
+            returns=make_volatile_returns(),
+        )
+        assert decision.side == 0
+        assert decision.reason == "flat_waiting_reentry"
 
     def test_trailing_window_is_bounded(self):
         rule = RegimeFilteredCarry(lookback_prints=3)

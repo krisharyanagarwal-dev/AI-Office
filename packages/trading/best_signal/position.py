@@ -8,7 +8,9 @@ a gate fails instead of quietly resizing a position.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Optional, Sequence
+
+import pandas as pd
 
 from best_signal.evidence import CandidateRecord, select_tradable
 from best_signal.funding import FundingPrint
@@ -92,6 +94,7 @@ def build_paper_position(
     open_symbols: int = 0,
     daily_loss_pct: float = 0.0,
     rules: dict | None = None,
+    returns: pd.Series | None = None,
 ) -> PaperPosition:
     """Emit the paper target for ``symbol`` or an explicit stand-down."""
     if limits.kill_switch:
@@ -113,22 +116,21 @@ def build_paper_position(
         return _stand_down(symbol, "no_rule_for_candidate", candidate.name)
 
     rule = rule_factory()
-    decision = rule.step(prints, rule.new_state())
+    decision = rule.step(prints, rule.new_state(), returns=returns)
     side = int(decision.side)
     if side not in (-1, 0, 1):
         return _stand_down(symbol, "invalid_side", candidate.name)
 
     if side == 0:
-        if current_side != 0:
-            return PaperPosition(
-                symbol=symbol,
-                action=ACTION_CLOSE,
-                side=0,
-                notional=0.0,
-                reason=decision.reason,
-                candidate=candidate.name,
-            )
-        return _stand_down(symbol, "flat_no_position", candidate.name)
+        action = ACTION_CLOSE if current_side != 0 else ACTION_NO_TRADE
+        return PaperPosition(
+            symbol=symbol,
+            action=action,
+            side=0,
+            notional=0.0,
+            reason=decision.reason,
+            candidate=candidate.name,
+        )
 
     if current_side == 0 and open_symbols >= limits.max_symbols:
         return _stand_down(symbol, "max_symbols", candidate.name)

@@ -9,8 +9,11 @@ funding), ``-1`` is short spot / long perp (collects negative funding) and
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Optional, Sequence
 
+import pandas as pd
+
+from alpha.factors.regime import RegimeType, VolatilityRegimeDetector
 from best_signal.funding import FundingPrint, annualized_funding
 
 HOUR_MS = 3_600_000
@@ -42,8 +45,20 @@ class AlwaysOnCarry:
     def new_state(self) -> RuleState:
         return RuleState(side=1)
 
-    def step(self, prints: Sequence[FundingPrint], state: RuleState) -> RuleDecision:
+    def step(
+        self,
+        prints: Sequence[FundingPrint],
+        state: RuleState,
+        returns: Optional[pd.Series] = None,
+    ) -> RuleDecision:
         state.side = 1
+        if returns is not None and len(returns) > 0:
+            detector = VolatilityRegimeDetector()
+            regimes = detector.detect(returns)
+            regime = regimes[-1].regime if regimes else RegimeType.UNKNOWN
+            if regime == RegimeType.VOLATILE:
+                state.side = 0
+                return RuleDecision(side=0, reason="volatile_regime_stand_down")
         return RuleDecision(side=1, reason="always_collect")
 
 
@@ -79,17 +94,32 @@ class RegimeFilteredCarry:
     def new_state(self) -> RuleState:
         return RuleState()
 
-    def step(self, prints: Sequence[FundingPrint], state: RuleState) -> RuleDecision:
+    def step(
+        self,
+        prints: Sequence[FundingPrint],
+        state: RuleState,
+        returns: Optional[pd.Series] = None,
+    ) -> RuleDecision:
         window = list(prints[-self.lookback_prints:]) if self.lookback_prints else []
         trailing_ann = annualized_funding(window) if window else 0.0
+
+        regime = None
+        if returns is not None and len(returns) > 0:
+            detector = VolatilityRegimeDetector(window=self.lookback_prints)
+            regimes = detector.detect(returns)
+            regime = regimes[-1].regime if regimes else RegimeType.UNKNOWN
+        volatile = regime == RegimeType.VOLATILE
 
         if state.side != 0:
             if trailing_ann < self.stand_down_ann:
                 state.side = 0
                 return RuleDecision(0, "stand_down_negative_funding", trailing_ann)
+            if volatile:
+                state.side = 0
+                return RuleDecision(0, "stand_down_volatile_regime", trailing_ann)
             return RuleDecision(state.side, "hold_carry", trailing_ann)
 
-        if trailing_ann >= self.reenter_ann:
+        if trailing_ann >= self.reenter_ann and not volatile:
             state.side = 1
             return RuleDecision(1, "reenter_carry", trailing_ann)
         return RuleDecision(0, "flat_waiting_reentry", trailing_ann)
@@ -118,7 +148,12 @@ class PersistenceFlipCarry:
     def new_state(self) -> RuleState:
         return RuleState(side=1)
 
-    def step(self, prints: Sequence[FundingPrint], state: RuleState) -> RuleDecision:
+    def step(
+        self,
+        prints: Sequence[FundingPrint],
+        state: RuleState,
+        returns: Optional[pd.Series] = None,
+    ) -> RuleDecision:
         if not prints:
             return RuleDecision(state.side, "no_history", 0.0)
         current = prints[-1]
