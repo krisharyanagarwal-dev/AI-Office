@@ -95,18 +95,14 @@ class TestDostTelegramBot:
 
     @pytest.mark.asyncio
     async def test_send_proactive_briefing_mock(self):
-        """Test proactive briefing with mocked subprocess."""
+        """Test proactive briefing with mocked generate_daily_briefing."""
         with patch("telegram.bot.Bot") as mock_bot_class:
             mock_bot = AsyncMock()
             mock_bot_class.return_value = mock_bot
 
-            with patch("telegram.bot.subprocess.run") as mock_run:
-                mock_run.return_value = MagicMock(
-                    returncode=0,
-                    stdout="Briefing content here",
-                    stderr="",
-                )
-
+            with patch(
+                "telegram.bot.generate_daily_briefing", return_value="Mock briefing content here"
+            ):
                 bot = DostTelegramBot(token="test_token", chat_id=12345)
                 bot.bot = mock_bot
 
@@ -116,6 +112,7 @@ class TestDostTelegramBot:
                 # Check that briefing was sent
                 call_args = mock_bot.send_message.call_args[0]
                 assert "Daily Briefing" in call_args[1]
+                assert "Mock briefing content here" in call_args[1]
 
     @pytest.mark.asyncio
     async def test_send_anomaly_alert_mock(self):
@@ -187,13 +184,10 @@ class TestBotCommands:
             mock_bot = AsyncMock()
             mock_bot_class.return_value = mock_bot
 
-            with patch("telegram.bot.subprocess.run") as mock_run:
-                mock_run.return_value = MagicMock(
-                    returncode=0,
-                    stdout='{"ok": true, "task_id": "jev-abc123", "agent_id": "research-analyst"}',
-                    stderr="",
-                )
-
+            with patch(
+                "telegram.bot.dispatch_prompt_to_fleet",
+                return_value={"ok": True, "task_id": "jev-abc123", "agent_id": "research-analyst"},
+            ):
                 bot = DostTelegramBot(token="test_token", chat_id=12345)
                 bot.bot = mock_bot
 
@@ -207,6 +201,142 @@ class TestBotCommands:
                 # First call: "Dispatching..."
                 # Second call: result
                 assert mock_message.answer.call_count == 2
+                call_args = mock_message.answer.call_args[0][0]
+                assert "jev-abc123" in call_args
+                assert "research-analyst" in call_args
+
+    @pytest.mark.asyncio
+    async def test_cmd_dispatch_dry_run(self):
+        """Test /dispatch --dry-run previews without submitting."""
+        with patch("telegram.bot.Bot") as mock_bot_class:
+            mock_bot = AsyncMock()
+            mock_bot_class.return_value = mock_bot
+
+            with patch(
+                "telegram.bot.dispatch_prompt_to_fleet",
+                return_value={
+                    "ok": True,
+                    "task_id": "jev-dry123",
+                    "agent_id": "research-analyst",
+                    "priority": "high",
+                    "dry_run": True,
+                    "message": "[DRY RUN] Would submit prompt to fleet as task jev-dry123 with priority high.",
+                },
+            ) as mock_dispatch:
+                bot = DostTelegramBot(token="test_token", chat_id=12345)
+                bot.bot = mock_bot
+
+                mock_message = AsyncMock()
+                mock_message.text = "/dispatch --dry-run research AAPL"
+                mock_message.answer = AsyncMock()
+
+                await bot._cmd_dispatch(mock_message)
+
+                mock_dispatch.assert_called_once_with(
+                    "research AAPL", dry_run=True
+                )
+                assert mock_message.answer.call_count == 2
+                call_args = mock_message.answer.call_args[0][0]
+                assert "Dry run" in call_args
+                assert "jev-dry123" in call_args
+
+    @pytest.mark.asyncio
+    async def test_cmd_search(self):
+        """Test /search command returns web results."""
+        with patch("telegram.bot.Bot") as mock_bot_class:
+            mock_bot = AsyncMock()
+            mock_bot_class.return_value = mock_bot
+
+            with patch(
+                "telegram.bot.run_web_search",
+                return_value="Web results for 'RELIANCE news': - RELIANCE up 2% (https://example.com)",
+            ):
+                bot = DostTelegramBot(token="test_token", chat_id=12345)
+                bot.bot = mock_bot
+
+                mock_message = AsyncMock()
+                mock_message.text = "/search RELIANCE news"
+                mock_message.answer = AsyncMock()
+
+                await bot._cmd_search(mock_message)
+
+                assert mock_message.answer.call_count == 2
+                call_args = mock_message.answer.call_args[0][0]
+                assert "Web search results" in call_args
+                assert "RELIANCE up 2%" in call_args
+
+    @pytest.mark.asyncio
+    async def test_cmd_briefing_dry_run(self):
+        """Test /briefing --dry-run labels output as a preview."""
+        with patch("telegram.bot.Bot") as mock_bot_class:
+            mock_bot = AsyncMock()
+            mock_bot_class.return_value = mock_bot
+
+            with patch(
+                "telegram.bot.generate_daily_briefing", return_value="Mock briefing content here"
+            ):
+                bot = DostTelegramBot(token="test_token", chat_id=12345)
+                bot.bot = mock_bot
+
+                mock_message = AsyncMock()
+                mock_message.text = "/briefing --dry-run"
+                mock_message.answer = AsyncMock()
+
+                await bot._cmd_briefing(mock_message)
+
+                assert mock_message.answer.call_count == 2
+                call_args = mock_message.answer.call_args[0][0]
+                assert "Dry run" in call_args
+                assert "Mock briefing content here" in call_args
+
+    @pytest.mark.asyncio
+    async def test_cmd_briefing_mock(self):
+        """Test /briefing command with mocked generate_daily_briefing."""
+        with patch("telegram.bot.Bot") as mock_bot_class:
+            mock_bot = AsyncMock()
+            mock_bot_class.return_value = mock_bot
+
+            with patch(
+                "telegram.bot.generate_daily_briefing", return_value="Mock briefing content here"
+            ):
+                bot = DostTelegramBot(token="test_token", chat_id=12345)
+                bot.bot = mock_bot
+
+                mock_message = AsyncMock()
+                mock_message.text = "/briefing"
+                mock_message.answer = AsyncMock()
+
+                await bot._cmd_briefing(mock_message)
+
+                assert mock_message.answer.call_count == 2
+                call_args = mock_message.answer.call_args[0][0]
+                assert "Morning Briefing" in call_args
+                assert "Mock briefing content here" in call_args
+
+    @pytest.mark.asyncio
+    async def test_cmd_status_mock(self):
+        """Test /status command with mocked _fetch_dispatcher_status."""
+        with patch("telegram.bot.Bot") as mock_bot_class:
+            mock_bot = AsyncMock()
+            mock_bot_class.return_value = mock_bot
+
+            with patch(
+                "telegram.bot._fetch_dispatcher_status",
+                return_value={"tasks_created": 5, "tasks_done": 4, "pools_available": "3/3"},
+            ):
+                bot = DostTelegramBot(token="test_token", chat_id=12345)
+                bot.bot = mock_bot
+
+                mock_message = AsyncMock()
+                mock_message.answer = AsyncMock()
+
+                await bot._cmd_status(mock_message)
+
+                assert mock_message.answer.call_count == 2
+                call_args = mock_message.answer.call_args[0][0]
+                assert "Fleet Status" in call_args
+                assert "tasks_created" in call_args
+                assert "3/3" in call_args
 
 
 if __name__ == "__main__":

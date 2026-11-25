@@ -9,11 +9,17 @@ import asyncio
 import json
 import os
 import sys
-import subprocess
 from pathlib import Path
 from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from dost.dost_main import (
+    dispatch_prompt_to_fleet,
+    generate_daily_briefing,
+    _fetch_dispatcher_status,
+    run_web_search,
+)
 
 try:
     from aiogram import Bot, Dispatcher, Router, F
@@ -68,6 +74,7 @@ class DostTelegramBot:
         router.message(Command("briefing"))(self._cmd_briefing)
         router.message(Command("status"))(self._cmd_status)
         router.message(Command("dispatch"))(self._cmd_dispatch)
+        router.message(Command("search"))(self._cmd_search)
         router.message(Command("memory"))(self._cmd_memory)
         router.message(Command("help"))(self._cmd_help)
 
@@ -83,8 +90,11 @@ class DostTelegramBot:
             "🤖 *Dost Telegram Bot*\n\n"
             "Commands:\n"
             "• `/briefing` - Get morning market briefing\n"
+            "• `/briefing --dry-run` - Preview briefing without sending\n"
             "• `/status` - Fleet & system status\n"
             "• `/dispatch <prompt>` - Send task to fleet\n"
+            "• `/dispatch --dry-run <prompt>` - Preview without submitting\n"
+            "• `/search <query>` - Search the web\n"
             "• `/memory` - Show conversation memory\n"
             "• `/help` - Show this help\n\n"
             "Or just type a message to dispatch to the fleet.",
@@ -95,25 +105,27 @@ class DostTelegramBot:
         await self._cmd_start(message)
 
     async def _cmd_briefing(self, message: Message):
-        """Handle /briefing command - generate and send morning briefing."""
+        """Handle /briefing command - generate and send morning briefing.
+
+        Optional leading `--dry-run` generates the briefing and presents it as a
+        preview without the normal send framing.
+        """
+        args = message.text.split(maxsplit=1)
+        dry_run = False
+        if len(args) == 2 and args[1] == "--dry-run":
+            dry_run = True
+
         await message.answer("📊 Generating briefing...")
 
-        # Run dost briefing via CLI
+        # Generate briefing in-process (dost.dost module was removed; shell-outs are broken)
         try:
-            result = subprocess.run(
-                [sys.executable, "-m", "dost.dost", "--briefing"],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            if result.returncode == 0:
-                # Truncate if too long for Telegram
-                text = result.stdout[:3500]
-                await message.answer(f"📈 *Morning Briefing*\n\n{text}")
+            text = generate_daily_briefing()
+            if dry_run:
+                await message.answer(
+                    f"🧪 *Dry run — briefing preview (not sent)*\n\n{text[:3500]}"
+                )
             else:
-                await message.answer(f"❌ Briefing failed: {result.stderr[:500]}")
-        except subprocess.TimeoutExpired:
-            await message.answer("⏱️ Briefing timed out")
+                await message.answer(f"📈 *Morning Briefing*\n\n{text[:3500]}")
         except Exception as e:
             await message.answer(f"❌ Error: {e}")
 
@@ -121,61 +133,83 @@ class DostTelegramBot:
         """Handle /status command - show fleet status."""
         await message.answer("🔍 Checking fleet status...")
 
+        # Read fleet status in-process (dost.dost module was removed; shell-outs are broken)
         try:
-            result = subprocess.run(
-                [sys.executable, "-m", "dost.dost", "--status"],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            if result.returncode == 0:
-                text = result.stdout[:3500]
-                await message.answer(f"📊 *Fleet Status*\n\n{text}")
+            st = _fetch_dispatcher_status()
+            if st:
+                text = json.dumps(st, indent=2)[:3500]
             else:
-                await message.answer(f"❌ Status failed: {result.stderr[:500]}")
-        except subprocess.TimeoutExpired:
-            await message.answer("⏱️ Status timed out")
+                text = "Fleet status: unreachable (dispatcher may be down)."
+            await message.answer(f"📊 *Fleet Status*\n\n{text}")
         except Exception as e:
             await message.answer(f"❌ Error: {e}")
 
     async def _cmd_dispatch(self, message: Message):
-        """Handle /dispatch command - send prompt to fleet."""
+        """Handle /dispatch command - send prompt to fleet.
+
+        Optional leading `--dry-run` previews the task without submitting it.
+        """
         args = message.text.split(maxsplit=1)
         if len(args) < 2:
-            await message.answer("Usage: `/dispatch <your prompt>`")
+            await message.answer(
+                "Usage: `/dispatch <your prompt>`\n"
+                "Try: `/dispatch --dry-run research AAPL` to preview without submitting."
+            )
             return
 
-        prompt = args[1]
+        rest = args[1]
+        dry_run = False
+        if rest.startswith("--dry-run"):
+            dry_run = True
+            rest = rest[len("--dry-run"):].strip()
+            if not rest:
+                await message.answer("Usage: `/dispatch --dry-run <your prompt>`")
+                return
+
+        prompt = rest
         await message.answer(f"📤 Dispatching: *{prompt[:100]}...*")
 
+        # Dispatch in-process (dost.dost module was removed; shell-outs are broken)
         try:
-            result = subprocess.run(
-                [sys.executable, "-m", "dost.dost", "--dispatch", prompt],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            if result.returncode == 0:
-                data = json.loads(result.stdout)
-                if data.get("ok"):
-                    task_id = data.get("task_id", "unknown")
-                    agent_id = data.get("agent_id", "unknown")
+            result = dispatch_prompt_to_fleet(prompt, dry_run=dry_run)
+            if result.get("ok"):
+                task_id = result.get("task_id", "unknown")
+                agent_id = result.get("agent_id", "unknown")
+                if dry_run:
+                    await message.answer(
+                        f"🧪 *Dry run — nothing submitted*\n"
+                        f"Task: `{task_id}`\n"
+                        f"Agent: `{agent_id}`\n"
+                        f"Priority: {result.get('priority', 'normal')}\n"
+                        f"{result.get('message', '')}"
+                    )
+                else:
                     await message.answer(
                         f"✅ *Dispatched*\n"
                         f"Task: `{task_id}`\n"
                         f"Agent: `{agent_id}`\n"
                         f"Prompt: {prompt[:200]}"
                     )
-                else:
-                    await message.answer(f"❌ Dispatch failed: {data.get('error', 'unknown')}")
             else:
-                await message.answer(f"❌ Dispatch failed: {result.stderr[:500]}")
-        except json.JSONDecodeError:
-            await message.answer(f"❌ Invalid response: {result.stdout[:500]}")
-        except subprocess.TimeoutExpired:
-            await message.answer("⏱️ Dispatch timed out")
+                await message.answer(f"❌ Dispatch failed: {result.get('error', 'unknown')}")
         except Exception as e:
             await message.answer(f"❌ Error: {e}")
+
+    async def _cmd_search(self, message: Message):
+        """Handle /search command - run a keyless web search."""
+        args = message.text.split(maxsplit=1)
+        if len(args) < 2:
+            await message.answer("Usage: `/search <your query>`")
+            return
+
+        query = args[1]
+        await message.answer(f"🔍 Searching: *{query[:100]}...*")
+
+        try:
+            results = run_web_search(query)
+            await message.answer(f"🔎 *Web search results*\n\n{results[:3500]}")
+        except Exception as e:
+            await message.answer(f"❌ Search error: {e}")
 
     async def _cmd_memory(self, message: Message):
         """Handle /memory command - show conversation memory."""
@@ -199,27 +233,19 @@ class DostTelegramBot:
 
         await message.answer(f"📤 Dispatching: *{prompt[:100]}...*")
 
+        # Dispatch in-process (dost.dost module was removed; shell-outs are broken)
         try:
-            result = subprocess.run(
-                [sys.executable, "-m", "dost.dost", "--dispatch", prompt],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            if result.returncode == 0:
-                data = json.loads(result.stdout)
-                if data.get("ok"):
-                    task_id = data.get("task_id", "unknown")
-                    agent_id = data.get("agent_id", "unknown")
-                    await message.answer(
-                        f"✅ *Dispatched*\n"
-                        f"Task: `{task_id}`\n"
-                        f"Agent: `{agent_id}`"
-                    )
-                else:
-                    await message.answer(f"❌ Dispatch failed: {data.get('error', 'unknown')}")
+            result = dispatch_prompt_to_fleet(prompt)
+            if result.get("ok"):
+                task_id = result.get("task_id", "unknown")
+                agent_id = result.get("agent_id", "unknown")
+                await message.answer(
+                    f"✅ *Dispatched*\n"
+                    f"Task: `{task_id}`\n"
+                    f"Agent: `{agent_id}`"
+                )
             else:
-                await message.answer(f"❌ Dispatch failed: {result.stderr[:500]}")
+                await message.answer(f"❌ Dispatch failed: {result.get('error', 'unknown')}")
         except Exception as e:
             await message.answer(f"❌ Error: {e}")
 
@@ -238,6 +264,7 @@ class DostTelegramBot:
             BotCommand(command="briefing", description="Get morning briefing"),
             BotCommand(command="status", description="Fleet status"),
             BotCommand(command="dispatch", description="Send task to fleet"),
+            BotCommand(command="search", description="Search the web"),
             BotCommand(command="memory", description="Show memory"),
             BotCommand(command="help", description="Show help"),
         ])
@@ -259,17 +286,8 @@ class DostTelegramBot:
         """Send proactive morning briefing."""
         await self.send_message("🌅 *Good morning! Generating your daily briefing...*")
         try:
-            result = subprocess.run(
-                [sys.executable, "-m", "dost.dost", "--briefing"],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            if result.returncode == 0:
-                text = result.stdout[:3500]
-                await self.send_message(f"📈 *Daily Briefing*\n\n{text}")
-            else:
-                await self.send_message(f"❌ Briefing failed: {result.stderr[:500]}")
+            text = generate_daily_briefing()
+            await self.send_message(f"📈 *Daily Briefing*\n\n{text[:3500]}")
         except Exception as e:
             await self.send_message(f"❌ Briefing error: {e}")
 
