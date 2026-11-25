@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ from best_signal.execution import (
     ACTION_OPEN,
     CarryPaperBroker,
     ExecutionEngine,
+    ExecutionRealismConfig,
     ExecutionResult,
     build_paper_venue,
     load_price_at,
@@ -34,6 +36,7 @@ from best_signal.execution import (
     run_paper_execution,
     venue_snapshot,
 )
+from best_signal.telemetry import CycleMetrics, TelemetrySink, record_cycle
 from best_signal.funding import (
     DEFAULT_DATA_DIR,
     FundingPrint,
@@ -52,7 +55,10 @@ STATE_FILENAME = "best_signal_state.json"
 VALIDATION_FILENAME = "best_signal_validation.json"
 RECONCILIATION_FILENAME = "best_signal_reconciliation.json"
 SIGNALS_FILENAME = "best_signal_signals.json"
+TELEMETRY_FILENAME = "best_signal_telemetry.jsonl"
 DEFAULT_OUT_DIR = Path(__file__).resolve().parents[1] / "reports" / "best_signal"
+
+logger = logging.getLogger(__name__)
 
 VALIDATION_RULES = {
     "always_on_carry": lambda params: AlwaysOnCarry(),
@@ -87,6 +93,8 @@ class BotConfig:
     limits: RiskLimits = RiskLimits()
     validate: bool = True
     daily_loss_pct: float = 0.0
+    execution_realism: ExecutionRealismConfig = ExecutionRealismConfig()
+    telemetry_enabled: bool = True
 
 
 def _now() -> str:
@@ -243,9 +251,10 @@ def run_bot(config: BotConfig) -> dict:
         day_state = {"date": today, "funding": 0.0, "fees": 0.0, "pnl": 0.0}
 
     equity = config.equity
-    engine, broker = build_paper_venue(equity)
+    engine, broker = build_paper_venue(equity, realism=config.execution_realism)
     if state.get("venue"):
         restore_venue(broker, state["venue"])
+    sink = TelemetrySink(out_dir / TELEMETRY_FILENAME, enabled=config.telemetry_enabled)
     governor = RiskGovernor(risk_limits_for(config.limits, equity))
     governor.limits.daily_pnl = day_state["pnl"]
     governor.update_high_water_mark(equity + day_state["pnl"])
@@ -332,6 +341,15 @@ def run_bot(config: BotConfig) -> dict:
             result = ExecutionResult(
                 symbol, ACTION_NO_TRADE, (), 0.0, True, "stand_down"
             )
+        record_cycle(
+            sink,
+            symbol,
+            position.side,
+            position.notional,
+            position.action,
+            result,
+            broker,
+        )
         day_state["fees"] += result.fees
         day_state["pnl"] = (
             day_state["funding"]
@@ -365,6 +383,21 @@ def run_bot(config: BotConfig) -> dict:
             )
 
         _apply_position(working, symbol, position, filled=result.filled)
+
+        # Defensive consistency check
+        if governor is not None:
+            gov_symbols = {
+                s for s, p in governor.limits.positions.items() if p.get("gross_notional", 0) > 0
+            }
+            working_symbols = {
+                s for s, w in working.items() if w.get("side", 0) != 0
+            }
+            if gov_symbols != working_symbols:
+                logger.warning(
+                    f"Governor/working divergence for {symbol}: "
+                    f"gov={sorted(gov_symbols)} working={sorted(working_symbols)}"
+                )
+
         data_summary[symbol] = _symbol_summary(symbol, prints)
 
         if config.validate and selected is not None:
@@ -459,12 +492,31 @@ def _build_parser() -> argparse.ArgumentParser:
         "--max-daily-loss-pct", type=float, default=RiskLimits.max_daily_loss_pct
     )
     parser.add_argument("--daily-loss-pct", type=float, default=0.0)
+    parser.add_argument("--slippage-bps", type=float, default=0.0)
+    parser.add_argument("--latency-ms", type=float, default=0.0)
+    parser.add_argument(
+        "--partial-fill",
+        dest="partial_fill",
+        action="store_true",
+        help="enable deterministic partial fills (paper mode only)",
+    )
+    parser.add_argument(
+        "--partial-fill-fraction",
+        type=float,
+        default=ExecutionRealismConfig.partial_fill_fraction,
+    )
     parser.add_argument("--kill-switch", action="store_true")
     parser.add_argument(
         "--no-validate",
         dest="validate",
         action="store_false",
         help="skip the out-of-sample validation run",
+    )
+    parser.add_argument(
+        "--no-telemetry",
+        dest="telemetry",
+        action="store_false",
+        help="disable paper-mode execution telemetry",
     )
     return parser
 
@@ -489,6 +541,13 @@ def main(argv=None) -> int:
         limits=limits,
         validate=args.validate,
         daily_loss_pct=args.daily_loss_pct,
+        execution_realism=ExecutionRealismConfig(
+            slippage_bps=args.slippage_bps,
+            latency_ms=args.latency_ms,
+            partial_fill_enabled=args.partial_fill,
+            partial_fill_fraction=args.partial_fill_fraction,
+        ),
+        telemetry_enabled=args.telemetry,
     )
     try:
         result = run_bot(config)
