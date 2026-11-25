@@ -5,17 +5,29 @@ registry, loads funding history, emits paper targets, runs the out-of-sample
 validation and writes every artifact. It must never place an order.
 """
 import json
+from datetime import datetime, timezone
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from best_signal.position import RiskLimits
-from best_signal.runner import BotConfig, main, run_bot
+from best_signal.execution import approve_target, risk_limits_for
+from best_signal.position import PaperPosition, RiskLimits
+from best_signal.runner import (
+    BotConfig,
+    STATE_FILENAME,
+    main,
+    run_bot,
+    _apply_position,
+    _restore_governor_book,
+)
+from risk import RiskGovernor
 
 EIGHT_HOURS_MS = 8 * 3_600_000
 FIFTEEN_MIN_MS = 15 * 60 * 1000
 START_MS = 1_500_000_000_000
+EQUITY = 10_000.0
 
 
 def write_funding(data_dir, symbol, rates, start_ms=START_MS):
@@ -108,6 +120,26 @@ class TestRunBot:
         position = result["positions"][0]
         assert position.action == "NO_TRADE"
         assert position.reason == "kill_switch"
+        assert position.notional == 0.0
+
+    def test_run_bot_stands_down_when_the_day_loss_limit_is_breached(self, tmp_path):
+        config = make_config(tmp_path, limits=RiskLimits(max_daily_loss_pct=0.03))
+        make_data(config.data_dir)
+        today = datetime.now(timezone.utc).date().isoformat()
+        config.out_dir.mkdir(parents=True, exist_ok=True)
+        state_path = Path(config.out_dir) / STATE_FILENAME
+        state_path.write_text(
+            json.dumps(
+                {
+                    "symbols": {},
+                    "day": {"date": today, "pnl": -400.0, "funding": 0.0, "fees": 0.0},
+                }
+            )
+        )
+        result = run_bot(config)
+        position = result["positions"][0]
+        assert position.action == "NO_TRADE"
+        assert position.reason == "daily_loss_limit"
         assert position.notional == 0.0
 
     def test_run_bot_honours_the_symbol_cap(self, tmp_path):
@@ -229,3 +261,87 @@ class TestMain:
         )
         assert code == 1
         assert "BTCUSDT" in capsys.readouterr().err
+
+
+def test_apply_position_keeps_the_book_when_a_target_is_not_filled():
+    """A rejected or rolled-back target must not corrupt the paper book."""
+    working = {"BTCUSDT": {"side": 1, "notional": 500.0, "last_funding_ts_ms": 1_000}}
+    position = PaperPosition(
+        "BTCUSDT", "OPEN", 1, 999.0, "risk_rejected", "candidate"
+    )
+    _apply_position(working, "BTCUSDT", position, filled=False)
+    assert working["BTCUSDT"]["side"] == 1
+    assert working["BTCUSDT"]["notional"] == 500.0
+    assert working["BTCUSDT"]["last_funding_ts_ms"] == 1_000
+    # last_action/last_reason are still recorded so rejections stay visible.
+    assert working["BTCUSDT"]["last_action"] == "OPEN"
+    assert working["BTCUSDT"]["last_reason"] == "risk_rejected"
+
+
+def test_restored_governor_book_mirrors_the_paper_book():
+    governor = RiskGovernor(risk_limits_for(RiskLimits(), EQUITY))
+    _restore_governor_book(
+        governor,
+        {
+            "BTCUSDT": {"side": 1, "notional": 5_000.0},
+            "ETHUSDT": {"side": -1, "notional": 3_000.0},
+            "SOLUSDT": {"side": 0, "notional": 0.0},
+        },
+    )
+    assert governor.limits.positions["BTCUSDT"]["gross_notional"] == 10_000.0
+    assert governor.limits.positions["ETHUSDT"]["gross_notional"] == 6_000.0
+    assert "SOLUSDT" not in governor.limits.positions
+
+
+def test_restored_book_blocks_a_second_carry_via_total_exposure():
+    """A restored carry must count toward the governor's total exposure."""
+    limits = RiskLimits(max_gross_notional=5_000.0, max_symbol_notional=5_000.0)
+
+    # With no book restored, the new target fits easily.
+    fresh = RiskGovernor(risk_limits_for(limits, EQUITY))
+    approved, _ = approve_target(
+        fresh, "ETHUSDT", 2_000.0, EQUITY, per_leg_notional=1_000.0
+    )
+    assert approved is True
+
+    # Restoring the existing BTCUSDT carry makes the same target breach the
+    # total-exposure cap, so it must be rejected and leave no allocation.
+    governor = RiskGovernor(risk_limits_for(limits, EQUITY))
+    _restore_governor_book(governor, {"BTCUSDT": {"side": 1, "notional": 5_000.0}})
+    approved, reason = approve_target(
+        governor, "ETHUSDT", 2_000.0, EQUITY, per_leg_notional=1_000.0
+    )
+    assert approved is False
+    assert "total exposure" in reason
+    assert "ETHUSDT" not in governor.limits.positions
+
+
+def test_run_bot_stands_down_second_symbol_when_restored_book_is_full(tmp_path):
+    config = make_config(
+        tmp_path,
+        symbols=("BTCUSDT", "ETHUSDT"),
+        limits=RiskLimits(max_gross_notional=6_000.0, max_symbol_notional=6_000.0),
+    )
+    make_data(config.data_dir, symbols=("BTCUSDT", "ETHUSDT"))
+    today = datetime.now(timezone.utc).date().isoformat()
+    config.out_dir.mkdir(parents=True, exist_ok=True)
+    state_path = Path(config.out_dir) / STATE_FILENAME
+    state_path.write_text(
+        json.dumps(
+            {
+                "symbols": {"BTCUSDT": {"side": 1, "notional": 5_000.0}},
+                "day": {"date": today, "pnl": 0.0, "funding": 0.0, "fees": 0.0},
+            }
+        )
+    )
+    result = run_bot(config)
+    eth = result["state"]["ETHUSDT"]
+    assert eth["side"] == 0
+    assert eth["notional"] == 0.0
+    # The restored BTCUSDT carry exhausts the gross cap, so the second symbol
+    # is stood down by the emitter and no allocation is made.
+    assert eth["last_action"] == "NO_TRADE"
+    assert eth["last_reason"] == "risk_cap_exhausted"
+    btc = result["state"]["BTCUSDT"]
+    assert btc["side"] == 1
+    assert btc["notional"] == 6_000.0

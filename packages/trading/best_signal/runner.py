@@ -175,10 +175,35 @@ def _candidate_for(record: CandidateRecord) -> Candidate | None:
     )
 
 
-def _apply_position(working: dict, symbol: str, position) -> None:
+def _restore_governor_book(governor: RiskGovernor, working: dict) -> None:
+    """Rebuild the governor's position book from the restored paper state.
+
+    A fresh governor starts with an empty book, but the emitter sizes each
+    target against the carries ``working`` actually holds. Restoring the
+    governor's book from the same state keeps its per-symbol and total
+    exposure checks in sync with the book instead of judging each cycle
+    against an empty slate.
+    """
+    for symbol, entry in working.items():
+        if int(entry.get("side", 0)) == 0:
+            continue
+        governor.limits.positions[symbol] = {
+            "quantity": 0.0,
+            "avg_entry_price": 0.0,
+            "gross_notional": 2.0 * float(entry.get("notional", 0.0)),
+        }
+
+
+def _apply_position(working: dict, symbol: str, position, filled: bool = True) -> None:
     entry = dict(working.get(symbol, {"side": 0, "notional": 0.0}))
     entry["last_action"] = position.action
     entry["last_reason"] = position.reason
+    if not filled:
+        # A risk-rejected or rolled-back target never reached the venue, so
+        # the paper book keeps the position it actually holds instead of
+        # recording an allocation the governor just refused.
+        working[symbol] = entry
+        return
     if position.action == "CLOSE":
         entry["side"] = 0
         entry["notional"] = 0.0
@@ -223,6 +248,8 @@ def run_bot(config: BotConfig) -> dict:
         restore_venue(broker, state["venue"])
     governor = RiskGovernor(risk_limits_for(config.limits, equity))
     governor.limits.daily_pnl = day_state["pnl"]
+    governor.update_high_water_mark(equity + day_state["pnl"])
+    _restore_governor_book(governor, working)
 
     price = 0.0
     for symbol in config.symbols:
@@ -313,6 +340,13 @@ def run_bot(config: BotConfig) -> dict:
             - realised_before
         )
 
+        # Keep the risk governor's day bookkeeping in step with the day
+        # state the position emitter reads, so its daily-loss and drawdown
+        # checks decide on the same running P&L this cycle instead of a
+        # stale snapshot from cycle start.
+        governor.limits.daily_pnl = day_state["pnl"]
+        governor.update_high_water_mark(equity + day_state["pnl"])
+
         # Send a signal when the emitted action changes the book: an OPEN, a
         # CLOSE, or a FLIP is a difference worth sending. Holding or standing
         # down with no change to the book is not a signal.
@@ -330,7 +364,7 @@ def run_bot(config: BotConfig) -> dict:
                 }
             )
 
-        _apply_position(working, symbol, position)
+        _apply_position(working, symbol, position, filled=result.filled)
         data_summary[symbol] = _symbol_summary(symbol, prints)
 
         if config.validate and selected is not None:

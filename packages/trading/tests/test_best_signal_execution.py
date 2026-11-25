@@ -305,3 +305,29 @@ def test_the_carry_broker_is_a_paper_broker():
     broker = CarryPaperBroker(initial_balance=1_000.0)
     assert broker.paper_trading is True
     assert broker.balances["USDT"] == 1_000.0
+
+
+def test_approve_target_picks_up_a_daily_loss_recorded_mid_cycle():
+    """The governor must re-check daily loss against the current day P&L.
+
+    The runner re-syncs governor.limits.daily_pnl after every symbol, so a
+    loss booked by an earlier symbol must stand later symbols down in the
+    same cycle instead of being judged against a stale cycle-start snapshot.
+    """
+    governor = RiskGovernor(
+        risk_limits_for(RiskLimits(max_daily_loss_pct=0.03), EQUITY)
+    )
+    approved, reason = approve_target(
+        governor, "BTCUSDT", 2_000.0, EQUITY, per_leg_notional=1_000.0
+    )
+    assert approved is True
+    assert reason is None
+    # A $400 loss lands mid-cycle (4% of the 10,000 equity, over the 3% cap).
+    governor.limits.daily_pnl = -400.0
+    approved, reason = approve_target(
+        governor, "ETHUSDT", 2_000.0, EQUITY, per_leg_notional=1_000.0
+    )
+    assert approved is False
+    assert "daily loss" in reason
+    # The failed approval must not leave an allocation behind.
+    assert "ETHUSDT" not in governor.limits.positions
