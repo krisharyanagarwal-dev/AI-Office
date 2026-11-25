@@ -331,3 +331,36 @@ def test_approve_target_picks_up_a_daily_loss_recorded_mid_cycle():
     assert "daily loss" in reason
     # The failed approval must not leave an allocation behind.
     assert "ETHUSDT" not in governor.limits.positions
+
+
+class TestRollbackGovernor:
+    def test_rollback_restores_governor_book(self):
+        """Rolled-back OPEN/FLIP leaves governor exactly as before."""
+        governor = _governor(
+            min_confidence=0.0,
+            max_notional_pct=1.0,
+            max_symbol_exposure_pct=2.0,
+            max_total_exposure_pct=4.0,
+            max_open_positions=4,
+            start_of_day_equity=EQUITY,
+            high_water_mark=EQUITY,
+        )
+        # Pre-populate with an existing symbol
+        governor.limits.positions["ETHUSDT"] = {
+            "quantity": 0.0,
+            "avg_entry_price": 0.0,
+            "gross_notional": 10_000.0,
+        }
+        pre_snapshot = {k: dict(v) for k, v in governor.limits.positions.items()}
+
+        engine, broker = build_paper_venue(EQUITY)
+        broker.margin_ratio = 5.0  # forces rejection on second leg
+
+        result = run_paper_execution(
+            engine, broker, "BTCUSDT", 1, NOTIONAL, PRICE, EQUITY, governor=governor
+        )
+
+        assert result.filled is False
+        assert result.action == "ROLLED_BACK"
+        # Governor must be exactly as before
+        assert governor.limits.positions == pre_snapshot

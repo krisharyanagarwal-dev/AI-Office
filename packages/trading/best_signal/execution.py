@@ -48,6 +48,23 @@ ACTION_NO_TRADE = "NO_TRADE"
 
 
 @dataclass(frozen=True)
+class ExecutionRealismConfig:
+    """Execution realism applied to paper fills (paper mode only).
+
+    Slippage is applied against the direction of the trade: a buy fills at a
+    higher price, a sell at a lower price. Partial fills are deterministic ---
+    a fixed fraction of the order quantity fills --- so runs stay reproducible.
+    Latency is a fixed sleep per market order and never reaches a live venue.
+    All defaults are zero, so existing behaviour is preserved exactly.
+    """
+
+    slippage_bps: float = 0.0
+    latency_ms: float = 0.0
+    partial_fill_enabled: bool = False
+    partial_fill_fraction: float = 0.5
+
+
+@dataclass(frozen=True)
 class Leg:
     """One side of a carry: a spot leg or its perp counterpart."""
 
@@ -71,6 +88,7 @@ class ExecutionResult:
     reason: str
     mode: str = MODE_PAPER
     live: bool = False
+    partial: bool = False
 
 
 class LiveVenueRefused(RuntimeError):
@@ -86,6 +104,7 @@ class CarryPaperBroker(PaperBroker):
         initial_balance: float = 100_000.0,
         commission_rate: float = DEFAULT_FEE,
         margin_ratio: float = DEFAULT_MARGIN_RATIO,
+        realism: Optional[ExecutionRealismConfig] = None,
     ):
         super().__init__(name=name, initial_balance=initial_balance)
         self.balances = {"USDT": float(initial_balance)}
@@ -94,6 +113,11 @@ class CarryPaperBroker(PaperBroker):
         self.margin_used: Dict[str, float] = {}
         self.fees_total = 0.0
         self.realized_pnl: Dict[str, float] = {}
+        self.realism = realism or ExecutionRealismConfig()
+        self.slippage_bps = self.realism.slippage_bps
+        self.latency_ms = self.realism.latency_ms
+        self.partial_fill_enabled = self.realism.partial_fill_enabled
+        self.partial_fill_fraction = self.realism.partial_fill_fraction
 
     @property
     def free_cash(self) -> float:
@@ -118,26 +142,42 @@ class CarryPaperBroker(PaperBroker):
             await self._update_order(order)
             return
 
+        if self.latency_ms > 0:
+            await asyncio.sleep(self.latency_ms / 1000.0)
+
+        # Slippage fills against the direction of the trade: a buy prints a
+        # higher price, a sell a lower price.
+        fill_price = price
+        if self.slippage_bps:
+            if order.side == OrderSide.BUY:
+                fill_price = price * (1 + self.slippage_bps / 10_000.0)
+            else:
+                fill_price = price * (1 - self.slippage_bps / 10_000.0)
+
         position = self.positions.get(order.symbol)
         prev_qty = position.quantity if position else 0.0
         prev_avg = position.avg_entry_price if position else 0.0
+
+        fill_qty = order.quantity
+        if self.partial_fill_enabled and not getattr(order, "fill_fully", False):
+            fill_qty = order.quantity * self.partial_fill_fraction
 
         fill = Fill(
             order_id=order.client_order_id,
             symbol=order.symbol,
             side=order.side,
-            quantity=order.quantity,
-            price=price,
-            commission=order.quantity * price * self.commission_rate,
+            quantity=fill_qty,
+            price=fill_price,
+            commission=fill_qty * fill_price * self.commission_rate,
             timestamp=time.time(),
             exchange_fill_id=f"paper_{uuid.uuid4().hex[:8]}",
         )
         await self._process_fill(fill)
 
         if order.side == OrderSide.BUY:
-            self.balances["USDT"] -= order.quantity * price + fill.commission
+            self.balances["USDT"] -= fill_qty * fill_price + fill.commission
         else:
-            self.balances["USDT"] += order.quantity * price - fill.commission
+            self.balances["USDT"] += fill_qty * fill_price - fill.commission
         self.fees_total += fill.commission
         self._book_realized_pnl(order.symbol, prev_qty, prev_avg, fill)
         self._recompute_margin()
@@ -280,10 +320,14 @@ def approve_target(
     return True, None
 
 
-def build_paper_venue(equity: float, name: str = "paper"):
+def build_paper_venue(
+    equity: float,
+    name: str = "paper",
+    realism: Optional[ExecutionRealismConfig] = None,
+):
     """Build a paper venue funded for one carry plus its margin."""
     balance = round(equity * (1 + DEFAULT_MARGIN_RATIO) * 1.01, 8)
-    broker = CarryPaperBroker(name=name, initial_balance=balance)
+    broker = CarryPaperBroker(name=name, initial_balance=balance, realism=realism)
     engine = ExecutionEngine()
     engine.add_broker(name, broker, is_default=True)
     return engine, broker
@@ -409,7 +453,7 @@ def _close_legs(
     )
 
 
-def _submit_leg(engine, leg: Leg) -> Order:
+def _submit_leg(engine, leg: Leg, fill_fully: bool = False) -> Order:
     order = Order(
         symbol=leg.symbol,
         side=OrderSide.BUY if leg.side == "buy" else OrderSide.SELL,
@@ -417,11 +461,19 @@ def _submit_leg(engine, leg: Leg) -> Order:
         quantity=leg.quantity,
         price=leg.price,
     )
+    if fill_fully:
+        # Rollback legs must fill fully: a rollback may never leave a
+        # half-carry behind, even when partial fills are enabled.
+        order.fill_fully = True
     return _drive(engine.submit_order(order))
 
 
 def _rollback(engine, filled_legs: List[Leg]) -> List[Order]:
-    """Reverse the legs that already filled so no half-carry is left open."""
+    """Reverse the legs that already filled so no half-carry is left open.
+
+    Every reversal fills fully: a rollback must never leave a half-carry
+    behind, even when partial fills are enabled.
+    """
     orders = []
     for leg in reversed(filled_legs):
         reverse = Leg(
@@ -432,7 +484,7 @@ def _rollback(engine, filled_legs: List[Leg]) -> List[Order]:
             price=leg.price,
             notional=leg.notional,
         )
-        orders.append(_submit_leg(engine, reverse))
+        orders.append(_submit_leg(engine, reverse, fill_fully=True))
     return orders
 
 
@@ -491,7 +543,9 @@ def run_paper_execution(
             reason="held",
         )
 
+    governor_snapshot = None
     if action in (ACTION_OPEN, ACTION_FLIP) and governor is not None:
+        governor_snapshot = {k: dict(v) for k, v in governor.limits.positions.items()}
         approved, reason = approve_target(
             governor,
             symbol,
@@ -525,7 +579,21 @@ def run_paper_execution(
         orders.append(order)
         if order.status != OrderStatus.FILLED:
             rollback_orders = _rollback(engine, filled_legs)
+            if order.filled_qty > 0:
+                # A partial fill reached the venue: reverse it so the
+                # rollback leaves the book flat instead of a half-carry.
+                reverse = Leg(
+                    symbol=leg.symbol,
+                    market=leg.market,
+                    side="sell" if leg.side == "buy" else "buy",
+                    quantity=order.filled_qty,
+                    price=order.avg_fill_price or leg.price,
+                    notional=order.filled_qty * (order.avg_fill_price or leg.price),
+                )
+                rollback_orders.append(_submit_leg(engine, reverse, fill_fully=True))
             _keep_flat_legs(broker, legs)
+            if governor_snapshot is not None and governor is not None:
+                governor.limits.positions = governor_snapshot
             fees = sum(item.commission for item in orders)
             fees += sum(item.commission for item in rollback_orders)
             return ExecutionResult(
@@ -534,7 +602,12 @@ def run_paper_execution(
                 legs=tuple(filled_legs),
                 fees=fees,
                 filled=False,
-                reason=f"leg_rejected:{leg.symbol}",
+                partial=order.filled_qty > 0,
+                reason=(
+                    f"partial_fill:{leg.symbol}"
+                    if order.status == OrderStatus.PARTIAL
+                    else f"leg_rejected:{leg.symbol}"
+                ),
             )
         filled_legs.append(leg)
 
@@ -545,4 +618,5 @@ def run_paper_execution(
         fees=sum(item.commission for item in orders),
         filled=True,
         reason="filled",
+        partial=False,
     )
