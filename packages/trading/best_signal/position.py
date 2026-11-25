@@ -149,6 +149,16 @@ def build_paper_position(
         action = ACTION_OPEN
     elif current_side == side:
         action = ACTION_HOLD
+        # HOLD: keep the existing position size exactly; risk caps only gate new exposure
+        notional = float(current_notional)
+        return PaperPosition(
+            symbol=symbol,
+            action=action,
+            side=side,
+            notional=notional,
+            reason=decision.reason,
+            candidate=candidate.name,
+        )
     else:
         action = ACTION_FLIP
 

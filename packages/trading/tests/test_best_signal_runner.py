@@ -316,7 +316,8 @@ def test_restored_book_blocks_a_second_carry_via_total_exposure():
     assert "ETHUSDT" not in governor.limits.positions
 
 
-def test_run_bot_stands_down_second_symbol_when_restored_book_is_full(tmp_path):
+def test_run_bot_preserves_hold_notional_and_opens_second_symbol(tmp_path):
+    """HOLD preserves current notional; remaining gross cap allows second symbol to OPEN."""
     config = make_config(
         tmp_path,
         symbols=("BTCUSDT", "ETHUSDT"),
@@ -336,12 +337,12 @@ def test_run_bot_stands_down_second_symbol_when_restored_book_is_full(tmp_path):
     )
     result = run_bot(config)
     eth = result["state"]["ETHUSDT"]
-    assert eth["side"] == 0
-    assert eth["notional"] == 0.0
-    # The restored BTCUSDT carry exhausts the gross cap, so the second symbol
-    # is stood down by the emitter and no allocation is made.
-    assert eth["last_action"] == "NO_TRADE"
-    assert eth["last_reason"] == "risk_cap_exhausted"
+    # BTCUSDT HOLD preserves 5000, leaving 1000 gross cap for ETHUSDT
+    assert eth["side"] == 1
+    assert eth["notional"] == pytest.approx(1_000.0)
+    assert eth["last_action"] == "OPEN"
     btc = result["state"]["BTCUSDT"]
+    # HOLD preserves the restored notional (5000), not capped to 6000
     assert btc["side"] == 1
-    assert btc["notional"] == 6_000.0
+    assert btc["notional"] == pytest.approx(5_000.0)
+    assert btc["last_action"] == "HOLD"

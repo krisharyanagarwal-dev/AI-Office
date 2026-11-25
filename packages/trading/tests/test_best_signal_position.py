@@ -197,6 +197,18 @@ class TestActions:
         assert position.side == 1
         assert position.notional == pytest.approx(10_000.0)
 
+    def test_hold_preserves_current_notional(self):
+        """HOLD returns current_notional even when cap < current; venue unchanged; working notional stable."""
+        limits = RiskLimits(max_gross_notional=10_000.0, max_symbol_notional=10_000.0)
+        position = build_paper_position(
+            "BTCUSDT", make_prints([0.0001] * 3), [ACCEPTED_RECORD], limits,
+            equity=10_000.0, current_side=1, current_notional=6_000.0, gross_notional=11_000.0
+        )
+        # HOLD action, notional equals current_notional (6000), not capped (5000)
+        assert position.action == "HOLD"
+        assert position.notional == pytest.approx(6_000.0)
+        assert position.reason == "always_collect"  # decision.reason from AlwaysOnCarry
+
     def test_flat_decision_closes_an_open_position(self):
         record = CandidateRecord(
             name="flat_candidate",
