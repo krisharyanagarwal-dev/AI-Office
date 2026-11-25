@@ -260,6 +260,31 @@ class TestRiskApproval:
         assert limits.max_open_positions == 4
         assert limits.max_daily_loss_pct == 0.03
 
+    def test_flip_rollback_restores_prior_book(self):
+        """FLIP that rolls back restores governor to pre-flip state."""
+        governor = _governor(
+            min_confidence=0.0, max_notional_pct=1.0, max_symbol_exposure_pct=2.0,
+            max_total_exposure_pct=4.0, max_open_positions=4,
+            start_of_day_equity=EQUITY, high_water_mark=EQUITY,
+        )
+        # Pre-populate with BTCUSDT long carry
+        governor.limits.positions["BTCUSDT"] = {"quantity": 0.0, "avg_entry_price": 0.0, "gross_notional": 20_000.0}
+        pre_snapshot = {k: dict(v) for k, v in governor.limits.positions.items()}
+        
+        engine, broker = build_paper_venue(EQUITY)
+        broker.margin_ratio = 5.0  # forces rejection
+        
+        # FLIP from long to short
+        result = run_paper_execution(
+            engine, broker, "BTCUSDT", -1, NOTIONAL, PRICE, EQUITY,
+            action="FLIP", current_side=1, current_notional=NOTIONAL, governor=governor
+        )
+        
+        assert result.filled is False
+        assert result.action == "ROLLED_BACK"
+        # Governor must be exactly as before (BTCUSDT 20000 gross)
+        assert governor.limits.positions == pre_snapshot
+
 
 class TestPriceLoader:
     def test_the_price_loader_reads_the_last_bar_at_or_before_the_timestamp(
