@@ -478,7 +478,7 @@ describe('system health probe honesty', () => {
   })
 })
 
-describe('read-only API routes', () => {
+describe('read-write API routes', () => {
   it('serves performance risk and settings through Fastify injection', async () => {
     const { createApi } = await import('../src/index.ts')
     const app = await createApi()
@@ -489,17 +489,18 @@ describe('read-only API routes', () => {
 
       const risk = await app.inject({ method: 'GET', url: '/api/risk' })
       assert.equal(risk.statusCode, 200)
-      assert.equal(risk.json().readOnly, true)
+      assert.equal(risk.json().readOnly, false)
       assert.equal(risk.json().portfolio.broker, 'paper')
       assert.equal(Array.isArray(risk.json().alerts), true)
 
       const settings = await app.inject({ method: 'GET', url: '/api/settings' })
       assert.equal(settings.statusCode, 200)
-      assert.equal(settings.json().readOnly, true)
+      assert.equal(settings.json().readOnly, false)
       assert.equal(settings.json().paperOnly, true)
-      assert.equal(settings.json().killSwitch, 'locked')
-      assert.deepEqual(settings.json().allowedOperations, ['read'])
+      assert.equal(settings.json().killSwitch, 'safe')
+      assert.deepEqual(settings.json().allowedOperations, ['read', 'write'])
 
+      // Non-control routes stay read-only.
       const mutation = await app.inject({ method: 'POST', url: '/api/portfolio' })
       assert.equal(mutation.statusCode, 405)
       assert.deepEqual(mutation.json(), { error: 'Read-only API' })

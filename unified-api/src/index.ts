@@ -8,6 +8,7 @@ import { execSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 import { createHash } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
+import { z } from 'zod'
 
 type SessionState = 'idle' | 'busy' | 'blocked' | 'unknown'
 
@@ -206,6 +207,31 @@ const SERVICE_REGISTRY: ServiceRegistryEntry[] = [
   { name: 'Session Control', port: 3000, probePath: '/' },
   { name: 'OpenAlice Control', port: 4950, probePath: '/' },
 ]
+
+interface BotControlState {
+  action: 'start' | 'stop' | null
+  killSwitch: boolean
+  requestedAt: string | null
+  updatedAt: string | null
+}
+
+interface RiskLimitsState {
+  max_symbol_notional: number
+  max_gross_notional: number
+  max_position_weight: number
+  max_symbols: number
+  max_daily_loss_pct: number
+  kill_switch: boolean
+}
+
+const DEFAULT_RISK_LIMITS: RiskLimitsState = {
+  max_symbol_notional: 10_000,
+  max_gross_notional: 20_000,
+  max_position_weight: 1.0,
+  max_symbols: 3,
+  max_daily_loss_pct: 0.03,
+  kill_switch: false,
+}
 
 type RawRecord = Record<string, unknown>
 
@@ -785,6 +811,57 @@ function parseSqliteRecord(row: SqliteStateRow | undefined): RawRecord | null {
   }
 }
 
+const ControlActionSchema = z.object({ action: z.enum(['start', 'stop']) })
+const KillSwitchSchema = z.object({ enabled: z.boolean() })
+const RiskLimitsPatchSchema = z.object({
+  max_symbol_notional: z.number().nonnegative().finite().optional(),
+  max_gross_notional: z.number().nonnegative().finite().optional(),
+  max_position_weight: z.number().nonnegative().finite().optional(),
+  max_symbols: z.number().int().nonnegative().optional(),
+  max_daily_loss_pct: z.number().finite().optional(),
+  kill_switch: z.boolean().optional(),
+})
+
+function readControlState(databasePath: string): { bot: BotControlState; risk: RiskLimitsState } {
+  let rows: SqliteStateRow[]
+  try {
+    rows = readSqliteState(databasePath)
+  } catch {
+    return { bot: { action: null, killSwitch: false, requestedAt: null, updatedAt: null }, risk: { ...DEFAULT_RISK_LIMITS } }
+  }
+  const bot = parseSqliteRecord(rows.find((row) => row.key === 'bot_control' && row.category === 'all_in_one')) ?? {}
+  const risk = parseSqliteRecord(rows.find((row) => row.key === 'risk_limits' && row.category === 'all_in_one')) ?? {}
+  const maxSymbols = toNumber(risk.max_symbols)
+  return {
+    bot: {
+      action: bot.action === 'start' || bot.action === 'stop' ? bot.action : null,
+      killSwitch: bot.killSwitch === true,
+      requestedAt: toText(bot.requestedAt) ?? null,
+      updatedAt: toText(bot.updatedAt) ?? null,
+    },
+    risk: {
+      max_symbol_notional: toNumber(risk.max_symbol_notional) ?? DEFAULT_RISK_LIMITS.max_symbol_notional,
+      max_gross_notional: toNumber(risk.max_gross_notional) ?? DEFAULT_RISK_LIMITS.max_gross_notional,
+      max_position_weight: toNumber(risk.max_position_weight) ?? DEFAULT_RISK_LIMITS.max_position_weight,
+      max_symbols: maxSymbols !== null && Number.isInteger(maxSymbols) ? maxSymbols : DEFAULT_RISK_LIMITS.max_symbols,
+      max_daily_loss_pct: toNumber(risk.max_daily_loss_pct) ?? DEFAULT_RISK_LIMITS.max_daily_loss_pct,
+      kill_switch: risk.kill_switch === true,
+    },
+  }
+}
+
+function writeControlState(databasePath: string, rows: Array<{ key: string; value: string; category: string }>): void {
+  const db = new DatabaseSync(databasePath)
+  try {
+    db.exec('CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL, timestamp REAL NOT NULL, category TEXT DEFAULT \'general\')')
+    const insert = db.prepare('INSERT OR REPLACE INTO state (key, value, timestamp, category) VALUES (?, ?, ?, ?)')
+    const stamp = Date.now()
+    for (const row of rows) insert.run(row.key, row.value, stamp, row.category)
+  } finally {
+    db.close()
+  }
+}
+
 function portfolioFromRecord(raw: RawRecord, source: string, nowMs: number): PortfolioSnapshot {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Portfolio snapshot is invalid')
   const requiredNumber = (key: string): number => {
@@ -1340,7 +1417,8 @@ export async function createApi() {
   ])
 
   fastify.addHook('onRequest', async (request, reply) => {
-    if (request.method !== 'GET' && request.method !== 'OPTIONS') {
+    const writable = isControlRoute(request.url)
+    if (!writable && request.method !== 'GET' && request.method !== 'OPTIONS') {
       return reply.code(405).header('Allow', 'GET, OPTIONS').send({ error: 'Read-only API' })
     }
     const origin = request.headers.origin
@@ -1351,12 +1429,16 @@ export async function createApi() {
       reply.header('Access-Control-Allow-Origin', origin)
       reply.header('Vary', 'Origin')
     }
-    reply.header('Access-Control-Allow-Methods', 'GET, OPTIONS')
+    reply.header('Access-Control-Allow-Methods', writable ? 'GET, POST, OPTIONS' : 'GET, OPTIONS')
     reply.header('Access-Control-Allow-Headers', 'Content-Type')
     if (request.method === 'OPTIONS') {
       return reply.code(204).send()
     }
   })
+
+function isControlRoute(url: string): boolean {
+  return url.startsWith('/api/bot/') || url.startsWith('/api/risk/limits')
+}
 
   fastify.get('/api/health', async (_request, reply) => {
     try {
@@ -1461,15 +1543,94 @@ export async function createApi() {
     return performance
   })
 
+  fastify.get('/api/bot/state', async (_request, reply) => {
+    try {
+      return { ...readControlState(STATE_DATABASE_PATH), paperOnly: true, checkedAt: new Date().toISOString() }
+    } catch {
+      return reply.code(503).send({ error: 'Bot control state is unavailable' })
+    }
+  })
+
+  fastify.post('/api/bot/control', async (request, reply) => {
+    const parsed = ControlActionSchema.safeParse(request.body)
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Invalid control action: expected { action: "start" | "stop" }' })
+    }
+    try {
+      const now = new Date().toISOString()
+      writeControlState(STATE_DATABASE_PATH, [{
+        key: 'bot_control',
+        value: JSON.stringify({ action: parsed.data.action, killSwitch: false, requestedAt: now, updatedAt: now }),
+        category: 'all_in_one',
+      }])
+      return { ok: true, action: parsed.data.action, updatedAt: now }
+    } catch {
+      return reply.code(503).send({ error: 'Could not persist bot control action' })
+    }
+  })
+
+  fastify.post('/api/bot/kill-switch', async (request, reply) => {
+    const parsed = KillSwitchSchema.safeParse(request.body)
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Invalid kill switch payload: expected { enabled: boolean }' })
+    }
+    try {
+      const current = readControlState(STATE_DATABASE_PATH)
+      const now = new Date().toISOString()
+      writeControlState(STATE_DATABASE_PATH, [{
+        key: 'bot_control',
+        value: JSON.stringify({ action: current.bot.action, killSwitch: parsed.data.enabled, requestedAt: now, updatedAt: now }),
+        category: 'all_in_one',
+      }])
+      return { ok: true, killSwitch: parsed.data.enabled }
+    } catch {
+      return reply.code(503).send({ error: 'Could not persist kill switch' })
+    }
+  })
+
+  fastify.post('/api/risk/limits', async (request, reply) => {
+    const parsed = RiskLimitsPatchSchema.safeParse(request.body)
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Invalid risk limits patch' })
+    }
+    try {
+      const current = readControlState(STATE_DATABASE_PATH)
+      const merged = { ...current.risk, ...parsed.data }
+      writeControlState(STATE_DATABASE_PATH, [{
+        key: 'risk_limits',
+        value: JSON.stringify(merged),
+        category: 'all_in_one',
+      }])
+      return { ok: true, riskLimits: merged }
+    } catch {
+      return reply.code(503).send({ error: 'Could not persist risk limits' })
+    }
+  })
+
+  fastify.get('/api/bot/positions', async (_request, reply) => {
+    const portfolio = loadPortfolio()
+    if (!portfolio.available) {
+      return reply.code(503).send({ error: 'Portfolio snapshot is unavailable' })
+    }
+    return {
+      broker: portfolio.broker,
+      positions: portfolio.positions,
+      asOf: portfolio.asOf,
+      source: portfolio.source,
+    }
+  })
+
   fastify.get('/api/risk', async (_request, reply) => {
     const portfolio = loadPortfolio()
     if (!portfolio.available) {
       return reply.code(503).send({ error: 'Risk snapshot is unavailable' })
     }
     try {
+      const control = readControlState(STATE_DATABASE_PATH)
       return {
-        readOnly: true,
+        readOnly: false,
         paperOnly: portfolio.broker === 'paper',
+        control,
         portfolio,
         alerts: loadRiskAlerts(),
         performance: loadPerformance(),
@@ -1480,22 +1641,25 @@ export async function createApi() {
     }
   })
 
-  fastify.get('/api/settings', async () => ({
-    readOnly: true,
-    paperOnly: true,
-    killSwitch: 'locked',
-    allowedOperations: ['read'],
-    api: { host: resolveApiHost(), port: 4749 },
-    sources: {
-      sessions: HIVE_SESSIONS_PATH,
-      fleet: HIVE_FLEET_PATH,
-      terminals: HIVE_TERMINALS_PATH,
-      portfolioDatabase: STATE_DATABASE_PATH,
-      portfolioFallback: PORTFOLIO_PATH,
-      fundamentals: REPORTS_DIR,
-      alerts: LIVE_METRICS_PATH,
-    },
-  }))
+  fastify.get('/api/settings', async () => {
+    const control = readControlState(STATE_DATABASE_PATH)
+    return {
+      readOnly: false,
+      paperOnly: true,
+      killSwitch: control.bot.killSwitch ? 'armed' : 'safe',
+      allowedOperations: ['read', 'write'],
+      api: { host: resolveApiHost(), port: 4749 },
+      sources: {
+        sessions: HIVE_SESSIONS_PATH,
+        fleet: HIVE_FLEET_PATH,
+        terminals: HIVE_TERMINALS_PATH,
+        portfolioDatabase: STATE_DATABASE_PATH,
+        portfolioFallback: PORTFOLIO_PATH,
+        fundamentals: REPORTS_DIR,
+        alerts: LIVE_METRICS_PATH,
+      },
+    }
+  })
 
   fastify.get('/api/fundamentals', async () => getFundamentals().rows)
 
