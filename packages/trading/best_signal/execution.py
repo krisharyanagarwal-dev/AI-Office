@@ -611,7 +611,7 @@ def run_paper_execution(
             )
         filled_legs.append(leg)
 
-    return ExecutionResult(
+    result = ExecutionResult(
         symbol=symbol,
         action=action,
         legs=tuple(legs),
@@ -620,3 +620,8 @@ def run_paper_execution(
         reason="filled",
         partial=False,
     )
+
+    if action == ACTION_CLOSE and governor is not None and result.filled:
+        governor.limits.positions.pop(symbol, None)
+
+    return result

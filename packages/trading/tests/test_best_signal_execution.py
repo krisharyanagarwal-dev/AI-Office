@@ -364,3 +364,26 @@ class TestRollbackGovernor:
         assert result.action == "ROLLED_BACK"
         # Governor must be exactly as before
         assert governor.limits.positions == pre_snapshot
+
+    def test_close_removes_governor_exposure(self):
+        """After successful CLOSE, governor no longer has the symbol."""
+        governor = _governor(
+            min_confidence=0.0, max_notional_pct=1.0, max_symbol_exposure_pct=2.0,
+            max_total_exposure_pct=4.0, max_open_positions=4,
+            start_of_day_equity=EQUITY, high_water_mark=EQUITY,
+        )
+        governor.limits.positions["BTCUSDT"] = {"quantity": 0.0, "avg_entry_price": 0.0, "gross_notional": 10_000.0}
+        
+        engine, broker = build_paper_venue(EQUITY)
+        # First open the position
+        run_paper_execution(engine, broker, "BTCUSDT", 1, NOTIONAL, PRICE, EQUITY, governor=governor)
+        
+        # Now close it
+        result = run_paper_execution(
+            engine, broker, "BTCUSDT", 0, NOTIONAL, PRICE, EQUITY,
+            action="CLOSE", current_side=1, current_notional=NOTIONAL, governor=governor
+        )
+        
+        assert result.filled is True
+        assert result.action == "CLOSE"
+        assert "BTCUSDT" not in governor.limits.positions
