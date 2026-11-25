@@ -346,3 +346,29 @@ def test_run_bot_preserves_hold_notional_and_opens_second_symbol(tmp_path):
     assert btc["side"] == 1
     assert btc["notional"] == pytest.approx(5_000.0)
     assert btc["last_action"] == "HOLD"
+
+
+def test_multi_symbol_capacity_first_come(tmp_path):
+    """Sequential allocation still first-come; second symbol stood down when gross exhausted."""
+    config = make_config(
+        tmp_path,
+        symbols=("BTCUSDT", "ETHUSDT"),
+        limits=RiskLimits(max_gross_notional=6_000.0, max_symbol_notional=6_000.0),
+    )
+    make_data(config.data_dir, symbols=("BTCUSDT", "ETHUSDT"))
+    today = datetime.now(timezone.utc).date().isoformat()
+    config.out_dir.mkdir(parents=True, exist_ok=True)
+    state_path = Path(config.out_dir) / STATE_FILENAME
+    state_path.write_text(
+        json.dumps({
+            "symbols": {"BTCUSDT": {"side": 1, "notional": 5_000.0}},
+            "day": {"date": today, "pnl": 0.0, "funding": 0.0, "fees": 0.0},
+        })
+    )
+    result = run_bot(config)
+
+    # BTCUSDT already has 5000, gross cap 6000, so ETHUSDT gets 1000 remaining
+    eth = result["state"]["ETHUSDT"]
+    assert eth["side"] == 1
+    assert eth["notional"] == pytest.approx(1_000.0)
+    assert eth["last_action"] in ("OPEN", "HOLD")  # not NO_TRADE
