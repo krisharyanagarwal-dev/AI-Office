@@ -56,19 +56,23 @@ def record_fill(journal: FillJournal, fill, order, broker) -> None:
 
     # Slippage: (fill_price - mid_price) / mid_price * 10000, signed by side
     slippage_bps = 0.0
+    fill_side = getattr(fill, "side", "buy")
     if mid_price > 0:
-        if getattr(fill, "side", "buy") == "buy":
+        if fill_side == "buy" or (hasattr(fill_side, "value") and fill_side.value == "buy"):
             slippage_bps = round((fill.price - mid_price) / mid_price * 10_000, 1)
         else:
             slippage_bps = round((mid_price - fill.price) / mid_price * 10_000, 1)
 
     realism = getattr(broker, "realism", None)
 
+    # Serialize side to string if it's an enum
+    side_str = fill_side.value if hasattr(fill_side, "value") else str(fill_side)
+
     rec = FillRecord(
         ts=datetime.now(timezone.utc).isoformat(),
         symbol=fill.symbol,
         market="perp" if fill.symbol.endswith("_PERP") else "spot",
-        side=fill.side,
+        side=side_str,
         quantity=fill.quantity,
         price=fill.price,
         mid_price=mid_price,
@@ -76,6 +80,6 @@ def record_fill(journal: FillJournal, fill, order, broker) -> None:
         slippage_bps=slippage_bps,
         latency_ms=getattr(realism, "latency_ms", 0.0),
         partial_fill=getattr(fill, "partial_fill", False),
-        order_id=fill.client_order_id,
+        order_id=fill.order_id,
     )
     journal.record(rec)

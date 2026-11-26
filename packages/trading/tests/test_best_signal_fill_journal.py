@@ -93,7 +93,7 @@ class TestRecordFillHelper:
 
         # Mock fill, order, broker with realism
         class MockFill:
-            client_order_id = "ord123"
+            order_id = "ord123"  # Fill uses order_id, not client_order_id
             symbol = "BTCUSDT"
             side = "buy"  # Fill.side is string in our code
             quantity = 100.0

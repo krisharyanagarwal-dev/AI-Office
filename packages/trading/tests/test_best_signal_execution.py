@@ -16,6 +16,7 @@ Hand-derived numbers used below (notional 10,000 at price 100):
   * free cash after opening     = 11,100 - 1,000 = 10,100.00
   * cash after closing          = 11,110 - 4 legs * 5.00 = 11,090.00
 """
+import json
 import pandas as pd
 import pytest
 
@@ -32,6 +33,7 @@ from best_signal.execution import (
     run_paper_execution,
     venue_snapshot,
 )
+from best_signal.fill_journal import FillJournal
 from best_signal.position import RiskLimits
 from risk import LimitStatus, RiskGovernor
 from risk import RiskLimits as GovernorLimits
@@ -210,6 +212,35 @@ class TestPaperVenue:
         assert restored.positions["BTCUSDT"].quantity == 100.0
         assert restored.positions["BTCUSDT_PERP"].quantity == -100.0
         assert restored.margin_used["BTCUSDT_PERP"] == 1_000.0
+
+    def test_fill_journal_captures_each_fill(self, tmp_path):
+        """Each fill in a carry open writes a line to the fill journal."""
+        journal_path = tmp_path / "fills.jsonl"
+        journal = FillJournal(journal_path, enabled=True)
+
+        engine, broker = build_paper_venue(EQUITY)
+        # Attach journal to broker for access in _execute_market
+        broker.fill_journal = journal
+
+        result = run_paper_execution(
+            engine, broker, "BTCUSDT", 1, NOTIONAL, PRICE, EQUITY
+        )
+
+        assert result.filled is True
+        assert result.action == "OPEN"
+
+        # Journal should have 2 lines (spot buy + perp sell)
+        lines = journal_path.read_text().strip().splitlines()
+        assert len(lines) == 2
+
+        for line in lines:
+            payload = json.loads(line)
+            assert payload["symbol"] in ("BTCUSDT", "BTCUSDT_PERP")
+            assert payload["venue"] == "paper"
+            assert payload["mode"] == "PAPER"
+            assert "slippage_bps" in payload
+            assert "latency_ms" in payload
+            assert "partial_fill" in payload
 
 
 class TestRiskApproval:

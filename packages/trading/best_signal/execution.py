@@ -32,6 +32,7 @@ from alpha.execution.execution_engine import (
     PaperBroker,
     Position,
 )
+from best_signal.fill_journal import FillJournal, record_fill
 from best_signal.funding import DEFAULT_DATA_DIR
 from risk import LimitStatus, RiskGovernor
 from risk import RiskLimits as GovernorLimits
@@ -105,6 +106,7 @@ class CarryPaperBroker(PaperBroker):
         commission_rate: float = DEFAULT_FEE,
         margin_ratio: float = DEFAULT_MARGIN_RATIO,
         realism: Optional[ExecutionRealismConfig] = None,
+        fill_journal: Optional[FillJournal] = None,
     ):
         super().__init__(name=name, initial_balance=initial_balance)
         self.balances = {"USDT": float(initial_balance)}
@@ -118,6 +120,7 @@ class CarryPaperBroker(PaperBroker):
         self.latency_ms = self.realism.latency_ms
         self.partial_fill_enabled = self.realism.partial_fill_enabled
         self.partial_fill_fraction = self.realism.partial_fill_fraction
+        self.fill_journal = fill_journal
 
     @property
     def free_cash(self) -> float:
@@ -173,6 +176,10 @@ class CarryPaperBroker(PaperBroker):
             exchange_fill_id=f"paper_{uuid.uuid4().hex[:8]}",
         )
         await self._process_fill(fill)
+
+        # After processing fill, record to journal if attached
+        if self.fill_journal is not None:
+            record_fill(self.fill_journal, fill, order, self)
 
         if order.side == OrderSide.BUY:
             self.balances["USDT"] -= fill_qty * fill_price + fill.commission
@@ -324,10 +331,13 @@ def build_paper_venue(
     equity: float,
     name: str = "paper",
     realism: Optional[ExecutionRealismConfig] = None,
+    fill_journal: Optional[FillJournal] = None,
 ):
     """Build a paper venue funded for one carry plus its margin."""
     balance = round(equity * (1 + DEFAULT_MARGIN_RATIO) * 1.01, 8)
-    broker = CarryPaperBroker(name=name, initial_balance=balance, realism=realism)
+    broker = CarryPaperBroker(
+        name=name, initial_balance=balance, realism=realism, fill_journal=fill_journal
+    )
     engine = ExecutionEngine()
     engine.add_broker(name, broker, is_default=True)
     return engine, broker
