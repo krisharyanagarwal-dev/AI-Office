@@ -372,3 +372,31 @@ def test_multi_symbol_capacity_first_come(tmp_path):
     assert eth["side"] == 1
     assert eth["notional"] == pytest.approx(1_000.0)
     assert eth["last_action"] in ("OPEN", "HOLD")  # not NO_TRADE
+
+
+def test_run_bot_writes_fill_journal(tmp_path):
+    """run_bot creates fill journal with entries for each fill."""
+    from best_signal.fill_journal import FillJournal
+    import json
+
+    config = make_config(
+        tmp_path,
+        symbols=("BTCUSDT",),
+        limits=RiskLimits(),
+        fill_journal_enabled=True,
+    )
+    make_data(config.data_dir, symbols=("BTCUSDT",))
+
+    result = run_bot(config)
+
+    # Check journal file exists and has entries
+    journal_path = config.out_dir / "best_signal_fills.jsonl"
+    assert journal_path.exists()
+
+    lines = journal_path.read_text().strip().splitlines()
+    assert len(lines) >= 2  # at least one carry open = 2 fills
+
+    for line in lines:
+        payload = json.loads(line)
+        assert payload["symbol"] in ("BTCUSDT", "BTCUSDT_PERP")
+        assert payload["venue"] == "paper"

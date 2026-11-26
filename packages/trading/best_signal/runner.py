@@ -36,6 +36,7 @@ from best_signal.execution import (
     run_paper_execution,
     venue_snapshot,
 )
+from best_signal.fill_journal import FillJournal
 from best_signal.telemetry import CycleMetrics, TelemetrySink, record_cycle
 from best_signal.funding import (
     DEFAULT_DATA_DIR,
@@ -95,6 +96,7 @@ class BotConfig:
     daily_loss_pct: float = 0.0
     execution_realism: ExecutionRealismConfig = ExecutionRealismConfig()
     telemetry_enabled: bool = True
+    fill_journal_enabled: bool = True
 
 
 def _now() -> str:
@@ -251,7 +253,8 @@ def run_bot(config: BotConfig) -> dict:
         day_state = {"date": today, "funding": 0.0, "fees": 0.0, "pnl": 0.0}
 
     equity = config.equity
-    engine, broker = build_paper_venue(equity, realism=config.execution_realism)
+    journal = FillJournal(out_dir / "best_signal_fills.jsonl", enabled=config.fill_journal_enabled)
+    engine, broker = build_paper_venue(equity, realism=config.execution_realism, fill_journal=journal)
     if state.get("venue"):
         restore_venue(broker, state["venue"])
     sink = TelemetrySink(out_dir / TELEMETRY_FILENAME, enabled=config.telemetry_enabled)
@@ -518,6 +521,12 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="disable paper-mode execution telemetry",
     )
+    parser.add_argument(
+        "--no-fill-journal",
+        dest="fill_journal",
+        action="store_false",
+        help="disable paper-mode fill journal",
+    )
     return parser
 
 
@@ -548,6 +557,7 @@ def main(argv=None) -> int:
             partial_fill_fraction=args.partial_fill_fraction,
         ),
         telemetry_enabled=args.telemetry,
+        fill_journal_enabled=args.fill_journal,
     )
     try:
         result = run_bot(config)
