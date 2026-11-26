@@ -124,3 +124,35 @@ class TestBacktestConfig:
         assert config.equity == 25000.0
         assert config.start_ts_ms is None
         assert config.end_ts_ms is None
+
+
+class TestBacktestState:
+    def test_initial_state_empty(self):
+        from best_signal.backtest_state import BacktestState
+
+        state = BacktestState.initial(equity=10_000.0)
+        assert state.equity == 10_000.0
+        assert state.working == {}
+        assert state.day_state == {}
+        assert state.equity_curve == []
+
+    def test_snapshot_venue_captures_equity(self):
+        from best_signal.backtest_state import BacktestState
+
+        state = BacktestState.initial(equity=10_000.0)
+        # Mock broker with positions
+        class MockBroker:
+            balances = {"USDT": 11_000.0}
+            realized_pnl = {"BTCUSDT": 100.0}
+            margin_used = {"BTCUSDT_PERP": 1_000.0}
+            fees_total = 10.0
+
+        broker = MockBroker()
+        snapshot = state.snapshot_venue(broker, ts_ms=1_000_000_000_000)
+
+        assert snapshot["ts_ms"] == 1_000_000_000_000
+        assert "equity" in snapshot
+        assert snapshot["equity"] == 10_000.0 + 100.0  # equity + realized_pnl
+        assert "cash" in snapshot
+        assert "margin" in snapshot
+        assert "fees" in snapshot
