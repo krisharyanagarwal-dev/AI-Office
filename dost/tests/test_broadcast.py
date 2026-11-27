@@ -247,7 +247,6 @@ def test_chat_broadcast_proposes_then_sends_only_on_confirmation(env, monkeypatc
     monkeypatch.setattr(dm, "_chat", _fake_chat({"text": '["beta-trader", "gamma-risk"]'}))
     monkeypatch.setattr(dm, "llm_decide", lambda task, context, style="": "BROADCAST: who checks risk?")
     monkeypatch.setattr(dm.MEMORY, "add_interaction", lambda *a, **k: None)
-    dm._PENDING_BROADCASTS.clear()
 
     first = dm.dost_respond("broadcast this: who checks risk?", conversation_id="chat-broadcast-test")
     assert "beta-trader" in first
@@ -258,4 +257,70 @@ def test_chat_broadcast_proposes_then_sends_only_on_confirmation(env, monkeypatc
     second = dm.dost_respond("yes", conversation_id="chat-broadcast-test")
     assert "Sent to 2" in second
     assert sorted(t["agent_id"] for t in _task_files(env["hive"])) == ["beta-trader", "gamma-risk"]
-    assert "chat-broadcast-test" not in dm._PENDING_BROADCASTS
+    assert not dm._pending_path("chat-broadcast-test").exists()
+
+
+def test_tier_c_agents_come_from_the_dispatcher_table():
+    blocked = dm.tier_c_agents()
+    assert "risk-manager" in blocked
+    assert "compliance-checker" in blocked
+    assert "general-assistant" not in blocked
+
+
+def test_named_tier_c_agent_is_refused_and_not_dispatched(env):
+    result = dm.dispatch_broadcast_to_fleet("hello", agents=["risk-manager", "alpha-analyst"])
+
+    assert result["total"] == 1
+    assert result["dispatched"] == 1
+    assert "risk-manager" in result["errors"]
+    assert sorted(t["agent_id"] for t in _task_files(env["hive"])) == ["alpha-analyst"]
+
+
+def test_collect_records_each_answer_once_and_reports_open(env):
+    sent = dm.dispatch_broadcast_to_fleet("collect me")
+    bid = sent["broadcast_id"]
+
+    first = dm.broadcast_collect()
+    assert first["open"] == 1
+    assert first["newly_recorded"] == {}
+
+    path = env["hive"] / f"{sent['task_ids']['alpha-analyst']}.json"
+    task = json.loads(path.read_text())
+    task.update(status="done", result={"text": "All quiet."})
+    path.write_text(json.dumps(task))
+
+    second = dm.broadcast_collect()
+    assert second["newly_recorded"] == {bid: ["alpha-analyst"]}
+    third = dm.broadcast_collect()
+    assert third["newly_recorded"] == {}
+
+
+def test_companion_path_proposes_and_confirms_across_interfaces(env, monkeypatch):
+    """Pet, Telegram, Slack and Teams all go through companion_respond; a proposal made there must be confirmable."""
+    monkeypatch.setattr(dm, "build_context", lambda: "")
+    monkeypatch.setattr(dm, "_history_context", lambda history: "")
+    monkeypatch.setattr(dm, "select_broadcast_workers", lambda prompt, roster: ["beta-trader"])
+    monkeypatch.setattr(dm, "llm_decide", lambda task, context, style="": "BROADCAST: check the book")
+    monkeypatch.setattr(dm.MEMORY, "add_interaction", lambda *a, **k: None)
+
+    first = dm.companion_respond("tell all the workers to check the book", conversation_id="telegram-42", interface="telegram")
+    assert "beta-trader" in first
+    assert _task_files(env["hive"]) == []
+    assert dm._pending_path("telegram-42").exists()
+
+    second = dm.companion_respond("yes", conversation_id="telegram-42", interface="telegram")
+    assert "Sent to 1" in second
+    assert [t["agent_id"] for t in _task_files(env["hive"])] == ["beta-trader"]
+    assert not dm._pending_path("telegram-42").exists()
+
+
+def test_anonymous_chat_still_gets_a_pending_key(env, monkeypatch):
+    monkeypatch.setattr(dm, "build_context", lambda: "")
+    monkeypatch.setattr(dm, "_history_context", lambda history: "")
+    monkeypatch.setattr(dm, "select_broadcast_workers", lambda prompt, roster: ["beta-trader"])
+    monkeypatch.setattr(dm, "llm_decide", lambda task, context, style="": "BROADCAST: ping")
+    monkeypatch.setattr(dm.MEMORY, "add_interaction", lambda *a, **k: None)
+
+    dm.companion_respond("broadcast ping", conversation_id=None, interface="slack")
+    assert dm._pending_path("anon-slack").exists()
+    dm._pending_take("anon-slack")

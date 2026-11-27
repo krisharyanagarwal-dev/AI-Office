@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.aryan.dost-broadcast-collect</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/python3</string>
+    <string>/Users/aryanagarwal/AI-Office/dost/dost_main.py</string>
+    <string>--broadcast-collect</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/aryanagarwal/AI-Office/dost</string>
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/aryanagarwal/AI-Office/dost/logs/dost-broadcast-collect.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/aryanagarwal/AI-Office/dost/logs/dost-broadcast-collect-error.log</string>
+</dict>
+</plist>

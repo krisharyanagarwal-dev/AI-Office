@@ -436,24 +436,10 @@ def dost_respond(
         return f"{dost_greeting()}\n\n{response}"
 
     # A previous turn proposed a broadcast and is waiting for confirmation.
-    pending = _PENDING_BROADCASTS.pop(conversation_id, None)
-    if pending:
-        verdict = _classify_broadcast_reply(task)
-        if verdict == "confirm":
-            result = dispatch_broadcast_to_fleet(pending["prompt"], agents=pending["workers"])
-            if result.get("broadcast_id") and result.get("dispatched"):
-                response = (
-                    f"Sent to {result['dispatched']} of {result['total']} workers "
-                    f"(broadcast {result['broadcast_id']})."
-                    + (f" Failed: {', '.join(sorted(result['errors']))}." if result.get("errors") else "")
-                    + " Ask for its status any time to collect the answers."
-                )
-            else:
-                response = f"Broadcast failed: {result.get('error', 'no workers reached')}"
-            MEMORY.add_interaction(task, "fleet", f"Confirmed broadcast to {result.get('total', 0)} workers")
-            return finish(response)
-        if verdict == "reject":
-            return finish("Okay — I won't send that broadcast.")
+    pending_reply = _pending_broadcast_reply(task, conversation_id or f"anon-{interface}")
+    if pending_reply is not None:
+        MEMORY.add_interaction(task, "fleet", "Answered a pending broadcast proposal")
+        return finish(pending_reply)
 
     # Claude-like tool-use loop: decide -> act -> re-decide -> ... -> final answer.
     # The LLM picks a tool (research command, fleet dispatch, or orchestrate) or a
@@ -509,15 +495,7 @@ def dost_respond(
             label = f"fleet: {prompt[:60]}"
         elif decision.startswith("BROADCAST:"):
             prompt = decision[len("BROADCAST:"):].strip()
-            workers = select_broadcast_workers(prompt, fleet_roster())
-            if not workers:
-                return finish("I couldn't find any fleet workers to broadcast to.")
-            _PENDING_BROADCASTS[conversation_id] = {"prompt": prompt, "workers": workers}
-            MEMORY.add_interaction(task, "fleet", f"Proposed broadcast to {len(workers)} workers: {prompt[:80]}")
-            return finish(
-                f"I'd send this broadcast to {len(workers)} worker(s): {', '.join(workers)}.\n\n"
-                "Shall I send it now? Reply 'yes' to send, or tell me which workers to use instead."
-            )
+            return finish(_propose_broadcast(prompt, conversation_id or f"anon-{interface}", task, interface))
         elif decision.startswith("ORCHESTRATE:"):
             goal = decision[len("ORCHESTRATE:"):].strip()
             output = orchestrate(goal, conversation_id=conversation_id, interface=interface)
@@ -1504,9 +1482,35 @@ def dispatch_prompt_to_fleet(
 BROADCAST_DIR = DOST_DIR / "broadcasts"
 
 
+DISPATCHER_PATH = Path(__file__).resolve().parents[1] / "packages" / "office-os" / "scripts" / "jev-dispatcher.py"
+
+
+def tier_c_agents() -> set[str]:
+    """Agents the dispatcher treats as human-only (Tier C), read from its AGENT_AUTONOMY_TIERS.
+
+    Parsed with ast, not imported, so the dispatcher never runs as a side effect.
+    Fails closed: if the table cannot be read, every agent counts as Tier C so
+    nothing is broadcast by accident.
+    """
+    import ast
+
+    try:
+        tree = ast.parse(DISPATCHER_PATH.read_text())
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "AGENT_AUTONOMY_TIERS" for t in node.targets
+            ):
+                tiers = ast.literal_eval(node.value)
+                return {a for tier, agents in tiers.items() if tier.split()[-1] == "C" for a in agents}
+    except (OSError, SyntaxError, ValueError):
+        pass
+    return set(_agent_tiers().keys())
+
+
 def fleet_roster() -> list[str]:
-    """Every worker agent id in office.json agent_tiers (sorted, unique)."""
-    return sorted(_agent_tiers().keys())
+    """Worker agent ids that may receive a broadcast: all workers minus Tier C (sorted, unique)."""
+    blocked = tier_c_agents()
+    return sorted(a for a in _agent_tiers().keys() if a not in blocked)
 
 
 def _extract_json_string_list(text: str) -> list | None:
@@ -1557,7 +1561,63 @@ def select_broadcast_workers(prompt: str, roster: list[str]) -> list[str]:
 
 
 # Conversation-scoped broadcast proposals awaiting a yes/no in a later message.
-_PENDING_BROADCASTS: dict[str, dict] = {}
+def _pending_path(conversation_id: str) -> Path:
+    """Pending broadcast proposals are files, so any process (pet, Telegram, Slack, CLI) can confirm them."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", conversation_id)[:120] or "default"
+    return BROADCAST_DIR / "pending" / f"{safe}.json"
+
+
+def _pending_set(conversation_id: str, proposal: dict) -> None:
+    path = _pending_path(conversation_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(proposal, indent=2))
+    os.replace(tmp, path)
+
+
+def _pending_take(conversation_id: str) -> dict | None:
+    """Return and clear the pending proposal for this conversation, if any."""
+    path = _pending_path(conversation_id)
+    try:
+        proposal = json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+    path.unlink(missing_ok=True)
+    return proposal
+
+
+def _propose_broadcast(prompt: str, conversation_id: str, task: str, interface: str) -> str:
+    """Pick the workers for a prompt, save the proposal, and ask the user to confirm. Sends nothing."""
+    workers = select_broadcast_workers(prompt, fleet_roster())
+    if not workers:
+        return "I couldn't find any fleet workers to broadcast to."
+    _pending_set(conversation_id, {"prompt": prompt, "workers": workers})
+    MEMORY.add_interaction(task, "fleet", f"Proposed broadcast to {len(workers)} workers: {prompt[:80]}")
+    return (
+        f"I'd send this broadcast to {len(workers)} worker(s): {', '.join(workers)}.\n\n"
+        "Shall I send it now? Reply 'yes' to send, or tell me which workers to use instead."
+    )
+
+
+def _pending_broadcast_reply(task: str, conversation_id: str) -> str | None:
+    """If a proposal is waiting, answer a confirm/reject reply. Otherwise return None and let the turn continue."""
+    pending = _pending_take(conversation_id)
+    if not pending:
+        return None
+    verdict = _classify_broadcast_reply(task)
+    if verdict == "confirm":
+        result = dispatch_broadcast_to_fleet(pending["prompt"], agents=pending["workers"])
+        if result.get("broadcast_id") and result.get("dispatched"):
+            return (
+                f"Sent to {result['dispatched']} of {result['total']} workers "
+                f"(broadcast {result['broadcast_id']})."
+                + (f" Failed: {', '.join(sorted(result['errors']))}." if result.get("errors") else "")
+                + " Ask for its status any time to collect the answers."
+            )
+        return f"Broadcast failed: {result.get('error', 'no workers reached')}"
+    if verdict == "reject":
+        return "Okay, I won't send that broadcast."
+    return None  # not a yes/no: drop the stale proposal and handle the message normally
 
 _CONFIRM_REPLIES = {
     "yes", "y", "yeah", "yep", "confirm", "confirmed", "send", "send it",
@@ -1641,15 +1701,22 @@ def dispatch_broadcast_to_fleet(
             "ok": False,
             "error": f"Prompt too long: {len(prompt)} characters (max {MAX_DISPATCH_PROMPT_LEN}).",
         }
-    roster = list(dict.fromkeys(agents)) if agents else fleet_roster()
+    blocked = tier_c_agents()
+    requested = list(dict.fromkeys(agents)) if agents else None
+    refused = {a: "Tier C: human-only, never automated" for a in (requested or []) if a in blocked}
+    roster = [a for a in requested if a not in blocked] if requested is not None else fleet_roster()
     if not roster:
-        return {"ok": False, "error": "No workers found in office.json agent_tiers."}
+        return {
+            "ok": False,
+            "error": "No workers left to broadcast to." if refused else "No workers found in office.json agent_tiers.",
+            "errors": refused,
+        }
 
     import uuid
 
     broadcast_id = f"bc-{uuid.uuid4().hex[:8]}"
     task_ids: dict[str, str] = {}
-    errors: dict[str, str] = {}
+    errors: dict[str, str] = dict(refused)
     for agent in roster:
         res = dispatch_prompt_to_fleet(
             prompt,
@@ -1755,6 +1822,26 @@ def broadcast_status(broadcast_id: str) -> dict:
         "workers": workers,
         "newly_recorded": newly_recorded,
     }
+
+
+def broadcast_collect() -> dict:
+    """Record finished answers for every broadcast, once per worker. Safe to run on a timer.
+
+    Reads only task files and the manifests; it sends nothing to the fleet.
+    """
+    summary = {"ok": True, "checked": 0, "open": 0, "newly_recorded": {}}
+    if not BROADCAST_DIR.exists():
+        return summary
+    for path in sorted(BROADCAST_DIR.glob("bc-*.json")):
+        status = broadcast_status(path.stem)
+        if not status.get("ok"):
+            continue
+        summary["checked"] += 1
+        if status["counts"]["pending"]:
+            summary["open"] += 1
+        if status["newly_recorded"]:
+            summary["newly_recorded"][path.stem] = status["newly_recorded"]
+    return summary
 
 
 DEBATE_SYNTHESIS_SYSTEM = """You are the dost from THE CLAUDE COMPANY synthesizing a fleet debate.
@@ -2506,6 +2593,12 @@ def companion_respond(
                 log(f"Conversation memory update failed: {type(exc).__name__}")
         return safe_response
 
+    # A broadcast proposal may be waiting on this chat's yes/no (any interface).
+    pending_reply = _pending_broadcast_reply(task, conversation_id or f"anon-{interface}")
+    if pending_reply is not None:
+        MEMORY.add_interaction(task, "fleet", "Answered a pending broadcast proposal")
+        return finish(pending_reply)
+
     if wants_audit(task):
         return finish(audit_reply())
     context = build_context()
@@ -2531,6 +2624,10 @@ def companion_respond(
         alert_prefix = ""
 
     decision = llm_decide(task, context, style=COMPANION_STYLE)
+
+    if decision and decision.startswith("BROADCAST:"):
+        prompt = decision[len("BROADCAST:"):].strip()
+        return finish(alert_prefix + _propose_broadcast(prompt, conversation_id or f"anon-{interface}", task, interface))
 
     if decision and decision.startswith("COMMAND:"):
         command = decision[len("COMMAND:"):].strip()
@@ -3262,6 +3359,8 @@ def main():
                         help="With --broadcast: show what would be sent, write nothing")
     parser.add_argument("--broadcast-status", metavar="BROADCAST_ID",
                         help="Show per-worker state for a broadcast; records new answers to memory")
+    parser.add_argument("--broadcast-collect", action="store_true",
+                        help="Record finished answers for every broadcast (for the timer; sends nothing)")
     parser.add_argument("--debate", nargs="?", const="",
                         help="Debate mode: fan a question to multiple pro agents and synthesize")
     parser.add_argument("--orchestrate", nargs="?", const="",
@@ -3381,6 +3480,8 @@ def main():
         print(json.dumps(result, indent=2))
     elif args.broadcast_status is not None:
         print(json.dumps(broadcast_status(args.broadcast_status), indent=2))
+    elif args.broadcast_collect:
+        print(json.dumps(broadcast_collect()))
     elif args.debate is not None:
         prompt = args.debate if args.debate else input("Debate question: ")
         result = dispatch_debate_to_fleet(prompt)
