@@ -11,7 +11,7 @@ import json
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Sequence
+from typing import TYPE_CHECKING, Sequence
 
 from best_signal.evidence import (
     CandidateRecord,
@@ -21,6 +21,9 @@ from best_signal.evidence import (
 )
 from best_signal.position import PaperPosition
 from best_signal.validate import CAVEATS
+
+if TYPE_CHECKING:
+    from best_signal.runner import ExecutionSummary
 
 REPORT_JSON_NAME = "best_signal_report.json"
 REPORT_MARKDOWN_NAME = "best_signal_report.md"
@@ -105,6 +108,7 @@ def build_report(
     reconciliation: dict | None = None,
     venue: dict | None = None,
     signals: list | None = None,
+    execution_summary: "ExecutionSummary | None" = None,
 ) -> dict:
     """Assemble the JSON-serialisable report for one bot run."""
     records = list(records)
@@ -127,6 +131,8 @@ def build_report(
     }
     if venue is not None:
         report["venue"] = jsonable(venue)
+    if execution_summary is not None:
+        report["execution_quality"] = jsonable(execution_summary)
     return report
 
 
@@ -315,6 +321,37 @@ def _render_reconciliation(lines: list[str], reconciliation: dict | None) -> Non
     lines.append("")
 
 
+def _render_execution_quality(lines: list[str], summary: dict | None) -> None:
+    """Render the execution quality section with slippage/latency/fees breakdown."""
+    if not summary:
+        return
+    lines.append("## Execution Quality")
+    lines.append("")
+    lines.append(f"- **Total Fills:** {summary.get('total_fills', 0)}")
+    lines.append(f"- **Total Volume:** ${summary.get('total_volume', 0.0):,.2f}")
+    lines.append(f"- **Avg Slippage (bps):** {summary.get('avg_slippage_bps', 0.0):.1f}")
+    lines.append(f"- **P50 Slippage (bps):** {summary.get('slippage_p50_bps', 0.0):.1f}")
+    lines.append(f"- **P95 Slippage (bps):** {summary.get('slippage_p95_bps', 0.0):.1f}")
+    lines.append(f"- **Avg Latency (ms):** {summary.get('avg_latency_ms', 0.0):.1f}")
+    lines.append(f"- **Partial Fill Rate:** {summary.get('partial_fill_rate', 0.0):.1%}")
+    lines.append(f"- **Total Fees:** ${summary.get('total_fees', 0.0):,.2f}")
+    lines.append(f"- **Fees vs Slippage Cost (bps):** {summary.get('fees_vs_slippage_bps', 0.0):.1f}")
+    lines.append("")
+    by_symbol = summary.get("by_symbol") or {}
+    if by_symbol:
+        lines.append("### By Symbol")
+        lines.append("")
+        lines.append("| Symbol | Fills | Avg Slippage (bps) | Avg Latency (ms) | Fees |")
+        lines.append("|--------|-------|-------------------|------------------|------|")
+        for sym, data in by_symbol.items():
+            fills = data.get("fills", 0)
+            avg_slippage = data.get("avg_slippage_bps", 0.0)
+            avg_latency = data.get("avg_latency_ms", 0.0)
+            fees = data.get("fees", 0.0)
+            lines.append(f"| {sym} | {fills} | {avg_slippage:.1f} | {avg_latency:.1f} | ${fees:,.2f} |")
+        lines.append("")
+
+
 def render_markdown(report: dict) -> str:
     """Render the report as markdown for a human reader."""
     lines = ["# Best-signal bot report", ""]
@@ -363,6 +400,7 @@ def render_markdown(report: dict) -> str:
     _render_ranking(lines, report.get("ranking", []))
     _render_validation(lines, report.get("validation", {}))
     _render_reconciliation(lines, report.get("reconciliation"))
+    _render_execution_quality(lines, report.get("execution_quality"))
 
     lines.append("## Caveats")
     lines.append("")

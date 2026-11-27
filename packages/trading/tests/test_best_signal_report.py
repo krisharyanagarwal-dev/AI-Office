@@ -5,10 +5,12 @@ It has to carry the evidence ranking, the paper positions, the validation
 verdicts and the caveats, and it must never look like a live mandate.
 """
 import json
+from datetime import datetime, timezone
 
 from best_signal.evidence import default_registry, select_tradable
 from best_signal.position import PaperPosition
 from best_signal.report import build_report, render_markdown, write_report
+from best_signal.runner import ExecutionSummary
 
 
 def make_position(action="OPEN", side=1, notional=10_000.0):
@@ -119,3 +121,45 @@ class TestWrite:
         paths = write_report(build_report(default_registry(), [make_position()]), tmp_path)
         assert paths["json"].name == "best_signal_report.json"
         assert paths["markdown"].name == "best_signal_report.md"
+
+
+class TestExecutionQuality:
+    def test_report_includes_execution_quality_section(self, tmp_path):
+        """Report includes execution quality section with slippage/latency/fees."""
+        summary = ExecutionSummary(
+            period="daily",
+            start_ts=1704067200000,
+            end_ts=1704153600000,
+            total_fills=10,
+            total_volume=100_000.0,
+            avg_slippage_bps=2.5,
+            slippage_p50_bps=2.0,
+            slippage_p95_bps=5.0,
+            avg_latency_ms=3.5,
+            partial_fill_rate=0.0,
+            total_fees=50.0,
+            fees_vs_slippage_bps=1.2,
+            by_symbol={
+                "BTCUSDT": {"fills": 6, "avg_slippage_bps": 2.0, "avg_latency_ms": 3.0, "fees": 30.0},
+                "ETHUSDT": {"fills": 4, "avg_slippage_bps": 3.0, "avg_latency_ms": 4.0, "fees": 20.0},
+            }
+        )
+        
+        report = build_report(
+            records=[], positions=[], validations={}, data_summary={},
+            reconciliation={}, venue={}, signals=[], execution_summary=summary
+        )
+        
+        # Check execution quality section exists in JSON
+        assert "execution_quality" in report
+        eq = report["execution_quality"]
+        assert eq["total_fills"] == 10
+        assert eq["avg_slippage_bps"] == 2.5
+        
+        # Check execution quality section exists in markdown
+        markdown = render_markdown(report)
+        assert "## Execution Quality" in markdown
+        assert "Avg Slippage (bps)" in markdown
+        assert "2.5" in markdown
+        assert "P50 Slippage" in markdown
+        assert "Avg Latency (ms)" in markdown
