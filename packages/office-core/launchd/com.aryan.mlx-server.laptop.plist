@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The laptop's local model floor.
+
+     Why this job exists: the office's fallback chain leads with mlx_local, and
+     on this machine nothing was serving it. The chain therefore fell through to
+     google (daily quota exceeded) and nvidia (curl exit 28), so every planned
+     task errored at 2 cost units a time -- 18,717 error rows in the ledger,
+     1,146 of them in one day.
+
+     The port must match ENDPOINTS["mlx_local"] in
+     packages/office-os/core/provider_client.py, which is 11437. Earlier mlx
+     processes here drifted across 11435/11436/11437 and each one answered
+     /v1/models while every generation died, so a listening port is not
+     evidence of a working floor -- check a real completion.
+
+     No --model: models load on demand, so one server serves both the 1B
+     (~21s) and the configured Qwen3.5-9B (~62s) without pinning the larger
+     one in memory on a laptop that runs at ~22% free.
+
+     mlx_lm.server documents itself as not for production. It is bound to
+     loopback and serves this office only. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.aryan.mlx-server</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Library/Frameworks/Python.framework/Versions/3.14/bin/python3</string>
+		<string>-m</string>
+		<string>mlx_lm.server</string>
+		<string>--host</string>
+		<string>127.0.0.1</string>
+		<string>--port</string>
+		<string>11437</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>30</integer>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>StandardOutPath</key>
+	<string>/tmp/com.aryan.mlx-server.log</string>
+	<key>StandardErrorPath</key>
+	<string>/tmp/com.aryan.mlx-server.log</string>
+</dict>
+</plist>
