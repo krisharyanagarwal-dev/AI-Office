@@ -32,6 +32,37 @@ class TestFillRecord:
         rec2 = FillRecord(**data)
         assert rec2.symbol == "BTCUSDT"
 
+    def test_fill_record_captures_spread_and_bid_ask(self):
+        """FillRecord captures bid/ask/spread/fill_fraction/leg_sequence."""
+        from best_signal.fill_journal import FillRecord
+        rec = FillRecord(
+            ts="2026-01-01T00:00:00+00:00",
+            symbol="BTCUSDT",
+            market="spot",
+            side="buy",
+            quantity=100.0,
+            price=100.10,
+            mid_price=100.0,
+            fees=5.005,
+            slippage_bps=10.0,
+            latency_ms=5.0,
+            partial_fill=False,
+            order_id="abc123",
+            spread_bps=2.0,
+            bid=99.99,
+            ask=100.01,
+            fill_fraction=1.0,
+            leg_sequence=0,
+            venue_latency_ms=3.0,
+        )
+        data = rec.to_dict()
+        assert data["spread_bps"] == 2.0
+        assert data["bid"] == 99.99
+        assert data["ask"] == 100.01
+        assert data["fill_fraction"] == 1.0
+        assert data["leg_sequence"] == 0
+        assert data["venue_latency_ms"] == 3.0
+
 
 class TestFillJournal:
     def test_records_one_jsonl_line_per_fill(self, tmp_path):

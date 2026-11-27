@@ -27,6 +27,13 @@ class FillRecord:
     order_id: str
     venue: str = "paper"
     mode: str = "PAPER"
+    # NEW FIELDS
+    spread_bps: float = 0.0
+    bid: float = 0.0
+    ask: float = 0.0
+    fill_fraction: float = 1.0
+    leg_sequence: int = 0
+    venue_latency_ms: float = 0.0
 
     def to_dict(self) -> dict:
         return asdict(self)
