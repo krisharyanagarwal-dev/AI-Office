@@ -148,6 +148,15 @@ class CarryPaperBroker(PaperBroker):
         if self.latency_ms > 0:
             await asyncio.sleep(self.latency_ms / 1000.0)
 
+        # Simulate bid/ask (mid ± spread/2)
+        spread_bps = self.realism.slippage_bps * 0.2 if self.realism.slippage_bps else 1.0
+        spread = price * spread_bps / 10000
+        bid = price - spread / 2
+        ask = price + spread / 2
+
+        # Measure actual latency
+        start_latency = time.perf_counter()
+
         # Slippage fills against the direction of the trade: a buy prints a
         # higher price, a sell a lower price.
         fill_price = price
@@ -175,11 +184,34 @@ class CarryPaperBroker(PaperBroker):
             timestamp=time.time(),
             exchange_fill_id=f"paper_{uuid.uuid4().hex[:8]}",
         )
+
+        # Attach execution data to fill for journal recording
+        fill.spread_bps = spread_bps
+        fill.bid = bid
+        fill.ask = ask
+        fill.fill_fraction = self.partial_fill_fraction if self.partial_fill_enabled and not getattr(order, "fill_fully", False) else 1.0
+        fill.leg_sequence = getattr(order, "leg_sequence", 0)
+        fill.venue_latency_ms = 0.0  # Will be updated after processing
+
         await self._process_fill(fill)
+
+        # Record actual venue latency
+        actual_latency_ms = (time.perf_counter() - start_latency) * 1000
+        fill.venue_latency_ms = actual_latency_ms
 
         # After processing fill, record to journal if attached
         if self.fill_journal is not None:
-            record_fill(self.fill_journal, fill, order, self)
+            record_fill(
+                self.fill_journal,
+                fill,
+                order,
+                self,
+                bid=bid,
+                ask=ask,
+                spread_bps=spread_bps,
+                venue_latency_ms=fill.venue_latency_ms,
+                leg_sequence=fill.leg_sequence,
+            )
 
         if order.side == OrderSide.BUY:
             self.balances["USDT"] -= fill_qty * fill_price + fill.commission
@@ -643,5 +675,11 @@ def run_paper_execution(
 
     if action == ACTION_CLOSE and governor is not None and result.filled:
         governor.limits.positions.pop(symbol, None)
+
+    # Record cycle telemetry if broker has telemetry attached
+    telemetry = getattr(broker, "telemetry", None)
+    if telemetry is not None:
+        from best_signal.telemetry import record_cycle
+        record_cycle(telemetry, symbol, side, notional, action, result, broker)
 
     return result

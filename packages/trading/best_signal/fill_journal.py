@@ -56,8 +56,22 @@ class FillJournal:
             fh.write(line + "\n")
 
 
-def record_fill(journal: FillJournal, fill, order, broker) -> None:
-    """Create FillRecord from venue Fill, Order, and broker realism, then journal it."""
+def record_fill(
+    journal: FillJournal,
+    fill,
+    order,
+    broker,
+    bid: float = 0.0,
+    ask: float = 0.0,
+    spread_bps: float = 0.0,
+    venue_latency_ms: float = 0.0,
+    leg_sequence: int = 0,
+) -> None:
+    """Create FillRecord from venue Fill, Order, and broker realism, then journal it.
+
+    Execution data (bid, ask, spread_bps, venue_latency_ms, leg_sequence) can be
+    passed explicitly or will be read from the fill object if not provided.
+    """
     # Extract mid price from order (price at submission time)
     mid_price = getattr(order, "price", 0.0) or 0.0
 
@@ -75,13 +89,18 @@ def record_fill(journal: FillJournal, fill, order, broker) -> None:
     # Serialize side to string if it's an enum
     side_str = fill_side.value if hasattr(fill_side, "value") else str(fill_side)
 
-    # Extract additional execution data from fill if available
-    spread_bps = getattr(fill, "spread_bps", 0.0)
-    bid = getattr(fill, "bid", 0.0)
-    ask = getattr(fill, "ask", 0.0)
+    # Use explicit params if provided, otherwise fall back to fill attributes
+    if spread_bps == 0.0:
+        spread_bps = getattr(fill, "spread_bps", 0.0)
+    if bid == 0.0:
+        bid = getattr(fill, "bid", 0.0)
+    if ask == 0.0:
+        ask = getattr(fill, "ask", 0.0)
+    if venue_latency_ms == 0.0:
+        venue_latency_ms = getattr(fill, "venue_latency_ms", 0.0)
+    if leg_sequence == 0:
+        leg_sequence = getattr(fill, "leg_sequence", 0)
     fill_fraction = getattr(fill, "fill_fraction", 1.0)
-    leg_sequence = getattr(fill, "leg_sequence", 0)
-    venue_latency_ms = getattr(fill, "venue_latency_ms", 0.0)
 
     rec = FillRecord(
         ts=datetime.now(timezone.utc).isoformat(),

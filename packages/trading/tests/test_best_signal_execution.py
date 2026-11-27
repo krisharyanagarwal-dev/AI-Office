@@ -19,6 +19,7 @@ Hand-derived numbers used below (notional 10,000 at price 100):
 import json
 import pandas as pd
 import pytest
+import time
 
 from best_signal.execution import (
     CarryPaperBroker,
@@ -241,6 +242,42 @@ class TestPaperVenue:
             assert "slippage_bps" in payload
             assert "latency_ms" in payload
             assert "partial_fill" in payload
+
+    def test_execution_captures_bid_ask_spread_latency(self, tmp_path):
+        """Execution records bid/ask/spread/latency per fill."""
+        from best_signal.fill_journal import FillJournal
+        from best_signal.telemetry import TelemetrySink
+        from best_signal.execution import build_paper_venue, run_paper_execution
+        from best_signal.position import RiskLimits
+        from risk import RiskGovernor
+        from risk import RiskLimits as GovernorLimits
+        
+        journal = FillJournal(tmp_path / "fills.jsonl", enabled=True)
+        telemetry = TelemetrySink(tmp_path / "telemetry.jsonl", enabled=True)
+        
+        engine, broker = build_paper_venue(10_000.0, fill_journal=journal)
+        # Attach telemetry to broker for access in _execute_market
+        broker.telemetry = telemetry
+        
+        governor = RiskGovernor(risk_limits_for(RiskLimits(), 10_000.0))
+        
+        result = run_paper_execution(
+            engine, broker, "BTCUSDT", 1, 10_000.0, 100.0, 10_000.0,
+            governor=governor, action="OPEN"
+        )
+        
+        assert result.filled is True
+        # Read fills and verify bid/ask/spread recorded
+        lines = (tmp_path / "fills.jsonl").read_text().strip().splitlines()
+        for line in lines:
+            payload = json.loads(line)
+            assert "spread_bps" in payload
+            assert "bid" in payload
+            assert "ask" in payload
+            assert payload["spread_bps"] >= 0.0
+            assert payload["bid"] > 0
+            assert payload["ask"] > 0
+            assert "venue_latency_ms" in payload
 
 
 class TestRiskApproval:
