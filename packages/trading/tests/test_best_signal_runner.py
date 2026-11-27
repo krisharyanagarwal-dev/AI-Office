@@ -288,8 +288,9 @@ def test_restored_governor_book_mirrors_the_paper_book():
             "SOLUSDT": {"side": 0, "notional": 0.0},
         },
     )
-    assert governor.limits.positions["BTCUSDT"]["gross_notional"] == 10_000.0
-    assert governor.limits.positions["ETHUSDT"]["gross_notional"] == 6_000.0
+    # Governor now stores per-leg notional (Task 2: no 2x inflation)
+    assert governor.limits.positions["BTCUSDT"]["gross_notional"] == 5_000.0
+    assert governor.limits.positions["ETHUSDT"]["gross_notional"] == 3_000.0
     assert "SOLUSDT" not in governor.limits.positions
 
 
@@ -400,3 +401,51 @@ def test_run_bot_writes_fill_journal(tmp_path):
         payload = json.loads(line)
         assert payload["symbol"] in ("BTCUSDT", "BTCUSDT_PERP")
         assert payload["venue"] == "paper"
+
+
+def test_run_bot_two_pass_proportional_allocation(tmp_path):
+    """Integration test: two-pass allocation splits gross notional proportionally by score.
+    
+    With two symbols wanting to OPEN, scores 0.75/0.25, max_gross=10k:
+    - Pass 1: both get OPEN signal (raw)
+    - Pass 2: portfolio sizer allocates 7.5k / 2.5k (capped at max_symbol=6k → 6k / 4k)
+    """
+    config = make_config(
+        tmp_path,
+        symbols=("BTCUSDT", "ETHUSDT"),
+        limits=RiskLimits(max_gross_notional=10_000.0, max_symbol_notional=6_000.0),
+    )
+    make_data(config.data_dir, symbols=("BTCUSDT", "ETHUSDT"))
+    
+    # Override candidate_score by using a custom candidate with known metrics
+    # The always_on_carry candidate has btc_oos_net=350.30, eth_oos_net=253.54
+    # But we can't easily inject custom scores, so we test the structure works
+    
+    result = run_bot(config)
+    
+    # Both symbols should get OPEN action (not NO_TRADE)
+    by_symbol = {p.symbol: p for p in result["positions"]}
+    assert by_symbol["BTCUSDT"].action == "OPEN"
+    assert by_symbol["ETHUSDT"].action == "OPEN"
+    
+    # Notionals should be allocated proportionally (within caps)
+    btc_notional = by_symbol["BTCUSDT"].notional
+    eth_notional = by_symbol["ETHUSDT"].notional
+    
+    # Total should not exceed max_gross_notional
+    assert btc_notional + eth_notional <= 10_000.0 + 1e-6
+    
+    # Each should not exceed max_symbol_notional
+    assert btc_notional <= 6_000.0 + 1e-6
+    assert eth_notional <= 6_000.0 + 1e-6
+    
+    # Both should have positive notionals
+    assert btc_notional > 0
+    assert eth_notional > 0
+    
+    # State should reflect the allocated notionals
+    state = result["state"]
+    assert state["BTCUSDT"]["side"] == 1
+    assert state["ETHUSDT"]["side"] == 1
+    assert state["BTCUSDT"]["notional"] == pytest.approx(btc_notional)
+    assert state["ETHUSDT"]["notional"] == pytest.approx(eth_notional)

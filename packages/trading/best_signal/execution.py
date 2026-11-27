@@ -263,14 +263,15 @@ def legs_for_target(
 def risk_limits_for(bot_limits, equity: float) -> GovernorLimits:
     """Map the bot's own caps onto the repo's risk governor limits.
 
-    A carry is two legs, so the gross exposure of one symbol is twice its
-    per-leg notional; the governor must see that gross, not the net.
+    The governor limits now match the bot caps directly (no 2x inflation).
+    The bot's max_symbol_notional and max_gross_notional already represent
+    the total gross exposure per symbol and across the book respectively.
     """
     max_symbol_exposure = (
-        2.0 * bot_limits.max_symbol_notional / equity if equity > 0 else 0.0
+        bot_limits.max_symbol_notional / equity if equity > 0 else 0.0
     )
     max_total_exposure = (
-        2.0 * bot_limits.max_gross_notional / equity if equity > 0 else 0.0
+        bot_limits.max_gross_notional / equity if equity > 0 else 0.0
     )
     return GovernorLimits(
         min_confidence=0.0,
@@ -297,14 +298,22 @@ def approve_target(
 
     On a failure the governor's book is left exactly as it was, so a
     rejected target leaves no exposure behind.
+
+    Note: gross_notional is the per-leg notional (matching the bot's
+    max_symbol_notional cap). The governor's max_symbol_exposure_pct
+    is configured as max_symbol_notional/equity (Task 2), so we store
+    the per-leg notional as gross_notional for consistent limit checks.
     """
     previous = dict(governor.limits.positions)
     if positions is None:
         projected = dict(previous)
+        # Use per-leg notional as gross_notional for governor checks
+        # (governor limits are now configured per-leg, not 2x)
+        notional = per_leg_notional if per_leg_notional is not None else gross_notional
         projected[symbol] = {
             "quantity": 0.0,
             "avg_entry_price": 0.0,
-            "gross_notional": float(gross_notional),
+            "gross_notional": float(notional),
         }
     else:
         projected = {key: dict(value) for key, value in positions.items()}
@@ -313,7 +322,7 @@ def approve_target(
     notional = (
         per_leg_notional
         if per_leg_notional is not None
-        else float(gross_notional) / 2.0
+        else gross_notional
     )
     status, reason = governor.check_all(
         confidence=1.0,
@@ -556,10 +565,11 @@ def run_paper_execution(
     governor_snapshot = None
     if action in (ACTION_OPEN, ACTION_FLIP) and governor is not None:
         governor_snapshot = {k: dict(v) for k, v in governor.limits.positions.items()}
+        # Pass per-leg notional as gross_notional (governor limits are per-leg, Task 2)
         approved, reason = approve_target(
             governor,
             symbol,
-            2.0 * notional,
+            notional,
             equity,
             per_leg_notional=notional,
         )

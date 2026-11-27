@@ -45,7 +45,8 @@ from best_signal.funding import (
     load_symbol_prints,
     positive_print_fraction,
 )
-from best_signal.position import RiskLimits, build_paper_position
+from best_signal.position import PaperPosition, RiskLimits, build_paper_position
+from best_signal.portfolio_sizer import SizingInput, SizingResult, compute_target_notionals
 from best_signal.report import build_report, jsonable, write_report
 from best_signal.rules import AlwaysOnCarry, PersistenceFlipCarry, RegimeFilteredCarry
 from best_signal.validate import Candidate, reconcile_archive_audit, validate_candidate
@@ -193,6 +194,10 @@ def _restore_governor_book(governor: RiskGovernor, working: dict) -> None:
     governor's book from the same state keeps its per-symbol and total
     exposure checks in sync with the book instead of judging each cycle
     against an empty slate.
+
+    Note: gross_notional is stored as per-leg notional (matching the bot's
+    max_symbol_notional cap) since governor limits are configured per-leg
+    (Task 2: no 2x inflation).
     """
     for symbol, entry in working.items():
         if int(entry.get("side", 0)) == 0:
@@ -200,7 +205,7 @@ def _restore_governor_book(governor: RiskGovernor, working: dict) -> None:
         governor.limits.positions[symbol] = {
             "quantity": 0.0,
             "avg_entry_price": 0.0,
-            "gross_notional": 2.0 * float(entry.get("notional", 0.0)),
+            "gross_notional": float(entry.get("notional", 0.0)),
         }
 
 
@@ -263,7 +268,22 @@ def run_bot(config: BotConfig) -> dict:
     governor.update_high_water_mark(equity + day_state["pnl"])
     _restore_governor_book(governor, working)
 
-    price = 0.0
+    # ===== PASS 1: Collect raw signals with zero notional =====
+    sizing_inputs = []
+    symbol_data = {}  # Store prints, returns, current state for pass 2
+
+    # Compute actual gross_notional and open_symbols from working state for pass 1
+    # (used for max_symbols check, but gross_notional=0 bypasses portfolio cap)
+    actual_gross_notional = sum(
+        float(entry.get("notional", 0.0))
+        for entry in working.values()
+        if int(entry.get("side", 0)) != 0
+    )
+    open_symbols = sum(
+        1 for entry in working.values() if int(entry.get("side", 0)) != 0
+    )
+    daily_loss_pct = day_state["pnl"] / equity if equity > 0 else 0.0
+
     for symbol in config.symbols:
         prints = load_symbol_prints(symbol, data_dir=config.data_dir)
         returns = _causal_price_returns(symbol, prints, config.data_dir)
@@ -272,16 +292,10 @@ def run_bot(config: BotConfig) -> dict:
         if current is None:
             current = {"side": 0, "notional": 0.0}
             working[symbol] = current
-        gross_notional = sum(
-            float(entry.get("notional", 0.0))
-            for entry in working.values()
-            if int(entry.get("side", 0)) != 0
-        )
-        open_symbols = sum(
-            1 for entry in working.values() if int(entry.get("side", 0)) != 0
-        )
-        daily_loss_pct = day_state["pnl"] / equity if equity > 0 else 0.0
-        position = build_paper_position(
+
+        # Call build_paper_position with gross_notional=0 to get raw signal
+        # but pass current open_symbols for max_symbols check (sequential allocation)
+        raw_position = build_paper_position(
             symbol,
             prints,
             records,
@@ -289,10 +303,81 @@ def run_bot(config: BotConfig) -> dict:
             equity=config.equity,
             current_side=int(current.get("side", 0)),
             current_notional=float(current.get("notional", 0.0)),
-            gross_notional=gross_notional,
-            open_symbols=open_symbols,
+            gross_notional=0.0,  # Zero notional for pass 1 (bypass portfolio cap)
+            open_symbols=open_symbols,  # Current open symbols for max_symbols check
             daily_loss_pct=daily_loss_pct,
             returns=returns,
+        )
+
+        # Determine candidate_score from candidate metrics if available
+        candidate_score = 1.0
+        if selected and selected.metrics:
+            # Use symbol-specific metric if available, else default
+            metric_key = f"{symbol.lower().replace('usdt', '')}_oos_net"
+            if metric_key in selected.metrics:
+                candidate_score = max(0.0, selected.metrics[metric_key])
+            elif "btc_oos_net" in selected.metrics and "eth_oos_net" in selected.metrics:
+                # Fallback to average if symbol-specific not found
+                candidate_score = max(0.0, (selected.metrics.get("btc_oos_net", 0) + selected.metrics.get("eth_oos_net", 0)) / 2)
+
+        sizing_inputs.append(SizingInput(
+            symbol=symbol,
+            side=raw_position.side,
+            action=raw_position.action,
+            current_notional=float(current.get("notional", 0.0)),
+            candidate_score=candidate_score,
+        ))
+
+        # Store data needed for pass 2
+        symbol_data[symbol] = {
+            "prints": prints,
+            "returns": returns,
+            "current": current,
+            "raw_position": raw_position,
+        }
+
+        # Update open_symbols for next symbol if this symbol wants to open/flip
+        if raw_position.action in (ACTION_OPEN, ACTION_FLIP) and raw_position.side != 0:
+            open_symbols += 1
+
+        # Validation and data summary can be done in pass 1
+        data_summary[symbol] = _symbol_summary(symbol, prints)
+        if config.validate and selected is not None:
+            candidate = _candidate_for(selected)
+            if candidate is not None:
+                result = validate_candidate(candidate, prints)
+                validations[symbol] = result
+                validation_payload[symbol] = result
+
+    # ===== PASS 2: Portfolio sizing and execution =====
+    # Compute target notionals using portfolio sizer
+    sizing_results = compute_target_notionals(
+        sizing_inputs,
+        equity=config.equity,
+        limits=config.limits,
+        current_book=working,
+    )
+
+    # Create a mapping from symbol to SizingResult
+    sizing_result_map = {r.symbol: r for r in sizing_results}
+
+    price = 0.0
+    for symbol in config.symbols:
+        data = symbol_data[symbol]
+        prints = data["prints"]
+        returns = data["returns"]
+        current = data["current"]
+        raw_position = data["raw_position"]
+        sizing_result = sizing_result_map[symbol]
+
+        # Create final position with allocated notional
+        position = PaperPosition(
+            symbol=symbol,
+            action=sizing_result.action,
+            side=sizing_result.side,
+            notional=sizing_result.target_notional,
+            reason=raw_position.reason,
+            candidate=raw_position.candidate,
         )
         positions.append(position)
 
@@ -400,15 +485,6 @@ def run_bot(config: BotConfig) -> dict:
                     f"Governor/working divergence for {symbol}: "
                     f"gov={sorted(gov_symbols)} working={sorted(working_symbols)}"
                 )
-
-        data_summary[symbol] = _symbol_summary(symbol, prints)
-
-        if config.validate and selected is not None:
-            candidate = _candidate_for(selected)
-            if candidate is not None:
-                result = validate_candidate(candidate, prints)
-                validations[symbol] = result
-                validation_payload[symbol] = result
 
     reconciliation = reconcile_archive_audit(prints_by_symbol)
     venue = venue_snapshot(broker)

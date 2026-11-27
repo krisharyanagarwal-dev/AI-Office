@@ -245,7 +245,12 @@ class TestPaperVenue:
 
 class TestRiskApproval:
     def test_the_governor_measures_the_true_gross_of_a_delta_flat_book(self):
-        """Catches: a signed-notional sum reading a carry book as zero exposure."""
+        """Catches: a signed-notional sum reading a carry book as zero exposure.
+        
+        Governor limits are now per-leg (Task 2: no 2x inflation). The test
+        passes per-leg notional (10_000) which exceeds max_symbol_exposure_pct=0.5
+        (50% of equity = 5_000 per-leg).
+        """
         governor = _governor(
             min_confidence=0.0,
             max_notional_pct=1.0,
@@ -256,29 +261,34 @@ class TestRiskApproval:
             high_water_mark=EQUITY,
         )
 
-        approved, reason = approve_target(governor, "BTCUSDT", 20_000.0, EQUITY)
+        approved, reason = approve_target(governor, "BTCUSDT", 10_000.0, EQUITY)
 
         assert approved is False
         assert "exposure" in reason
         assert governor.limits.positions == {}
 
     def test_an_approved_target_commits_the_projected_gross_book(self):
-        """Catches: the governor approving without recording the new exposure."""
+        """Catches: the governor approving without recording the new exposure.
+        
+        Governor limits are now per-leg (Task 2: no 2x inflation). The test
+        passes per-leg notional (10_000) which fits within max_symbol_exposure_pct=1.0
+        (100% of equity = 10_000 per-leg).
+        """
         governor = _governor(
             min_confidence=0.0,
             max_notional_pct=1.0,
-            max_symbol_exposure_pct=2.0,
+            max_symbol_exposure_pct=1.0,
             max_total_exposure_pct=4.0,
             max_open_positions=4,
             start_of_day_equity=EQUITY,
             high_water_mark=EQUITY,
         )
 
-        approved, reason = approve_target(governor, "BTCUSDT", 20_000.0, EQUITY)
+        approved, reason = approve_target(governor, "BTCUSDT", 10_000.0, EQUITY)
 
         assert approved is True
         assert reason is None
-        assert governor.limits.positions["BTCUSDT"]["gross_notional"] == 20_000.0
+        assert governor.limits.positions["BTCUSDT"]["gross_notional"] == 10_000.0
 
     def test_the_bot_caps_map_onto_the_repo_governor_limits(self):
         """Catches: the governor's own defaults rejecting every carry target."""
@@ -286,10 +296,30 @@ class TestRiskApproval:
         assert limits.min_confidence == 0.0
         assert limits.max_notional_abs == 10_000.0
         assert limits.max_notional_pct == 1.0
-        assert limits.max_symbol_exposure_pct == 2.0
-        assert limits.max_total_exposure_pct == 4.0
+        assert limits.max_symbol_exposure_pct == 1.0
+        assert limits.max_total_exposure_pct == 2.0
         assert limits.max_open_positions == 4
         assert limits.max_daily_loss_pct == 0.03
+
+    def test_governor_limits_match_bot_caps(self):
+        """Governor limits equal bot caps directly (no 2x inflation)."""
+        bot_limits = RiskLimits(
+            max_symbol_notional=15_000.0,
+            max_gross_notional=30_000.0,
+            max_symbols=5,
+            max_daily_loss_pct=0.02,
+        )
+        equity = 25_000.0
+        limits = risk_limits_for(bot_limits, equity=equity)
+
+        # max_symbol_exposure_pct = max_symbol_notional / equity (no 2x)
+        assert limits.max_symbol_exposure_pct == pytest.approx(15_000.0 / equity)
+        # max_total_exposure_pct = max_gross_notional / equity (no 2x)
+        assert limits.max_total_exposure_pct == pytest.approx(30_000.0 / equity)
+        # Other fields pass through directly
+        assert limits.max_notional_abs == 15_000.0
+        assert limits.max_open_positions == 6  # max_symbols + 1
+        assert limits.max_daily_loss_pct == 0.02
 
     def test_flip_rollback_restores_prior_book(self):
         """FLIP that rolls back restores governor to pre-flip state."""
