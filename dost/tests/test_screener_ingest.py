@@ -16,7 +16,9 @@ from ops.screener_ingest import (
     CSV_FIELDNAMES,
     EV_NEW_AGE_THRESHOLD,
     TRADINGVIEW_SCAN_URL,
+    _parse_tv_response_all,
     _tv_numbers,
+    fetch_tradingview_batch,
     ingest,
     normalize,
     write_artifact,
@@ -148,6 +150,91 @@ def test_tv_numbers_computes_pct_from_52w_high_and_momentum():
     assert out["pct_from_52w_high"] is None
 
 
+# ----------------------- TradingView batch queries -----------------------
+
+def _batch_body(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build a fake TradingView scanner response for multiple rows."""
+    columns = list(TV_COLUMNS)
+    data = []
+    for r in rows:
+        data.append({"d": [r.get(c) for c in columns]})
+    return {"columns": columns, "data": data}
+
+
+def test_parse_tv_response_all_parses_multiple_rows():
+    body = _batch_body([
+        {"name": "AAPL", "close": 150.0, "change": 2.0, "pe_ttm_fwd": 25.0, "high_52w": 160.0, "low_52w": 120.0},
+        {"name": "MSFT", "close": 300.0, "change": 6.0, "pe_ttm_fwd": 30.0, "high_52w": 320.0, "low_52w": 250.0},
+    ])
+    parsed = _parse_tv_response_all(body)
+    assert parsed is not None
+    assert len(parsed) == 2
+    symbols = {p["symbol"] for p in parsed}
+    assert symbols == {"AAPL", "MSFT"}
+    aapl = next(p for p in parsed if p["symbol"] == "AAPL")
+    assert aapl["pct_from_52w_high"] == -6.25
+    assert aapl["momentum_flag"] == "Elevated"
+
+
+def test_parse_tv_response_all_empty_data_returns_none():
+    assert _parse_tv_response_all({"columns": TV_COLUMNS, "data": []}) is None
+    assert _parse_tv_response_all({"not": "a dict"}) is None
+
+
+def test_parse_tv_response_backward_compat_first_row_only():
+    body = _batch_body([
+        {"name": "AAPL", "close": 150.0, "change": 2.0, "pe_ttm_fwd": 25.0, "high_52w": 160.0, "low_52w": 120.0},
+        {"name": "MSFT", "close": 300.0, "change": 6.0, "pe_ttm_fwd": 30.0, "high_52w": 320.0, "low_52w": 250.0},
+    ])
+    from ops.screener_ingest import _parse_tv_response
+    first = _parse_tv_response(body)
+    assert first is not None
+    assert first["symbol"] == "AAPL"
+
+
+def test_fetch_tradingview_batch_returns_multiple_symbols(monkeypatch: pytest.MonkeyPatch):
+    body = _batch_body([
+        {"name": "AAPL", "close": 150.0, "change": 2.0, "pe_ttm_fwd": 25.0, "high_52w": 160.0, "low_52w": 120.0},
+        {"name": "MSFT", "close": 300.0, "change": 6.0, "pe_ttm_fwd": 30.0, "high_52w": 320.0, "low_52w": 250.0},
+    ])
+
+    def fake_fetch(url, data=None, timeout=10.0):
+        assert data is not None
+        import json as _json
+        payload = _json.loads(data)
+        assert payload["filter"][0]["operation"] == "in"
+        assert set(payload["filter"][0]["right"]) == {"AAPL", "MSFT"}
+        return body
+
+    monkeypatch.setattr("ops.screener_ingest._fetch_json", fake_fetch)
+
+    results = fetch_tradingview_batch(["AAPL", "MSFT"])
+    assert set(results) == {"AAPL", "MSFT"}
+    assert results["AAPL"]["symbol"] == "AAPL"
+    assert results["MSFT"]["symbol"] == "MSFT"
+
+
+def test_fetch_tradingview_batch_empty_symbols(monkeypatch: pytest.MonkeyPatch):
+    called = []
+    def fake_fetch(url, data=None, timeout=10.0):
+        called.append(True)
+        return {}
+    monkeypatch.setattr("ops.screener_ingest._fetch_json", fake_fetch)
+
+    results = fetch_tradingview_batch([])
+    assert results == {}
+    assert called == []  # no network call for empty input
+
+
+def test_fetch_tradingview_batch_network_failure_returns_empty(monkeypatch: pytest.MonkeyPatch):
+    def boom(url, data=None, timeout=10.0):
+        raise OSError("network down")
+    monkeypatch.setattr("ops.screener_ingest._fetch_json", boom)
+
+    results = fetch_tradingview_batch(["AAPL", "MSFT"])
+    assert results == {}
+
+
 # ----------------------- artifact writing -----------------------
 
 def test_write_artifact_writes_headers_and_rows(tmp_path: Path):
@@ -184,7 +271,7 @@ def test_ingest_skips_symbols_failing_either_source(tmp_path: Path, monkeypatch:
         "EVSTOCK": FUNDAMENTALS,
         # DEAD and GHOST fail yfinance -> skipped
     })
-    monkeypatch.setattr("ops.screener_ingest.fetch_tradingview", tv_fake)
+    monkeypatch.setattr("ops.screener_ingest.fetch_tradingview_batch", tv_fake)
     monkeypatch.setattr("ops.screener_ingest.fetch_yfinance", yf_fake)
 
     path = ingest(["EVSTOCK", "DEAD", "GHOST"], artifact_dir=tmp_path)

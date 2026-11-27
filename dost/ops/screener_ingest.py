@@ -75,11 +75,15 @@ def _to_float(value: Any) -> float | None:
 
 
 def _tv_payload(symbol: str) -> dict[str, Any]:
+    return _tv_payload_batch([symbol])
+
+
+def _tv_payload_batch(symbols: list[str]) -> dict[str, Any]:
     return {
         "columns": list(TV_COLUMNS),
-        "filter": [{"left": "name", "right": symbol, "operation": "equal"}],
+        "filter": [{"left": "name", "right": symbols, "operation": "in"}],
         "options": {"lang": "en"},
-        "range": [0, 1],
+        "range": [0, len(symbols)],
     }
 
 
@@ -121,10 +125,12 @@ def _tv_numbers(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _parse_tv_response(body: Any) -> dict[str, Any] | None:
+def _parse_tv_response_all(body: Any) -> list[dict[str, Any]] | None:
+    """Parse all rows from a TradingView scanner response (single or batch)."""
     if not isinstance(body, dict):
         return None
     columns = list(body.get("columns") or TV_COLUMNS)
+    rows: list[dict[str, Any]] = []
     for item in body.get("data") or []:
         if isinstance(item, dict) and isinstance(item.get("d"), (list, tuple)):
             row = dict(zip(columns, item["d"]))
@@ -136,8 +142,14 @@ def _parse_tv_response(body: Any) -> dict[str, Any] | None:
         if not name:
             continue
         numbers = _tv_numbers(row)
-        return {"symbol": name, **numbers}
-    return None
+        rows.append({"symbol": name, **numbers})
+    return rows or None
+
+
+def _parse_tv_response(body: Any) -> dict[str, Any] | None:
+    """Parse the first row from a TradingView scanner response (backward compat)."""
+    rows = _parse_tv_response_all(body)
+    return rows[0] if rows else None
 
 
 def fetch_tradingview(symbols: list[str], timeout: float = 10.0) -> dict[str, dict[str, Any]]:
@@ -155,6 +167,29 @@ def fetch_tradingview(symbols: list[str], timeout: float = 10.0) -> dict[str, di
             continue
         row = _parse_tv_response(body)
         if row:
+            results[symbol] = row
+    return results
+
+
+def fetch_tradingview_batch(symbols: list[str], timeout: float = 10.0) -> dict[str, dict[str, Any]]:
+    """Batch TradingView scanner query for multiple symbols in one HTTP request.
+
+    Uses the scanner's ``in`` operator so N symbols cost one request instead of N.
+    Returns a dict of symbol -> technicals. Symbols that fail or are absent
+    from the response are simply omitted — callers skip them.
+    """
+    if not symbols:
+        return {}
+    try:
+        payload = json.dumps(_tv_payload_batch(symbols)).encode("utf-8")
+        body = _fetch_json(TRADINGVIEW_SCAN_URL, data=payload, timeout=timeout)
+    except (urlerror.URLError, urlerror.HTTPError, OSError, ValueError):
+        return {}
+    rows = _parse_tv_response_all(body) or []
+    results: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        symbol = row.get("symbol")
+        if symbol:
             results[symbol] = row
     return results
 
@@ -284,7 +319,7 @@ def ingest(symbols: list[str], artifact_dir: Path | None = None) -> Path:
     artifact with headers only is still written (pipeline health can detect
     the empty universe).
     """
-    tv = fetch_tradingview(list(symbols))
+    tv = fetch_tradingview_batch(list(symbols))
     rows: list[dict[str, Any]] = []
     for symbol in symbols:
         row = normalize(symbol, tv.get(symbol), fetch_yfinance(symbol))
