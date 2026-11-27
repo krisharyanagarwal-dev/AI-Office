@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aryan.dost-screener-manip-watch</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/python3</string>
+        <string>/Users/aryanagarwal/AI-Office/dost/ops/screener_manip_watch.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/aryanagarwal/AI-Office</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>StandardOutPath</key>
+    <string>/Users/aryanagarwal/AI-Office/dost/logs/dost-screener-manip-watch.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/aryanagarwal/AI-Office/dost/logs/dost-screener-manip-watch-error.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>

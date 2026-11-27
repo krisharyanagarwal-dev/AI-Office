@@ -1271,6 +1271,9 @@ class FleetSelfHealing:
                 "unhealthy",
                 error=self._loop_last_error,
             )
+            self.memory.set_preference(
+                "service_heartbeats", self._service_heartbeats
+            )
             print(f"[self_healing] Supervised cycle failed: {self._loop_last_error}")
             return {
                 "ok": False,
@@ -1288,6 +1291,9 @@ class FleetSelfHealing:
                 "unhealthy",
                 error=self._loop_last_error,
             )
+            self.memory.set_preference(
+                "service_heartbeats", self._service_heartbeats
+            )
             print(f"[self_healing] Supervised cycle unhealthy: {self._loop_last_error}")
             return {
                 "ok": False,
@@ -1301,6 +1307,7 @@ class FleetSelfHealing:
         self._loop_last_error = None
         self._loop_healthy = True
         self._record_heartbeat("self_healing", "healthy", error=None)
+        self.memory.set_preference("service_heartbeats", self._service_heartbeats)
         return result
 
     async def run_loop(self):
