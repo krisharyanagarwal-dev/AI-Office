@@ -12,6 +12,7 @@ re-dispatching a task never places live orders and never touches credentials.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -39,6 +40,7 @@ HEALING_CONFIG = {
         "error_rate_pct": 10,          # Circuit break if error rate >10%
         "max_retries": 3,              # Max re-dispatch attempts per task
         "cooldown_sec": 300,           # 5 min between same actions
+        "escalation_threshold": 3,     # consecutive failures before an alert is escalated
         # Infrastructure thresholds
         "disk_usage_pct": 90,          # Disk cleanup if root fs >90% full
         "memory_pressure_pct": 90,     # Memory pressure action if >90% used
@@ -101,6 +103,12 @@ class FleetSelfHealing:
         self.memory = get_unified_memory()
         self._last_action: dict[str, float] = {}
         self._action_history: list[HealingAction] = []
+        # Consecutive failure count per cooldown key for escalating backoff.
+        # A repeatedly-failing remediation backs off exponentially (capped) so a
+        # flapping service cannot hammer restart attempts every cycle.
+        self._consecutive_failures: dict[str, int] = {}
+        # Maximum backoff multiplier applied to the base cooldown.
+        self._max_backoff_multiplier = 8
         # Pools currently failed over (routing preference switched). Persisted so the
         # web dashboard and watchdog can observe remediation state across restarts.
         self._failed_over_pools: set[str] = set(
@@ -113,10 +121,30 @@ class FleetSelfHealing:
             for name, scale in (self.memory.get_preference("pool_scale_factors", {}) or {}).items()
         }
         # Circuit breaker state: True when dispatching is paused due to error spikes.
-        self._circuit_broken: bool = False
+        # Persisted across restarts so a tripped circuit stays open after reboot.
+        self._circuit_broken: bool = bool(
+            self.memory.get_preference("circuit_broken", False) or False
+        )
+        # Remediation-failure alerts surface on /health/ops; persisted so they
+        # survive restarts. Capped in memory to avoid unbounded growth.
+        self._alerts: list[dict] = (
+            self.memory.get_preference("healing_alerts", []) or []
+        )[-200:]
         # Per-service heartbeat/health snapshots for the /health/ops dashboard.
         self._service_heartbeats: dict[str, dict] = (
             self.memory.get_preference("service_heartbeats", {}) or {}
+        )
+        # Supervision state for the 24/7 self-healing loop. Tracks consecutive
+        # loop failures so a repeatedly-crashing run_once backs off instead of
+        # spinning hot, and records a liveness heartbeat for /health/ops.
+        self._loop_failures: int = int(
+            self.memory.get_preference("self_healing_loop_failures", 0) or 0
+        )
+        self._loop_last_error: Optional[str] = (
+            self.memory.get_preference("self_healing_loop_last_error") or None
+        )
+        self._loop_healthy: bool = bool(
+            self.memory.get_preference("self_healing_loop_healthy", True) or True
         )
 
     # ----------------------- Metrics / task fetching -----------------------
@@ -270,6 +298,8 @@ class FleetSelfHealing:
             success=success,
             details=detail,
         )
+        self._record_action_outcome(f"service_restart_{service_label}", success)
+
         print(f"[self_healing] Service restart {service_label}: {'ok' if success else 'failed'}")
         return action
 
@@ -363,6 +393,9 @@ class FleetSelfHealing:
                 },
             )
             actions.append(action)
+            self._record_action_outcome(f"stuck_task_{task_id}", success)
+            if not success:
+                self._record_remediation_failure_alert(action)
             print(f"[self_healing] Re-dispatched task {task_id}: {'ok' if success else 'failed'}")
 
         return actions
@@ -998,18 +1031,101 @@ class FleetSelfHealing:
     # ----------------------- Cooldown / alerts / persistence -----------------------
 
     def _should_act(self, action_key: str) -> bool:
-        """Check if enough time has passed since last action of this type."""
+        """Check if enough time has passed since last action of this type.
+
+        Applies escalating backoff: a key with consecutive failures waits
+        longer (base cooldown * 2^failures, capped) before acting again.
+        """
         now = time.time()
         last = self._last_action.get(action_key, 0)
-        if now - last >= self.config["thresholds"]["cooldown_sec"]:
+        failures = self._consecutive_failures.get(action_key, 0)
+        multiplier = min(2 ** failures, self._max_backoff_multiplier)
+        effective_cooldown = self.config["thresholds"]["cooldown_sec"] * multiplier
+        if now - last >= effective_cooldown:
             self._last_action[action_key] = now
             return True
         return False
 
-    async def _send_healing_alert(self, action: HealingAction) -> None:
-        """Send a healing-action alert via Telegram when configured."""
-        if "telegram" not in self.config["delivery_channels"]:
+    def _record_action_outcome(self, action_key: str, success: bool) -> None:
+        """Track success/failure of an action for escalating backoff.
+
+        Failures increase the backoff for the key; a success resets it.
+        """
+        if success:
+            self._consecutive_failures.pop(action_key, None)
+        else:
+            self._consecutive_failures[action_key] = (
+                self._consecutive_failures.get(action_key, 0) + 1
+            )
+
+    def _record_remediation_failure_alert(self, action: HealingAction) -> dict:
+        """Record a failed remediation as an alert for /health/ops observability.
+
+        Capped at 200 entries in memory and persisted so failed remediations
+        remain visible across restarts. An alert is marked ``escalated`` when
+        consecutive failures for the same action key reach the escalation
+        threshold, so /health/ops can surface repeatedly-failing remediations.
+        Returns the alert dict so callers can wire escalation notifications.
+        """
+        action_key = f"{action.action_type}_{action.target}"
+        consecutive = self._consecutive_failures.get(action_key, 0)
+        escalated = consecutive >= self.config["thresholds"]["escalation_threshold"]
+        alert = {
+            "id": f"alert-{int(time.time())}",
+            "action_key": action_key,
+            "action_type": action.action_type,
+            "target": action.target,
+            "reason": action.reason,
+            "timestamp": action.timestamp,
+            "details": action.details,
+            "consecutive_failures": consecutive,
+            "escalated": escalated,
+        }
+        self._alerts.append(alert)
+        # Keep the in-memory list bounded; persist the capped list.
+        self._alerts = self._alerts[-200:]
+        self.memory.set_preference("healing_alerts", self._alerts)
+        return alert
+
+    def get_alerts(self, limit: int = 50) -> list[dict]:
+        """Return recent remediation-failure alerts."""
+        return list(self._alerts[-limit:])
+
+    async def _send_healing_alert(self, alert: dict) -> None:
+        """Send an escalated healing alert via configured delivery channels.
+
+        Only fired for escalated alerts (consecutive failures >= threshold) so
+        the operator is not spammed by one-off failures. Channels:
+        - telegram: push notification when token/chat_id are configured
+        - web: surfaced on /health/ops via the persisted healing_alerts list
+        - memory: recorded as a unified-memory escalation message
+        """
+        if not alert.get("escalated"):
             return
+        channels = self.config["delivery_channels"]
+        # Web and memory channels are served by persisting the alert to
+        # healing_alerts (visible on /health/ops) plus an escalation log entry.
+        if "web" in channels or "memory" in channels:
+            self._log_action(
+                HealingAction(
+                    id=alert["id"],
+                    action_type=alert["action_type"],
+                    target=alert["target"],
+                    reason=f"[ESCALATED] {alert['reason']}",
+                    timestamp=alert["timestamp"],
+                    success=False,
+                    details={
+                        **alert.get("details", {}),
+                        "escalated": True,
+                        "consecutive_failures": alert.get("consecutive_failures"),
+                    },
+                )
+            )
+        if "telegram" in channels:
+            await self._send_telegram_healing_alert(alert)
+
+    async def _send_telegram_healing_alert(self, alert: dict) -> None:
+        """Send an escalated healing alert via Telegram."""
         try:
             from telegram.bot import DostTelegramBot
             token = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -1017,13 +1133,15 @@ class FleetSelfHealing:
             if token and chat_id:
                 bot = DostTelegramBot(token, int(chat_id))
                 await bot.send_message(
-                    f"🔧 *Self-Healing: {action.action_type}*\n"
-                    f"Target: `{action.target}`\n"
-                    f"Reason: {action.reason}\n"
-                    f"Success: {action.success}"
+                    f"🚨 *Self-Healing ESCALATED*\n"
+                    f"Action: `{alert['action_type']}`\n"
+                    f"Target: `{alert['target']}`\n"
+                    f"Reason: {alert['reason']}\n"
+                    f"Consecutive failures: {alert.get('consecutive_failures')}\n"
+                    f"Time: {alert['timestamp']}"
                 )
         except Exception as e:
-            print(f"[self_healing] Telegram healing alert failed: {e}")
+            print(f"[self_healing] Telegram escalation alert failed: {e}")
 
     def _log_action(self, action: HealingAction) -> None:
         """Log healing action to memory."""
@@ -1047,22 +1165,47 @@ class FleetSelfHealing:
 
         all_actions: list[HealingAction] = []
 
-        # Run all checks
-        all_actions.extend(self.check_stuck_tasks(metrics))
-        all_actions.extend(self.check_pool_saturation(metrics))
-        all_actions.extend(self.check_provider_pool_scaling(metrics))
-        all_actions.extend(self.check_error_rates(metrics))
-        all_actions.extend(self.check_service_health(metrics))
-        all_actions.extend(self.check_trading_fleet_health(metrics))
-        all_actions.extend(self.check_trading_metrics_health(trading_metrics))
-        all_actions.extend(self.check_infrastructure(metrics))
-        all_actions.extend(self.check_predictive_prehealing(metrics))
+        # Run all checks; a failing check never kills the cycle or discards
+        # actions already collected from earlier checks. Check failures are
+        # recorded as alerts so /health/ops can observe them.
+        checks = [
+            ("stuck_tasks", lambda: self.check_stuck_tasks(metrics)),
+            ("pool_saturation", lambda: self.check_pool_saturation(metrics)),
+            ("provider_pool_scaling", lambda: self.check_provider_pool_scaling(metrics)),
+            ("error_rates", lambda: self.check_error_rates(metrics)),
+            ("service_health", lambda: self.check_service_health(metrics)),
+            ("trading_fleet_health", lambda: self.check_trading_fleet_health(metrics)),
+            ("trading_metrics_health", lambda: self.check_trading_metrics_health(trading_metrics)),
+            ("infrastructure", lambda: self.check_infrastructure(metrics)),
+            ("predictive_prehealing", lambda: self.check_predictive_prehealing(metrics)),
+        ]
+        for check_name, check_fn in checks:
+            try:
+                all_actions.extend(check_fn())
+            except Exception as e:
+                alert = self._record_remediation_failure_alert(
+                    HealingAction(
+                        id=f"heal-{int(time.time())}",
+                        action_type="check_error",
+                        target=check_name,
+                        reason=f"Self-healing check '{check_name}' raised: {e}",
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        success=False,
+                        details={"error": str(e)},
+                    )
+                )
+                if alert.get("escalated"):
+                    await self._send_healing_alert(alert)
+                print(f"[self_healing] Check '{check_name}' raised: {e}")
 
         # Record actions, alert, persist
         for action in all_actions:
             self._action_history.append(action)
             self._log_action(action)
-            await self._send_healing_alert(action)
+            if not action.success:
+                alert = self._record_remediation_failure_alert(action)
+                if alert.get("escalated"):
+                    await self._send_healing_alert(alert)
 
         # Store in memory for web dashboard (/health/ops)
         self.memory.set_preference("last_healing_actions", [
@@ -1078,6 +1221,20 @@ class FleetSelfHealing:
         ])
         self.memory.set_preference("failed_over_pools", sorted(self._failed_over_pools))
         self.memory.set_preference("service_heartbeats", self._service_heartbeats)
+        # Persist circuit-breaker state so a tripped circuit survives restarts.
+        self.memory.set_preference("circuit_broken", self._circuit_broken)
+        # Persist trading-fleet snapshot so /health/ops can surface OpenAlice
+        # trading fleet state alongside dost service health.
+        self.memory.set_preference("trading_fleet", trading_metrics)
+        # Persist consecutive-failure counts so cooldown/escalation state is
+        # observable on /health/ops across restarts.
+        self.memory.set_preference("consecutive_failures", self._consecutive_failures)
+        # Persist self-healing loop liveness state so /health/ops can observe
+        # whether the supervision loop is healthy across restarts.
+        self.memory.set_preference("self_healing_loop_failures", self._loop_failures)
+        self.memory.set_preference("self_healing_loop_last_error", self._loop_last_error)
+        self.memory.set_preference("self_healing_loop_healthy", self._loop_healthy)
+        self.memory.set_preference("healing_alerts", self._alerts)
 
         return {
             "ok": True,
@@ -1092,19 +1249,76 @@ class FleetSelfHealing:
             ],
         }
 
+    async def _run_supervised_once(self) -> dict[str, Any]:
+        """Run one self-healing cycle under supervision.
+
+        Wraps :meth:`run_once` so that an unexpected exception (or a
+        repeatedly-failing cycle) cannot kill the 24/7 loop. Applies escalating
+        backoff on consecutive loop failures and records a liveness heartbeat
+        for /health/ops. Never raises.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            result = await self.run_once()
+        except Exception as e:
+            # run_once itself blew up: record the failure, back off, and keep
+            # the loop alive. This is the restart-on-failure supervision point.
+            self._loop_failures += 1
+            self._loop_last_error = f"{type(e).__name__}: {e}"
+            self._loop_healthy = False
+            self._record_heartbeat(
+                "self_healing",
+                "unhealthy",
+                error=self._loop_last_error,
+            )
+            print(f"[self_healing] Supervised cycle failed: {self._loop_last_error}")
+            return {
+                "ok": False,
+                "error": self._loop_last_error,
+                "supervised": True,
+                "loop_failures": self._loop_failures,
+            }
+
+        if not result.get("ok"):
+            self._loop_failures += 1
+            self._loop_last_error = result.get("error", "run_once returned ok=False")
+            self._loop_healthy = False
+            self._record_heartbeat(
+                "self_healing",
+                "unhealthy",
+                error=self._loop_last_error,
+            )
+            print(f"[self_healing] Supervised cycle unhealthy: {self._loop_last_error}")
+            return {
+                "ok": False,
+                "error": self._loop_last_error,
+                "supervised": True,
+                "loop_failures": self._loop_failures,
+            }
+
+        # Cycle succeeded: reset failure tracking and record healthy heartbeat.
+        self._loop_failures = 0
+        self._loop_last_error = None
+        self._loop_healthy = True
+        self._record_heartbeat("self_healing", "healthy", error=None)
+        return result
+
     async def run_loop(self):
         """Run continuous self-healing loop."""
         print(f"[self_healing] Starting loop (interval: {self.config['check_interval_sec']}s)")
         while True:
             try:
-                result = await self.run_once()
+                result = await self._run_supervised_once()
                 if not result.get("ok"):
-                    print(f"[self_healing] Check failed: {result.get('error')}")
+                    print(
+                        f"[self_healing] Cycle unhealthy "
+                        f"(failures={result.get('loop_failures', 0)}): {result.get('error')}"
+                    )
                 elif result.get("actions"):
                     print(f"[self_healing] Actions taken: {len(result['actions'])}")
             except Exception as e:
                 print(f"[self_healing] Loop error: {e}")
-            time.sleep(self.config["check_interval_sec"])
+            await asyncio.sleep(self.config["check_interval_sec"])
 
     def get_healing_history(self, limit: int = 50) -> list[dict]:
         """Get recent healing actions."""
@@ -1128,16 +1342,18 @@ async def main():
     print(f"[self_healing] Starting loop (interval: {healing.config['check_interval_sec']}s)")
     while True:
         try:
-            result = await healing.run_once()
+            result = await healing._run_supervised_once()
             if not result.get("ok"):
-                print(f"[self_healing] Check failed: {result.get('error')}")
+                print(
+                    f"[self_healing] Cycle unhealthy "
+                    f"(failures={result.get('loop_failures', 0)}): {result.get('error')}"
+                )
             elif result.get("actions"):
                 print(f"[self_healing] Actions taken: {len(result['actions'])}")
         except Exception as e:
             print(f"[self_healing] Loop error: {e}")
-        time.sleep(healing.config["check_interval_sec"])
+        await asyncio.sleep(healing.config["check_interval_sec"])
 
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(main())

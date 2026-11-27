@@ -3015,27 +3015,69 @@ class OfficeHandler(BaseHTTPRequestHandler):
         """GET /health/ops - self-healing observability.
 
         Returns per-service heartbeat snapshots (status, last_run, error_count,
-        last_error), recent healing actions, and failed-over pool routing
-        preferences persisted by FleetSelfHealing.
+        last_error), recent healing actions, failed-over pool routing
+        preferences, trading fleet state, remediation-history metrics, and
+        remediation-failure alerts persisted by FleetSelfHealing.
         """
         try:
             memory = get_unified_memory()
             heartbeats = memory.get_preference("service_heartbeats", {}) or {}
             healing_actions = memory.get_preference("last_healing_actions", []) or []
             failed_over_pools = memory.get_preference("failed_over_pools", []) or []
+            healing_alerts = memory.get_preference("healing_alerts", []) or []
+            trading_fleet = memory.get_preference("trading_fleet", {}) or {}
+            consecutive_failures = memory.get_preference("consecutive_failures", {}) or {}
         except Exception as e:
             heartbeats = {}
             healing_actions = []
             failed_over_pools = []
+            healing_alerts = []
+            trading_fleet = {}
+            consecutive_failures = {}
             error = str(e)
         else:
             error = None
+
+        # Remediation-history metrics computed from the persisted action log.
+        by_type: dict[str, int] = {}
+        by_outcome = {"success": 0, "failure": 0, "unknown": 0}
+        for a in healing_actions:
+            atype = a.get("type", "unknown")
+            by_type[atype] = by_type.get(atype, 0) + 1
+            if a.get("success") is True:
+                by_outcome["success"] += 1
+            elif a.get("success") is False:
+                by_outcome["failure"] += 1
+            else:
+                by_outcome["unknown"] += 1
+
+        # Alert summary: total alerts, escalated count, breakdown by type.
+        alert_by_type: dict[str, int] = {}
+        escalated = 0
+        for a in healing_alerts:
+            atype = a.get("action_type", "unknown")
+            alert_by_type[atype] = alert_by_type.get(atype, 0) + 1
+            if a.get("escalated"):
+                escalated += 1
 
         payload = {
             "endpoint": "/health/ops",
             "services": heartbeats,
             "failed_over_pools": sorted(failed_over_pools),
             "recent_healing_actions": healing_actions[-20:],
+            "recent_healing_alerts": healing_alerts[-20:],
+            "trading_fleet": trading_fleet,
+            "remediation_metrics": {
+                "total_actions": len(healing_actions),
+                "by_type": by_type,
+                "by_outcome": by_outcome,
+                "active_consecutive_failures": consecutive_failures,
+            },
+            "alert_summary": {
+                "total": len(healing_alerts),
+                "escalated": escalated,
+                "by_type": alert_by_type,
+            },
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         if error:
@@ -3051,11 +3093,17 @@ class OfficeHandler(BaseHTTPRequestHandler):
             healing_actions = memory.get_preference("last_healing_actions", []) or []
             failed_over_pools = memory.get_preference("failed_over_pools", []) or []
             pool_scale_factors = memory.get_preference("pool_scale_factors", {}) or {}
+            trading_fleet = memory.get_preference("trading_fleet", {}) or {}
+            consecutive_failures = memory.get_preference("consecutive_failures", {}) or {}
+            healing_alerts = memory.get_preference("healing_alerts", []) or []
         except Exception as e:
             heartbeats = {}
             healing_actions = []
             failed_over_pools = []
             pool_scale_factors = {}
+            trading_fleet = {}
+            consecutive_failures = {}
+            healing_alerts = []
             error = str(e)
         else:
             error = None
@@ -3108,6 +3156,76 @@ class OfficeHandler(BaseHTTPRequestHandler):
             action_rows = '<tr><td colspan="5" class="empty">No healing actions recorded.</td></tr>'
 
         fop_items = ", ".join(escape(str(p)) for p in sorted(failed_over_pools)) or "None"
+
+        # Trading fleet summary rows
+        tf_rows = ""
+        if trading_fleet:
+            for name in ("fleet_health_ok", "fleet_agents_alive", "fleet_agents_expected",
+                         "fleet_agents_dead", "fleet_checks_failing"):
+                series = trading_fleet.get(name, {})
+                for label, value in series.items():
+                    tf_rows += f"""
+                        <tr>
+                            <td class="mono">{escape(str(name))}</td>
+                            <td class="mono">{escape(str(label))}</td>
+                            <td class="mono">{escape(str(value))}</td>
+                        </tr>
+                    """
+        else:
+            tf_rows = '<tr><td colspan="3" class="empty">No trading fleet metrics recorded.</td></tr>'
+
+        # Remediation metric rows
+        rm_by_type = ""
+        rm_total = len(healing_actions)
+        rm_success = sum(1 for a in healing_actions if a.get("success") is True)
+        rm_failure = sum(1 for a in healing_actions if a.get("success") is False)
+        rm_types: dict[str, int] = {}
+        for a in healing_actions:
+            atype = a.get("type", "unknown")
+            rm_types[atype] = rm_types.get(atype, 0) + 1
+        for atype, count in sorted(rm_types.items()):
+            rm_by_type += f"""
+                <tr>
+                    <td class="mono">{escape(str(atype))}</td>
+                    <td class="mono">{escape(str(count))}</td>
+                </tr>
+            """
+        if not rm_by_type:
+            rm_by_type = '<tr><td colspan="2" class="empty">No remediation actions recorded.</td></tr>'
+
+        # Cooldown / consecutive failure rows
+        cf_rows = ""
+        if consecutive_failures:
+            for key, count in sorted(consecutive_failures.items()):
+                cf_rows += f"""
+                <tr>
+                    <td class="mono">{escape(str(key))}</td>
+                    <td class="mono {'err' if count >= 3 else 'neutral'}">{escape(str(count))}</td>
+                </tr>
+                """
+        else:
+            cf_rows = '<tr><td colspan="2" class="empty">No active cooldown failures.</td></tr>'
+
+        # Alert rows (recent, escalated highlighted)
+        alert_rows = ""
+        for a in healing_alerts[-20:]:
+            cls = "err" if a.get("escalated") else "neutral"
+            alert_rows += f"""
+                <tr>
+                    <td class="mono">{escape(str(a.get('timestamp', '')))}</td>
+                    <td>{escape(str(a.get('action_type', '')))}</td>
+                    <td class="mono">{escape(str(a.get('target', '')))}</td>
+                    <td class="mono">{escape(str(a.get('consecutive_failures', 0)))}</td>
+                    <td class="{cls}">{'ESCALATED' if a.get('escalated') else 'failed'}</td>
+                    <td>{escape(str(a.get('reason', ''))[:120])}</td>
+                </tr>
+            """
+        if not alert_rows:
+            alert_rows = '<tr><td colspan="6" class="empty">No remediation-failure alerts.</td></tr>'
+
+        alert_total = len(healing_alerts)
+        alert_escalated = sum(1 for a in healing_alerts if a.get("escalated"))
+
         error_box = (
             f'<div class="card" style="border-color:#ef4444">'
             f'<p style="color:#ef4444;margin:0">Error reading memory: {escape(error)}</p></div>'
@@ -3170,6 +3288,39 @@ class OfficeHandler(BaseHTTPRequestHandler):
             <table>
                 <thead><tr><th>Time</th><th>Action</th><th>Target</th><th>Reason</th><th>Result</th></tr></thead>
                 <tbody>{action_rows}</tbody>
+            </table>
+
+            <h2>Trading fleet (OpenAlice)</h2>
+            <div class="kv">
+                <span class="label">Total actions</span><span class="mono">{rm_total}</span>
+                <span class="label">Succeeded</span><span class="mono ok">{rm_success}</span>
+                <span class="label">Failed</span><span class="mono err">{rm_failure}</span>
+            </div>
+            <table>
+                <thead><tr><th>Metric</th><th>Label</th><th>Value</th></tr></thead>
+                <tbody>{tf_rows}</tbody>
+            </table>
+
+            <h2>Remediation history</h2>
+            <table>
+                <thead><tr><th>Action type</th><th>Count</th></tr></thead>
+                <tbody>{rm_by_type}</tbody>
+            </table>
+
+            <h2>Active cooldowns (consecutive failures)</h2>
+            <table>
+                <thead><tr><th>Action key</th><th>Consecutive failures</th></tr></thead>
+                <tbody>{cf_rows}</tbody>
+            </table>
+
+            <h2>Remediation-failure alerts (last 20)</h2>
+            <div class="kv">
+                <span class="label">Total</span><span class="mono">{alert_total}</span>
+                <span class="label">Escalated</span><span class="mono {'err' if alert_escalated else 'neutral'}">{alert_escalated}</span>
+            </div>
+            <table>
+                <thead><tr><th>Time</th><th>Action</th><th>Target</th><th>Consecutive</th><th>Severity</th><th>Reason</th></tr></thead>
+                <tbody>{alert_rows}</tbody>
             </table>
             <div class="kv"><span class="label">Generated</span><span class="mono">{escape(timestamp)}</span></div>
         </body>

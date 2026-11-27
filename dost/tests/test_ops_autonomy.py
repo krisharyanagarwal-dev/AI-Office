@@ -33,7 +33,12 @@ from ops.anomaly_watch import AnomalyWatch, ANOMALY_CONFIG
 from ops.opportunity_scanner import OpportunityScanner, SCANNER_CONFIG
 from ops.proactive_agent import ProactiveAgent
 from ops.proactive_scheduler import ProactiveScheduler, SCHEDULER_CONFIG
-from ops.self_healing import FleetSelfHealing, HEALING_CONFIG
+from ops.self_healing import (
+    FleetSelfHealing,
+    HealingAction,
+    HEALING_CONFIG,
+    SERVICE_LABELS,
+)
 
 
 class FakeMemory:
@@ -984,3 +989,416 @@ def test_watchdog_no_restart_when_agent_running(monkeypatch, tmp_path):
     watchdog.run_once()
 
     assert not any(c[:2] == ["launchctl", "kickstart"] for c in cmds)
+
+
+# ----------------------- Productionized loop tests -----------------------
+
+def test_cooldown_escalating_backoff_and_cap(monkeypatch):
+    """Consecutive failures exponentially back off (capped); success resets."""
+    fake = FakeMemory()
+    monkeypatch.setattr("ops.self_healing.get_unified_memory", lambda: fake)
+    heal = FleetSelfHealing(
+        {"thresholds": {**HEALING_CONFIG["thresholds"], "cooldown_sec": 10}}
+    )
+
+    now = [1000.0]
+    monkeypatch.setattr("ops.self_healing.time.time", lambda: now[0])
+
+    key = "pool_failover_x"
+    assert heal._should_act(key) is True
+    assert heal._should_act(key) is False  # within 10s base cooldown
+
+    # First failure backs off to 20s: 15s elapsed is not enough.
+    heal._record_action_outcome(key, False)
+    now[0] += 15
+    assert heal._should_act(key) is False
+
+    now[0] += 10  # 25s elapsed: past 20s backoff
+    assert heal._should_act(key) is True
+
+    # Second failure backs off to 40s.
+    heal._record_action_outcome(key, False)
+    now[0] += 30
+    assert heal._should_act(key) is False
+
+    # A success resets the backoff entirely.
+    heal._record_action_outcome(key, True)
+    assert heal._consecutive_failures.get(key) is None
+    assert heal._should_act(key) is True
+
+    # Four failures cap the multiplier at 8 -> 80s cooldown.
+    for _ in range(4):
+        heal._record_action_outcome(key, False)
+    now[0] += 70
+    assert heal._should_act(key) is False
+    now[0] += 20
+    assert heal._should_act(key) is True
+
+
+def test_circuit_breaker_persists_across_instances(monkeypatch, tmp_path):
+    """A tripped circuit survives a simulated restart via the preference store."""
+    fake = FakeMemory()
+    monkeypatch.setattr("ops.self_healing.get_unified_memory", lambda: fake)
+    monkeypatch.setattr("ops.self_healing.HIVE_DIR", tmp_path)
+    monkeypatch.setattr(
+        "ops.self_healing.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="PID 123", stderr=""),
+    )
+
+    heal = FleetSelfHealing(
+        {
+            "thresholds": {**HEALING_CONFIG["thresholds"], "cooldown_sec": 0},
+            "delivery_channels": ["web"],
+        }
+    )
+    monkeypatch.setattr(
+        heal,
+        "fetch_fleet_metrics",
+        lambda: {"provider_pools": {}, "jev": {"error_rate": 99.0}},
+    )
+    monkeypatch.setattr(heal, "_restart_web_server", lambda: None)
+    monkeypatch.setattr(heal, "_recover_database", lambda: None)
+
+    result = asyncio.run(heal.run_once())
+    assert result["ok"] is True
+    assert heal._circuit_broken is True
+    assert fake.prefs["circuit_broken"] is True
+
+    # New instance ("restart") reads the tripped circuit from memory.
+    restarted = FleetSelfHealing()
+    assert restarted._circuit_broken is True
+
+    # Recovery persists too: a full cycle writes circuit_broken back to memory.
+    monkeypatch.setattr(restarted, "fetch_fleet_metrics", lambda: {"provider_pools": {}})
+    actions = restarted.check_error_rates({"jev": {"error_rate": 1.0}})  # < 5%
+    assert len(actions) == 1
+    assert actions[0].action_type == "circuit_recover"
+    assert restarted._circuit_broken is False
+    result = asyncio.run(restarted.run_once())
+    assert result["ok"] is True
+    assert fake.prefs["circuit_broken"] is False
+
+
+def test_remediation_failure_alerts_recorded_and_capped(monkeypatch):
+    """Failed remediations become alerts, are queryable via get_alerts, and capped at 200."""
+    fake = FakeMemory()
+    monkeypatch.setattr("ops.self_healing.get_unified_memory", lambda: fake)
+    heal = FleetSelfHealing()
+
+    action = HealingAction(
+        id="heal-1",
+        action_type="service_restart",
+        target="com.aryan.dost-monitor",
+        reason="kickstart failed",
+        timestamp="2026-01-01T00:00:00Z",
+        success=False,
+        details={"error": "boom"},
+    )
+    heal._record_remediation_failure_alert(action)
+
+    assert len(heal._alerts) == 1
+    assert heal._alerts[0]["action_type"] == "service_restart"
+    assert heal._alerts[0]["target"] == "com.aryan.dost-monitor"
+    assert fake.prefs["healing_alerts"][0]["reason"] == "kickstart failed"
+    assert heal.get_alerts() == heal._alerts[-50:]
+
+    # Cap at 200 entries, persisted.
+    for i in range(250):
+        heal._record_remediation_failure_alert(
+            HealingAction(
+                id=f"heal-{i}",
+                action_type="service_restart",
+                target=f"svc-{i}",
+                reason="r",
+                timestamp=f"2026-01-01T00:00:{i % 60:02d}Z",
+                success=False,
+            )
+        )
+    assert len(heal._alerts) == 200
+    assert len(fake.prefs["healing_alerts"]) == 200
+    assert heal._alerts[-1]["target"] == "svc-249"
+    assert heal.get_alerts(limit=5) == heal._alerts[-5:]
+
+
+def test_run_once_records_failure_alerts_for_failed_actions(monkeypatch, tmp_path):
+    """run_once records a healing alert for every unsuccessful remediation action."""
+    fake = FakeMemory()
+    monkeypatch.setattr("ops.self_healing.get_unified_memory", lambda: fake)
+    monkeypatch.setattr("ops.self_healing.HIVE_DIR", tmp_path)
+
+    heal = FleetSelfHealing({"delivery_channels": ["web"]})
+    monkeypatch.setattr(
+        heal,
+        "fetch_fleet_metrics",
+        lambda: {
+            "provider_pools": {"nvidia_key1": {"available": 1, "total": 10}},
+            "jev": {"error_rate": 99.0},
+        },
+    )
+    # Kickstart fails for every service: 4 failed dost service restarts.
+    _fake_subprocess(monkeypatch, restart_rc=1, kickstart_rc=1, list_running=False)
+    monkeypatch.setattr(heal, "check_trading_fleet_health", lambda m: [])
+    monkeypatch.setattr(heal, "check_trading_metrics_health", lambda m: [])
+    monkeypatch.setattr(heal, "_restart_web_server", lambda: None)
+    monkeypatch.setattr(heal, "_recover_database", lambda: None)
+
+    result = asyncio.run(heal.run_once())
+    assert result["ok"] is True
+    failed = [a for a in result["actions"] if not a["success"]]
+    assert len(failed) == 4
+    assert all(a["type"] == "service_restart" for a in failed)
+
+    alerts = heal.get_alerts()
+    restart_alerts = [a for a in alerts if a["action_type"] == "service_restart"]
+    assert len(restart_alerts) == 4
+    assert {a["target"] for a in restart_alerts} == set(SERVICE_LABELS.values())
+
+
+def test_run_once_resilient_to_check_failure(monkeypatch, tmp_path):
+    """A check that raises never kills the cycle; the failure is logged as an alert."""
+    fake = FakeMemory()
+    monkeypatch.setattr("ops.self_healing.get_unified_memory", lambda: fake)
+    monkeypatch.setattr("ops.self_healing.HIVE_DIR", tmp_path)
+
+    heal = FleetSelfHealing({"delivery_channels": ["web"]})
+    monkeypatch.setattr(
+        heal,
+        "fetch_fleet_metrics",
+        lambda: {
+            "provider_pools": {"nvidia_key1": {"available": 1, "total": 10}},  # 90%
+            "jev": {"error_rate": 99.0},
+        },
+    )
+    monkeypatch.setattr(
+        heal,
+        "check_pool_saturation",
+        lambda m: (_ for _ in ()).throw(RuntimeError("kaboom")),
+    )
+    _fake_subprocess(monkeypatch, restart_rc=0, list_running=False)
+    monkeypatch.setattr(heal, "check_trading_fleet_health", lambda m: [])
+    monkeypatch.setattr(heal, "check_trading_metrics_health", lambda m: [])
+    monkeypatch.setattr(heal, "_restart_web_server", lambda: None)
+    monkeypatch.setattr(heal, "_recover_database", lambda: None)
+
+    result = asyncio.run(heal.run_once())
+    assert result["ok"] is True
+    # check_pool_saturation raised, so no pool_failover; circuit_break, the
+    # 4 service restarts still ran, and pool auto-scaling emitted scale_down.
+    types = {a["type"] for a in result["actions"]}
+    assert types == {"circuit_break", "service_restart", "pool_scale_down"}
+    assert len([a for a in result["actions"] if a["type"] == "service_restart"]) == 4
+    alerts = heal.get_alerts()
+    assert any(
+        a["action_type"] == "check_error"
+        and a["target"] == "pool_saturation"
+        and "kaboom" in a["reason"]
+        for a in alerts
+    )
+
+
+def test_remediation_failure_alert_escalation(monkeypatch):
+    """Alert is marked escalated when consecutive failures reach the threshold."""
+    fake = FakeMemory()
+    monkeypatch.setattr("ops.self_healing.get_unified_memory", lambda: fake)
+    heal = FleetSelfHealing()
+
+    key = "service_restart_com.aryan.dost-monitor"
+    action = HealingAction(
+        id="heal-1",
+        action_type="service_restart",
+        target="com.aryan.dost-monitor",
+        reason="kickstart failed",
+        timestamp="2026-01-01T00:00:00Z",
+        success=False,
+        details={"error": "boom"},
+    )
+
+    # Two failures: below the escalation threshold of 3.
+    heal._record_action_outcome(key, False)
+    heal._record_action_outcome(key, False)
+    heal._record_remediation_failure_alert(action)
+    assert heal._alerts[-1]["escalated"] is False
+    assert heal._alerts[-1]["consecutive_failures"] == 2
+    assert heal._alerts[-1]["action_key"] == key
+
+    # Third failure reaches the threshold: alert is escalated.
+    heal._record_action_outcome(key, False)
+    heal._record_remediation_failure_alert(action)
+    assert heal._alerts[-1]["escalated"] is True
+    assert heal._alerts[-1]["consecutive_failures"] == 3
+
+
+def test_run_once_persists_trading_fleet_and_consecutive_failures(monkeypatch, tmp_path):
+    """run_once persists trading fleet snapshot and consecutive-failure counts."""
+    fake = FakeMemory()
+    monkeypatch.setattr("ops.self_healing.get_unified_memory", lambda: fake)
+    monkeypatch.setattr("ops.self_healing.HIVE_DIR", tmp_path)
+
+    heal = FleetSelfHealing({"delivery_channels": ["web"]})
+    monkeypatch.setattr(
+        heal,
+        "fetch_fleet_metrics",
+        lambda: {"provider_pools": {}, "jev": {"error_rate": 1.0}},
+    )
+    monkeypatch.setattr(
+        heal,
+        "fetch_trading_fleet_metrics",
+        lambda: {
+            "fleet_health_ok": {"": 1.0},
+            "fleet_agents_alive": {"": 40.0},
+            "fleet_agents_expected": {"": 42.0},
+        },
+    )
+    # All four dost services down and restart failing -> one consecutive failure each.
+    _fake_subprocess(monkeypatch, restart_rc=1, kickstart_rc=1, list_running=False)
+    monkeypatch.setattr(heal, "check_trading_fleet_health", lambda m: [])
+    monkeypatch.setattr(heal, "check_trading_metrics_health", lambda m: [])
+    monkeypatch.setattr(heal, "_restart_web_server", lambda: None)
+    monkeypatch.setattr(heal, "_recover_database", lambda: None)
+
+    result = asyncio.run(heal.run_once())
+    assert result["ok"] is True
+
+    assert fake.prefs["trading_fleet"]["fleet_health_ok"][""] == 1.0
+    assert fake.prefs["trading_fleet"]["fleet_agents_alive"][""] == 40.0
+    assert fake.prefs["trading_fleet"]["fleet_agents_expected"][""] == 42.0
+
+    cf = fake.prefs["consecutive_failures"]
+    assert set(cf) == {f"service_restart_{lbl}" for lbl in SERVICE_LABELS.values()}
+    assert all(v == 1 for v in cf.values())
+
+
+def test_self_healing_supervision_catches_run_once_exception(monkeypatch, tmp_path):
+    """_run_supervised_once catches a run_once exception and keeps the loop alive."""
+    fake = FakeMemory()
+    monkeypatch.setattr("ops.self_healing.get_unified_memory", lambda: fake)
+    monkeypatch.setattr("ops.self_healing.HIVE_DIR", tmp_path)
+    heal = FleetSelfHealing()
+    monkeypatch.setattr(
+        heal,
+        "fetch_fleet_metrics",
+        lambda: (_ for _ in ()).throw(RuntimeError("metrics blew up")),
+    )
+
+    result = asyncio.run(heal._run_supervised_once())
+
+    assert result["ok"] is False
+    assert result["supervised"] is True
+    assert "metrics blew up" in result["error"]
+    assert heal._loop_failures == 1
+    assert heal._loop_healthy is False
+    assert "metrics blew up" in heal._loop_last_error
+
+
+def test_self_healing_supervision_resets_on_success(monkeypatch, tmp_path):
+    """A successful supervised cycle resets failure tracking to healthy."""
+    fake = FakeMemory()
+    monkeypatch.setattr("ops.self_healing.get_unified_memory", lambda: fake)
+    monkeypatch.setattr("ops.self_healing.HIVE_DIR", tmp_path)
+    heal = FleetSelfHealing()
+    heal._loop_failures = 3
+    heal._loop_last_error = "old error"
+    heal._loop_healthy = False
+
+    monkeypatch.setattr(
+        heal, "fetch_fleet_metrics", lambda: {"provider_pools": {}, "jev": {"error_rate": 1.0}}
+    )
+    monkeypatch.setattr(heal, "fetch_trading_fleet_metrics", lambda: {})
+    for check in (
+        "check_stuck_tasks",
+        "check_pool_saturation",
+        "check_provider_pool_scaling",
+        "check_error_rates",
+        "check_service_health",
+        "check_trading_fleet_health",
+        "check_trading_metrics_health",
+        "check_infrastructure",
+        "check_predictive_prehealing",
+    ):
+        monkeypatch.setattr(heal, check, lambda m: [])
+
+    result = asyncio.run(heal._run_supervised_once())
+
+    assert result["ok"] is True
+    assert heal._loop_failures == 0
+    assert heal._loop_last_error is None
+    assert heal._loop_healthy is True
+
+
+def test_self_healing_persists_loop_liveness_across_restart(monkeypatch, tmp_path):
+    """run_once persists self_healing loop liveness state to memory preferences."""
+    fake = FakeMemory()
+    monkeypatch.setattr("ops.self_healing.get_unified_memory", lambda: fake)
+    monkeypatch.setattr("ops.self_healing.HIVE_DIR", tmp_path)
+    heal = FleetSelfHealing()
+    monkeypatch.setattr(
+        heal, "fetch_fleet_metrics", lambda: {"provider_pools": {}, "jev": {"error_rate": 1.0}}
+    )
+    monkeypatch.setattr(heal, "fetch_trading_fleet_metrics", lambda: {})
+    for check in (
+        "check_stuck_tasks",
+        "check_pool_saturation",
+        "check_provider_pool_scaling",
+        "check_error_rates",
+        "check_service_health",
+        "check_trading_fleet_health",
+        "check_trading_metrics_health",
+        "check_infrastructure",
+        "check_predictive_prehealing",
+    ):
+        monkeypatch.setattr(heal, check, lambda m: [])
+
+    # Simulate a degraded supervision state, then run a cycle to persist it.
+    heal._loop_failures = 2
+    heal._loop_last_error = "kaboom"
+    heal._loop_healthy = False
+
+    result = asyncio.run(heal.run_once())
+    assert result["ok"] is True
+
+    assert fake.prefs["self_healing_loop_failures"] == 2
+    assert fake.prefs["self_healing_loop_last_error"] == "kaboom"
+    assert fake.prefs["self_healing_loop_healthy"] is False
+
+
+def test_escalation_alert_sent_only_when_escalated(monkeypatch):
+    """_send_healing_alert fires only for escalated (>= threshold) failures."""
+    fake = FakeMemory()
+    monkeypatch.setattr("ops.self_healing.get_unified_memory", lambda: fake)
+    heal = FleetSelfHealing({"delivery_channels": ["telegram", "web", "memory"]})
+
+    telegram_sent: list = []
+
+    async def fake_telegram(alert):
+        telegram_sent.append(alert)
+
+    monkeypatch.setattr(heal, "_send_telegram_healing_alert", fake_telegram)
+
+    key = "service_restart_com.aryan.dost-monitor"
+    action = HealingAction(
+        id="heal-1",
+        action_type="service_restart",
+        target="com.aryan.dost-monitor",
+        reason="kickstart failed",
+        timestamp="2026-01-01T00:00:00Z",
+        success=False,
+        details={"error": "boom"},
+    )
+
+    # Two failures: below the escalation threshold of 3 -> not sent.
+    heal._record_action_outcome(key, False)
+    heal._record_action_outcome(key, False)
+    alert = heal._record_remediation_failure_alert(action)
+    assert alert["escalated"] is False
+    asyncio.run(heal._send_healing_alert(alert))
+    assert telegram_sent == []
+
+    # Third failure reaches the threshold: escalated -> sent via Telegram.
+    heal._record_action_outcome(key, False)
+    alert = heal._record_remediation_failure_alert(action)
+    assert alert["escalated"] is True
+    asyncio.run(heal._send_healing_alert(alert))
+    assert len(telegram_sent) == 1
+    assert telegram_sent[0]["escalated"] is True
+    assert telegram_sent[0]["consecutive_failures"] == 3
+
