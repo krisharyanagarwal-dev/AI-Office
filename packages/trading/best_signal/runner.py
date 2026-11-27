@@ -12,7 +12,7 @@ import json
 import logging
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -100,6 +100,25 @@ class BotConfig:
     fill_journal_enabled: bool = True
 
 
+@dataclass(frozen=True)
+class ExecutionSummary:
+    """Aggregated execution summary for a bot run."""
+
+    period: str
+    start_ts: int
+    end_ts: int
+    total_fills: int
+    total_volume: float
+    avg_slippage_bps: float
+    slippage_p50_bps: float
+    slippage_p95_bps: float
+    avg_latency_ms: float
+    partial_fill_rate: float
+    total_fees: float
+    fees_vs_slippage_bps: float
+    by_symbol: dict[str, dict]
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -126,6 +145,138 @@ def _write_json(path: Path, payload) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, indent=2) + "\n")
     os.replace(temporary, path)
+
+
+def _percentile(values: list[float], p: float) -> float:
+    """Compute the p-th percentile (0-100) of a list of values."""
+    if not values:
+        return 0.0
+    sorted_values = sorted(values)
+    k = (len(sorted_values) - 1) * (p / 100.0)
+    f = int(k)
+    c = min(f + 1, len(sorted_values) - 1)
+    if f == c:
+        return sorted_values[f]
+    return sorted_values[f] + (k - f) * (sorted_values[c] - sorted_values[f])
+
+
+def _compute_execution_summary(
+    fill_journal_path: Path,
+    telemetry_path: Path,
+    start_ts: int,
+    end_ts: int,
+) -> ExecutionSummary:
+    """Read fills.jsonl and telemetry.jsonl, compute aggregates and percentiles."""
+    from best_signal.fill_journal import FillRecord
+    from best_signal.telemetry import CycleMetrics
+    
+    fills = []
+    if fill_journal_path.exists():
+        with fill_journal_path.open("r") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    fills.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+    
+    cycles = []
+    if telemetry_path.exists():
+        with telemetry_path.open("r") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    cycles.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+    
+    if not fills and not cycles:
+        # No data, return empty summary
+        return ExecutionSummary(
+            period=f"{datetime.fromtimestamp(start_ts/1000, tz=timezone.utc).isoformat()}/"
+                   f"{datetime.fromtimestamp(end_ts/1000, tz=timezone.utc).isoformat()}",
+            start_ts=start_ts,
+            end_ts=end_ts,
+            total_fills=0,
+            total_volume=0.0,
+            avg_slippage_bps=0.0,
+            slippage_p50_bps=0.0,
+            slippage_p95_bps=0.0,
+            avg_latency_ms=0.0,
+            partial_fill_rate=0.0,
+            total_fees=0.0,
+            fees_vs_slippage_bps=0.0,
+            by_symbol={},
+        )
+    
+    # Aggregate from fills
+    slippages = [f.get("slippage_bps", 0.0) for f in fills]
+    latencies = [f.get("latency_ms", 0.0) for f in fills]
+    venue_latencies = [f.get("venue_latency_ms", 0.0) for f in fills]
+    partial_fills = [f for f in fills if f.get("partial_fill", False)]
+    fees = [f.get("fees", 0.0) for f in fills]
+    volumes = [f.get("quantity", 0.0) * f.get("price", 0.0) for f in fills]
+    
+    # By-symbol breakdown
+    by_symbol = {}
+    for symbol in set(f.get("symbol", "") for f in fills):
+        symbol_fills = [f for f in fills if f.get("symbol") == symbol]
+        symbol_slippages = [f.get("slippage_bps", 0.0) for f in symbol_fills]
+        symbol_fees = [f.get("fees", 0.0) for f in symbol_fills]
+        symbol_volumes = [f.get("quantity", 0.0) * f.get("price", 0.0) for f in symbol_fills]
+        symbol_partials = [f for f in symbol_fills if f.get("partial_fill", False)]
+        symbol_latencies = [f.get("latency_ms", 0.0) for f in symbol_fills]
+        symbol_venue_latencies = [f.get("venue_latency_ms", 0.0) for f in symbol_fills]
+        
+        by_symbol[symbol] = {
+            "fills": len(symbol_fills),
+            "volume": sum(symbol_volumes),
+            "avg_slippage_bps": sum(symbol_slippages) / len(symbol_slippages) if symbol_slippages else 0.0,
+            "slippage_p50_bps": _percentile(symbol_slippages, 50) if symbol_slippages else 0.0,
+            "slippage_p95_bps": _percentile(symbol_slippages, 95) if symbol_slippages else 0.0,
+            "avg_latency_ms": sum(symbol_latencies) / len(symbol_latencies) if symbol_latencies else 0.0,
+            "avg_venue_latency_ms": sum(symbol_venue_latencies) / len(symbol_venue_latencies) if symbol_venue_latencies else 0.0,
+            "partial_fill_rate": len(symbol_partials) / len(symbol_fills) if symbol_fills else 0.0,
+            "total_fees": sum(symbol_fees),
+        }
+    
+    total_fills = len(fills)
+    total_volume = sum(volumes)
+    avg_slippage_bps = sum(slippages) / len(slippages) if slippages else 0.0
+    slippage_p50_bps = _percentile(slippages, 50) if slippages else 0.0
+    slippage_p95_bps = _percentile(slippages, 95) if slippages else 0.0
+    # Use venue_latency_ms if available, otherwise latency_ms
+    all_latencies = [v for v in venue_latencies if v > 0] or latencies
+    avg_latency_ms = sum(all_latencies) / len(all_latencies) if all_latencies else 0.0
+    partial_fill_rate = len(partial_fills) / total_fills if total_fills > 0 else 0.0
+    total_fees = sum(fees)
+    
+    # fees_vs_slippage_bps: fees as bps of total volume
+    fees_vs_slippage_bps = (total_fees / total_volume * 10000) if total_volume > 0 else 0.0
+    
+    period_start = datetime.fromtimestamp(start_ts / 1000, tz=timezone.utc).isoformat()
+    period_end = datetime.fromtimestamp(end_ts / 1000, tz=timezone.utc).isoformat()
+    period = f"{period_start}/{period_end}"
+    
+    return ExecutionSummary(
+        period=period,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        total_fills=total_fills,
+        total_volume=total_volume,
+        avg_slippage_bps=avg_slippage_bps,
+        slippage_p50_bps=slippage_p50_bps,
+        slippage_p95_bps=slippage_p95_bps,
+        avg_latency_ms=avg_latency_ms,
+        partial_fill_rate=partial_fill_rate,
+        total_fees=total_fees,
+        fees_vs_slippage_bps=fees_vs_slippage_bps,
+        by_symbol=by_symbol,
+    )
 
 
 def _symbol_summary(symbol: str, prints: list[FundingPrint]) -> dict:
@@ -232,6 +383,7 @@ def _apply_position(working: dict, symbol: str, position, filled: bool = True) -
 
 def run_bot(config: BotConfig) -> dict:
     """Run the bot end to end in paper mode and write every artifact."""
+    start_ts = _now_ms()
     records = default_registry()
     selected = select_tradable(records)
 
@@ -531,6 +683,17 @@ def run_bot(config: BotConfig) -> dict:
             "symbols": working,
         },
     )
+
+    # Write execution summary
+    end_ts = _now_ms()
+    summary = _compute_execution_summary(
+        out_dir / "best_signal_fills.jsonl",
+        out_dir / TELEMETRY_FILENAME,
+        start_ts,
+        end_ts,
+    )
+    summary_path = out_dir / "execution_summary.json"
+    _write_json(summary_path, asdict(summary))
 
     return {
         "report": report,

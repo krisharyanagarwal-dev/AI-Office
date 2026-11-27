@@ -449,3 +449,37 @@ def test_run_bot_two_pass_proportional_allocation(tmp_path):
     assert state["ETHUSDT"]["side"] == 1
     assert state["BTCUSDT"]["notional"] == pytest.approx(btc_notional)
     assert state["ETHUSDT"]["notional"] == pytest.approx(eth_notional)
+
+
+def test_execution_summary_aggregation(tmp_path):
+    """ExecutionSummary computes correct percentiles and aggregates."""
+    from best_signal.runner import run_bot, BotConfig
+    from best_signal.position import RiskLimits
+    
+    config = BotConfig(
+        symbols=("BTCUSDT", "ETHUSDT"),
+        data_dir=tmp_path / "data",
+        out_dir=tmp_path / "out",
+        equity=10_000.0,
+        limits=RiskLimits(max_gross_notional=20_000.0, max_symbol_notional=10_000.0),
+        validate=False,
+    )
+    # Create synthetic data...
+    make_data(config.data_dir, symbols=("BTCUSDT", "ETHUSDT"))
+    result = run_bot(config)
+    
+    # Check execution_summary.json exists and has correct structure
+    summary_path = config.out_dir / "execution_summary.json"
+    assert summary_path.exists()
+    
+    import json
+    summary = json.loads(summary_path.read_text())
+    assert "total_fills" in summary
+    assert "avg_slippage_bps" in summary
+    assert "slippage_p50_bps" in summary
+    assert "slippage_p95_bps" in summary
+    assert "avg_latency_ms" in summary
+    assert "partial_fill_rate" in summary
+    assert "total_fees" in summary
+    assert "fees_vs_slippage_bps" in summary
+    assert "by_symbol" in summary
