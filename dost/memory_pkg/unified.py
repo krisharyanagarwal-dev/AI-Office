@@ -474,6 +474,66 @@ class UnifiedMemory:
         scored.sort(key=lambda x: x[0], reverse=True)
         return [f for _, f in scored[:limit]]
 
+    # ----------------------- Saved work results -----------------------
+    # Results of delegated work (fleet/broadcast answers). Stored as facts with
+    # a fixed type so they can be recalled from any conversation, unlike
+    # ordinary facts, which are scoped to the conversation that produced them.
+    WORK_RESULT_TYPE = "work_result"
+
+    def add_work_result(
+        self, content: str, source: str, conversation_id: str, metadata: dict | None = None
+    ) -> Fact:
+        """Save one finished piece of work so future conversations can recall it."""
+        fact = Fact(
+            id=f"fact-{uuid.uuid4().hex[:8]}",
+            type=self.WORK_RESULT_TYPE,
+            content=content,
+            confidence=1.0,
+            source=source,
+            conversation_id=conversation_id,
+            timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            metadata=metadata or {},
+        )
+        self._facts_cache.append(fact)
+        self.add_to_index(fact)
+        self._save_facts()
+        return fact
+
+    _WORK_STOPWORDS = frozenset({
+        "the", "and", "what", "did", "say", "said", "about", "that", "this",
+        "with", "from", "for", "have", "were", "was", "are", "you", "your",
+        "all", "any", "last", "they", "them", "their",
+    })
+
+    @classmethod
+    def _work_terms(cls, text: str) -> set[str]:
+        terms = set()
+        for word in re.findall(r"[a-z0-9]{3,}", text.lower()):
+            word = word.rstrip("s")  # crude plural folding: workers -> worker
+            if word not in cls._WORK_STOPWORDS:
+                terms.add(word)
+        return terms
+
+    def search_work_results(self, query: str, limit: int = 3) -> list[Fact]:
+        """Keyword search over saved work results from every conversation.
+
+        Keyword overlap rather than the vector index: the current embedding is
+        a placeholder hash, so vector similarity is not meaningful for recall.
+        Ties go to the most recent result.
+        """
+        query_terms = self._work_terms(query)
+        if not query_terms:
+            return []
+        scored = []
+        for fact in self._facts_cache:
+            if fact.type != self.WORK_RESULT_TYPE:
+                continue
+            overlap = len(query_terms & self._work_terms(fact.content))
+            if overlap:
+                scored.append((overlap, fact.timestamp, fact))
+        scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return [fact for _, _, fact in scored[:limit]]
+
     # ----------------------- Preferences -----------------------
 
     def _load_preferences(self) -> dict:
@@ -560,13 +620,21 @@ class UnifiedMemory:
         context = self.get_all_context(conversation_id, limit=limit)
         session = self._sessions.get(conversation_id) or self.load_session(conversation_id)
 
-        if not session or not session.messages:
+        # Saved work results (e.g. worker answers from a broadcast) are recalled
+        # across ALL conversations, so they are looked up before the early exit.
+        work_results = self.search_work_results(current_query, limit=3)
+        if (not session or not session.messages) and not work_results:
             return current_query
 
         parts = []
 
+        # 0. Saved work from past tasks (any conversation)
+        if work_results:
+            work_lines = [f"- {f.content} (saved {f.timestamp})" for f in work_results]
+            parts.append("=== Saved Work Results ===\n" + "\n".join(work_lines) + "\n")
+
         # 1. Conversation summary
-        if session.summary:
+        if session and session.summary:
             parts.append(f"=== Conversation Summary ===\n{session.summary}\n")
 
         # 2. Relevant facts

@@ -190,6 +190,7 @@ The user said: "{task}"
 Decide how to respond:
 - If they're asking to run a research pipeline command (report/register/gate/holdout/calibrate/all/web_search), reply with ONLY: COMMAND:<command_name>
 - If they want analysis delegated to the company fleet, reply with ONLY: FLEET:<prompt>
+- If they want the same prompt sent to every worker at once, reply with ONLY: BROADCAST:<prompt>
 - If they want a multi-step plan executed through web search and the fleet, reply with ONLY: ORCHESTRATE:<goal>
 - Otherwise, write a warm, natural response in your own voice. Ground any numbers in the CONTEXT above. Be honest about failures — don't hide them. Don't expose internal IDs, provider names, model names, task IDs, or technical plumbing. Sound like a capable friend who knows about trading research.
 """
@@ -205,6 +206,15 @@ Here's the raw output:
 {output}
 
 Narrate this in your warm, honest voice. Ground every number in the data. Don't hallucinate. If the command failed or found nothing, say so plainly. Don't expose internal IDs, provider names, model names, task IDs, or technical plumbing.
+"""
+
+
+SELECT_WORKERS_SYSTEM = """You choose which workers of a trading-research company should receive one broadcast prompt.
+
+Available worker ids:
+{roster}
+
+Pick only the workers whose role is relevant to the user's request. Reply with ONLY a JSON array of worker ids from the list above, for example: ["alpha-analyst", "beta-trader"]. No prose.
 """
 
 
@@ -425,6 +435,26 @@ def dost_respond(
             log(f"Conversation memory update failed: {type(exc).__name__}")
         return f"{dost_greeting()}\n\n{response}"
 
+    # A previous turn proposed a broadcast and is waiting for confirmation.
+    pending = _PENDING_BROADCASTS.pop(conversation_id, None)
+    if pending:
+        verdict = _classify_broadcast_reply(task)
+        if verdict == "confirm":
+            result = dispatch_broadcast_to_fleet(pending["prompt"], agents=pending["workers"])
+            if result.get("broadcast_id") and result.get("dispatched"):
+                response = (
+                    f"Sent to {result['dispatched']} of {result['total']} workers "
+                    f"(broadcast {result['broadcast_id']})."
+                    + (f" Failed: {', '.join(sorted(result['errors']))}." if result.get("errors") else "")
+                    + " Ask for its status any time to collect the answers."
+                )
+            else:
+                response = f"Broadcast failed: {result.get('error', 'no workers reached')}"
+            MEMORY.add_interaction(task, "fleet", f"Confirmed broadcast to {result.get('total', 0)} workers")
+            return finish(response)
+        if verdict == "reject":
+            return finish("Okay — I won't send that broadcast.")
+
     # Claude-like tool-use loop: decide -> act -> re-decide -> ... -> final answer.
     # The LLM picks a tool (research command, fleet dispatch, or orchestrate) or a
     # natural reply; after each tool run the result is fed back so the LLM can
@@ -477,6 +507,17 @@ def dost_respond(
             MEMORY.add_interaction(task, "fleet", f"Dispatched fleet prompt: {prompt[:80]}")
             step += 1
             label = f"fleet: {prompt[:60]}"
+        elif decision.startswith("BROADCAST:"):
+            prompt = decision[len("BROADCAST:"):].strip()
+            workers = select_broadcast_workers(prompt, fleet_roster())
+            if not workers:
+                return finish("I couldn't find any fleet workers to broadcast to.")
+            _PENDING_BROADCASTS[conversation_id] = {"prompt": prompt, "workers": workers}
+            MEMORY.add_interaction(task, "fleet", f"Proposed broadcast to {len(workers)} workers: {prompt[:80]}")
+            return finish(
+                f"I'd send this broadcast to {len(workers)} worker(s): {', '.join(workers)}.\n\n"
+                "Shall I send it now? Reply 'yes' to send, or tell me which workers to use instead."
+            )
         elif decision.startswith("ORCHESTRATE:"):
             goal = decision[len("ORCHESTRATE:"):].strip()
             output = orchestrate(goal, conversation_id=conversation_id, interface=interface)
@@ -1365,6 +1406,7 @@ def dispatch_prompt_to_fleet(
     chain: dict | None = None,
     workspace_id: str | None = None,
     debug: bool = False,
+    extra_metadata: dict | None = None,
 ) -> dict:
     """Submit a prompt to the fleet orchestrator by writing a task file.
 
@@ -1409,6 +1451,8 @@ def dispatch_prompt_to_fleet(
         "result": None,
         "error": None,
     }
+    if extra_metadata:
+        task["metadata"].update(extra_metadata)
     if parent_task_id:
         task["metadata"]["parent_task_id"] = parent_task_id
         task["title"] = f"Follow-up to {parent_task_id[:8]}: {prompt[:50]}"
@@ -1451,6 +1495,266 @@ def dispatch_prompt_to_fleet(
         if debug:
             print(f"[debug] failed to write task file: {e}")
         return {"ok": False, "error": str(e)}
+
+
+# --- Broadcast: one prompt to every worker, and remember what came back -----
+# A broadcast writes one fleet task per worker (all tagged with one
+# broadcast_id), saves a manifest under dost/broadcasts/, and records each
+# worker's finished answer into UnifiedMemory so later sessions can recall it.
+BROADCAST_DIR = DOST_DIR / "broadcasts"
+
+
+def fleet_roster() -> list[str]:
+    """Every worker agent id in office.json agent_tiers (sorted, unique)."""
+    return sorted(_agent_tiers().keys())
+
+
+def _extract_json_string_list(text: str) -> list | None:
+    """Parse a JSON array out of an LLM reply, tolerating prose or code fences."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        match = re.search(r"\[[^\]]*\]", text, re.DOTALL)
+        if not match:
+            return None
+        try:
+            data = json.loads(match.group(0))
+        except (json.JSONDecodeError, TypeError):
+            return None
+    return data if isinstance(data, list) else None
+
+
+def select_broadcast_workers(prompt: str, roster: list[str]) -> list[str]:
+    """Ask the LLM which roster workers are relevant to a broadcast prompt.
+
+    Every returned id is validated against the roster and deduped. Any LLM
+    failure, unparseable reply, or empty result falls back to the full roster
+    so a broadcast never silently targets nobody.
+    """
+    roster = list(dict.fromkeys(roster))
+    if not roster:
+        return []
+    try:
+        result = _chat(
+            [
+                {"role": "system", "content": SELECT_WORKERS_SYSTEM.format(roster=", ".join(roster))},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+            max_tokens=300,
+        )
+        text = result.get("text", "") if isinstance(result, dict) else ""
+        picked = _extract_json_string_list(text)
+    except Exception:
+        return roster
+    if not picked:
+        return roster
+    valid = list(dict.fromkeys(w for w in picked if isinstance(w, str) and w in roster))
+    return valid or roster
+
+
+# Conversation-scoped broadcast proposals awaiting a yes/no in a later message.
+_PENDING_BROADCASTS: dict[str, dict] = {}
+
+_CONFIRM_REPLIES = {
+    "yes", "y", "yeah", "yep", "confirm", "confirmed", "send", "send it",
+    "go", "go ahead", "do it", "approve", "approved", "ok", "okay", "sure", "proceed",
+}
+_REJECT_REPLIES = {"no", "n", "nope", "cancel", "stop", "abort", "don't", "dont", "won't", "wont"}
+
+
+def _classify_broadcast_reply(text: str) -> str | None:
+    """Return 'confirm', 'reject', or None for a reply to a pending proposal."""
+    normalized = (text or "").strip().lower().strip(" .!?,")
+    if normalized in _CONFIRM_REPLIES:
+        return "confirm"
+    if normalized in _REJECT_REPLIES:
+        return "reject"
+    words = [w.strip(" .!?,") for w in normalized.split()]
+    if words and len(words) <= 5:
+        if words[0] in _CONFIRM_REPLIES:
+            return "confirm"
+        if words[0] in _REJECT_REPLIES:
+            return "reject"
+    return None
+
+
+def _broadcast_manifest_path(broadcast_id: str) -> Path:
+    return BROADCAST_DIR / f"{broadcast_id}.json"
+
+
+def _write_broadcast_manifest(manifest: dict) -> None:
+    BROADCAST_DIR.mkdir(parents=True, exist_ok=True)
+    path = _broadcast_manifest_path(manifest["id"])
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(manifest, indent=2))
+    os.replace(tmp, path)
+
+
+def _fleet_result_text(task: dict) -> str:
+    result = task.get("result") or {}
+    if isinstance(result, dict):
+        return result.get("text") or result.get("preview") or ""
+    if isinstance(result, str):
+        return result
+    return ""
+
+
+def _remember_broadcast_turn(conversation_id: str, user_message: str, reply: str) -> None:
+    try:
+        get_unified_memory().record_turn(conversation_id, "fleet", user_message, reply)
+    except Exception as exc:
+        log(f"Broadcast memory write failed: {type(exc).__name__}")
+
+
+def _remember_work_result(broadcast_id: str, content: str, agent_id: str | None = None) -> None:
+    """Save a broadcast fact that any future conversation can recall."""
+    try:
+        get_unified_memory().add_work_result(
+            content=content,
+            source="fleet",
+            conversation_id=f"broadcast-{broadcast_id}",
+            metadata={"broadcast_id": broadcast_id, "agent_id": agent_id or ""},
+        )
+    except Exception as exc:
+        log(f"Work result memory write failed: {type(exc).__name__}")
+
+
+def dispatch_broadcast_to_fleet(
+    prompt: str,
+    agents: list[str] | None = None,
+    priority: str = "normal",
+    workspace_id: str | None = None,
+    dry_run: bool = False,
+) -> dict:
+    """Send one prompt to every worker (or the given subset) as separate fleet tasks.
+
+    Read-only data write: each task goes through dispatch_prompt_to_fleet, so
+    the same paper-only dispatcher path applies. Returns the broadcast id and
+    per-worker task ids; use broadcast_status() to collect answers.
+    """
+    if len(prompt) > MAX_DISPATCH_PROMPT_LEN:
+        return {
+            "ok": False,
+            "error": f"Prompt too long: {len(prompt)} characters (max {MAX_DISPATCH_PROMPT_LEN}).",
+        }
+    roster = list(dict.fromkeys(agents)) if agents else fleet_roster()
+    if not roster:
+        return {"ok": False, "error": "No workers found in office.json agent_tiers."}
+
+    import uuid
+
+    broadcast_id = f"bc-{uuid.uuid4().hex[:8]}"
+    task_ids: dict[str, str] = {}
+    errors: dict[str, str] = {}
+    for agent in roster:
+        res = dispatch_prompt_to_fleet(
+            prompt,
+            agent_id=agent,
+            priority=priority,
+            dry_run=dry_run,
+            workspace_id=workspace_id,
+            extra_metadata={"broadcast_id": broadcast_id},
+        )
+        if res.get("ok"):
+            task_ids[agent] = res["task_id"]
+        else:
+            errors[agent] = res.get("error", "unknown error")
+
+    if not dry_run:
+        manifest = {
+            "id": broadcast_id,
+            "prompt": prompt,
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "workers": roster,
+            "task_ids": task_ids,
+            "errors": errors,
+            "recorded": [],
+        }
+        try:
+            _write_broadcast_manifest(manifest)
+        except OSError as exc:
+            log(f"Broadcast manifest write failed: {type(exc).__name__}")
+        _remember_broadcast_turn(
+            f"broadcast-{broadcast_id}",
+            f"[Broadcast {broadcast_id} to {len(roster)} workers] {prompt}",
+            f"Dispatched to {len(task_ids)} of {len(roster)} workers."
+            + (f" Failed: {', '.join(sorted(errors))}." if errors else ""),
+        )
+        _remember_work_result(
+            broadcast_id,
+            f"Broadcast {broadcast_id} sent \"{prompt[:200]}\" to {len(task_ids)} of {len(roster)} workers.",
+        )
+
+    return {
+        "ok": not errors,
+        "broadcast_id": broadcast_id,
+        "dispatched": len(task_ids),
+        "total": len(roster),
+        "errors": errors,
+        "dry_run": dry_run,
+        "task_ids": task_ids,
+    }
+
+
+def broadcast_status(broadcast_id: str) -> dict:
+    """Report per-worker state for a broadcast, and record new finished answers to memory.
+
+    A worker is recorded once: its answer (or error) goes to UnifiedMemory the
+    first time it is seen as done/error, and the manifest notes it so repeat
+    status checks do not duplicate memory entries.
+    """
+    try:
+        manifest = json.loads(_broadcast_manifest_path(broadcast_id).read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"ok": False, "error": f"No broadcast named {broadcast_id}."}
+
+    recorded = set(manifest.get("recorded", []))
+    prompt = manifest.get("prompt", "")
+    conversation_id = f"broadcast-{broadcast_id}"
+    counts = {"done": 0, "error": 0, "pending": 0, "missing": 0}
+    workers: dict[str, dict] = {}
+    newly_recorded: list[str] = []
+
+    for agent, task_id in manifest.get("task_ids", {}).items():
+        task = _read_orchestrate_task(task_id)
+        status = task.get("status", "pending") if task else "missing"
+        bucket = status if status in ("done", "error") else ("missing" if status == "missing" else "pending")
+        counts[bucket] += 1
+        workers[agent] = {"task_id": task_id, "status": status}
+
+        if bucket in ("done", "error") and agent not in recorded:
+            if bucket == "done":
+                answer = _fleet_result_text(task) or "(no result text)"
+            else:
+                answer = f"Error: {task.get('error', 'unknown error')}"
+            _remember_broadcast_turn(conversation_id, f"[{agent}] {prompt}", answer[:4000])
+            _remember_work_result(
+                broadcast_id,
+                f"Worker {agent} answered broadcast question \"{prompt[:200]}\": {answer[:800]}",
+                agent_id=agent,
+            )
+            recorded.add(agent)
+            newly_recorded.append(agent)
+
+    if newly_recorded:
+        manifest["recorded"] = sorted(recorded)
+        try:
+            _write_broadcast_manifest(manifest)
+        except OSError as exc:
+            log(f"Broadcast manifest update failed: {type(exc).__name__}")
+
+    return {
+        "ok": True,
+        "broadcast_id": broadcast_id,
+        "prompt": prompt,
+        "counts": counts,
+        "workers": workers,
+        "newly_recorded": newly_recorded,
+    }
 
 
 DEBATE_SYNTHESIS_SYSTEM = """You are the dost from THE CLAUDE COMPANY synthesizing a fleet debate.
@@ -2946,6 +3250,18 @@ def main():
                         help="Search dost task history by keyword (optional search term)")
     parser.add_argument("--dispatch", nargs="?", const="",
                         help="Submit a prompt to the fleet orchestrator (optional prompt text)")
+    parser.add_argument("--broadcast", nargs="?", const="",
+                        help="Send one prompt to every fleet worker and remember the answers")
+    parser.add_argument("--agents",
+                        help="Comma-separated worker ids to narrow --broadcast (default: all workers)")
+    parser.add_argument("--pick", action="store_true",
+                        help="With --broadcast: let the bot propose relevant workers; writes nothing unless --confirm")
+    parser.add_argument("--confirm", action="store_true",
+                        help="With --broadcast: actually send (after --pick, or to all workers)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="With --broadcast: show what would be sent, write nothing")
+    parser.add_argument("--broadcast-status", metavar="BROADCAST_ID",
+                        help="Show per-worker state for a broadcast; records new answers to memory")
     parser.add_argument("--debate", nargs="?", const="",
                         help="Debate mode: fan a question to multiple pro agents and synthesize")
     parser.add_argument("--orchestrate", nargs="?", const="",
@@ -3034,6 +3350,37 @@ def main():
             workspace_id=workspace_id,
         )
         print(json.dumps(result, indent=2))
+    elif args.broadcast is not None:
+        prompt = args.broadcast if args.broadcast else input("Prompt to broadcast to all workers: ")
+        explicit_agents = [a.strip() for a in args.agents.split(",") if a.strip()] if args.agents else None
+        if args.pick:
+            proposed = explicit_agents or select_broadcast_workers(prompt, fleet_roster())
+            if not args.confirm:
+                print(json.dumps({
+                    "ok": True,
+                    "prompt": prompt,
+                    "proposed_workers": proposed,
+                    "requires_confirmation": True,
+                    "message": (
+                        f"Proposed broadcast to {len(proposed)} worker(s): {', '.join(proposed)}. "
+                        "Re-run with --confirm to send."
+                    ),
+                }, indent=2))
+                return
+            agents = proposed
+        else:
+            agents = explicit_agents
+        workspace_id = args.workspace or ensure_default_workspace()
+        result = dispatch_broadcast_to_fleet(
+            prompt,
+            agents=agents,
+            priority=args.priority or "normal",
+            workspace_id=workspace_id,
+            dry_run=args.dry_run,
+        )
+        print(json.dumps(result, indent=2))
+    elif args.broadcast_status is not None:
+        print(json.dumps(broadcast_status(args.broadcast_status), indent=2))
     elif args.debate is not None:
         prompt = args.debate if args.debate else input("Debate question: ")
         result = dispatch_debate_to_fleet(prompt)
