@@ -64,6 +64,7 @@ SCREENER_MANIP_CONFIG = {
 # Screener artifacts watched for manipulation signals and pipeline health.
 SCREENER_ARTIFACT_GLOBS = [
     "all_stocks_summary_*.csv",
+    "screener_ev_*.csv",
     "*screener*checkpoint*.json",
     "*screener*results*.json",
 ]
