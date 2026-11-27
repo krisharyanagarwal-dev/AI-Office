@@ -51,6 +51,13 @@ except ImportError:  # skill not shipped -> degrade gracefully, no news scoring
     def get_news_sentiment(symbol: str) -> dict[str, Any]:  # type: ignore[misc]
         return {"symbol": symbol, "score": 0.0, "signal": "neutral", "reason": "skill unavailable", "sources": 0}
 
+try:
+    from skills.social_sentiment import get_social_sentiment
+except ImportError:  # skill not shipped -> degrade gracefully, no social scoring
+
+    def get_social_sentiment(symbol: str) -> dict[str, Any]:  # type: ignore[misc]
+        return {"symbol": symbol, "score": 0.0, "signal": "neutral", "reason": "skill unavailable", "sources": 0}
+
 
 SCREENER_MANIP_CONFIG = {
     "enabled": True,
@@ -63,6 +70,8 @@ SCREENER_MANIP_CONFIG = {
         "ev_new_age_boost_pct": 10,        # points added when EV/new-age criteria confirm symbol
         "news_sentiment_enabled": False,   # controlled rollout gate; flip to True to enable news sentiment boost
         "news_sentiment_boost_pct": 5,     # points added when news sentiment is negative
+        "social_sentiment_enabled": False, # controlled rollout gate; flip to True to enable social sentiment boost
+        "social_sentiment_boost_pct": 5,   # points added when social sentiment is negative
         "stuck_scan_minutes": 180,         # screener artifact freshness threshold
         "min_stocks_screened": 10,         # universe must have at least N stocks
     },
@@ -93,6 +102,8 @@ class ManipSignal:
     ev_new_age: bool = False
     news_sentiment_score: Optional[float] = None
     news_sentiment: str = "neutral"
+    social_sentiment_score: Optional[float] = None
+    social_sentiment: str = "neutral"
 
 
 @dataclass
@@ -235,6 +246,13 @@ class ScreenerManipWatch:
         ):
             score += float(self.config["thresholds"].get("news_sentiment_boost_pct", 5))
 
+        social = row.get("social_sentiment") or {}
+        if (
+            self.config["thresholds"].get("social_sentiment_enabled", False)
+            and social.get("signal") == "negative"
+        ):
+            score += float(self.config["thresholds"].get("social_sentiment_boost_pct", 5))
+
         return min(score, 100.0)
 
     def _signals(self, rows: list[dict[str, Any]], source: str) -> list[ManipSignal]:
@@ -260,6 +278,9 @@ class ScreenerManipWatch:
             news = row.get("news_sentiment") or {}
             if news.get("signal") == "negative":
                 reasons.append("negative news sentiment")
+            social = row.get("social_sentiment") or {}
+            if social.get("signal") == "negative":
+                reasons.append("negative social sentiment")
             signals.append(
                 ManipSignal(
                     symbol=symbol,
@@ -270,6 +291,8 @@ class ScreenerManipWatch:
                     ev_new_age=bool(row.get("ev_new_age")),
                     news_sentiment_score=self._to_float(news.get("score")),
                     news_sentiment=str(news.get("signal", "neutral")),
+                    social_sentiment_score=self._to_float(social.get("score")),
+                    social_sentiment=str(social.get("signal", "neutral")),
                 )
             )
         signals.sort(key=lambda s: s.score, reverse=True)
