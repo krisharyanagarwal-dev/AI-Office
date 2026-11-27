@@ -188,6 +188,125 @@ def test_to_float_rejects_junk(monkeypatch):
     assert watch._to_float("12.5") == 12.5
 
 
+def _ev_boost_row(symbol: str) -> dict:
+    """Row scoring 75 (Extreme leverage + Parabolic), below the 80 threshold."""
+    return {
+        "symbol": symbol,
+        "leverage_flag": "Extreme",
+        "momentum_flag": "Parabolic",
+        "pct_from_52w_high": "-20",
+        "pe_ttm": "18",
+        "debt_to_equity": "40",
+        "current_ratio": "2.0",
+    }
+
+
+# ----------------------- EV/new-age score booster -----------------------
+
+def test_ev_new_age_boost_adds_ten_points(monkeypatch):
+    watch, _, _ = _make_watch(monkeypatch, config={"thresholds": {"ev_new_age_enabled": True}})
+    assert watch._manipulation_score(_ev_boost_row("EVBOOST")) == 75.0
+    boosted = dict(_ev_boost_row("EVBOOST"), ev_new_age=True)
+    assert watch._manipulation_score(boosted) == 85.0
+
+
+def test_ev_new_age_boost_off_by_default(monkeypatch):
+    """Controlled rollout: EV boost is opt-in and defaults to off."""
+    watch, _, _ = _make_watch(monkeypatch)
+    assert watch.config["thresholds"]["ev_new_age_enabled"] is False
+    assert watch._manipulation_score(dict(_ev_boost_row("GATED"), ev_new_age=True)) == 75.0
+
+
+def test_ev_new_age_boost_caps_at_100(monkeypatch):
+    watch, _, _ = _make_watch(monkeypatch, config={"thresholds": {"ev_new_age_enabled": True}})
+    assert watch._manipulation_score(dict(_signal_row("CAP"), ev_new_age=True)) == 100.0
+
+
+def test_ev_new_age_absent_means_no_boost(monkeypatch):
+    watch, _, _ = _make_watch(monkeypatch)
+    assert watch._manipulation_score(_ev_boost_row("PLAIN")) == 75.0
+
+
+def test_signals_include_ev_fields(monkeypatch):
+    watch, _, _ = _make_watch(monkeypatch, config={"thresholds": {"ev_new_age_enabled": True}})
+    row = dict(_ev_boost_row("EVSIG"), ev_new_age=True, ev_new_age_score=88.0)
+    signals = watch._signals([row], "test.csv")
+    assert len(signals) == 1
+    assert signals[0].ev_new_age is True
+    assert signals[0].ev_new_age_score == 88.0
+    assert "ev/new-age" in signals[0].reason
+
+
+def test_ev_new_age_boost_pushes_row_into_signals(monkeypatch):
+    watch, _, _ = _make_watch(monkeypatch, config={"thresholds": {"ev_new_age_enabled": True}})
+    assert watch._signals([_ev_boost_row("NOEV")], "test.csv") == []
+    assert len(watch._signals([dict(_ev_boost_row("EVSIG"), ev_new_age=True)], "test.csv")) == 1
+
+
+def test_run_once_enriches_rows_from_ev_skill(monkeypatch, tmp_path):
+    def fake_criteria(symbol: str) -> Optional[dict[str, Any]]:
+        if symbol == "EVSTOCK":
+            return {
+                "symbol": "EVSTOCK",
+                "ev_new_age_score": 82.0,
+                "ev_new_age": True,
+                "sector": "Technology",
+            }
+        return None
+
+    monkeypatch.setattr("ops.screener_manip_watch.get_ev_criteria", fake_criteria)
+    rows = [_ev_boost_row("EVSTOCK")]
+    path = tmp_path / "all_stocks_summary_today.csv"
+    _write_csv(path, rows)
+    watch, mem, heal = _make_watch(monkeypatch, config={"thresholds": {"ev_new_age_enabled": True}})
+    monkeypatch.setattr(watch, "_artifact_paths", lambda: [path])
+
+    result = asyncio.run(watch.run_once())
+
+    assert result["ok"] is True
+    assert len(result["signals"]) == 1
+    sig = result["signals"][0]
+    assert sig["symbol"] == "EVSTOCK"
+    assert sig["score"] == 85.0
+    assert sig["ev_new_age"] is True
+    assert sig["ev_new_age_score"] == 82.0
+    pref = mem.get_preference("screener_manip_watch")
+    assert pref["signals"][0]["ev_new_age"] is True
+    assert pref["signals"][0]["ev_new_age_score"] == 82.0
+    assert pref["ev_new_age_signals"] == 1
+
+
+def test_run_once_ev_skill_failure_degrades_gracefully(monkeypatch, tmp_path):
+    def boom(symbol: str) -> Optional[dict[str, Any]]:
+        raise RuntimeError("skill down")
+
+    monkeypatch.setattr("ops.screener_manip_watch.get_ev_criteria", boom)
+    rows = [_ev_boost_row("DOWN")]
+    path = tmp_path / "all_stocks_summary_today.csv"
+    _write_csv(path, rows)
+    watch, _, _ = _make_watch(monkeypatch, config={"thresholds": {"ev_new_age_enabled": True}})
+    monkeypatch.setattr(watch, "_artifact_paths", lambda: [path])
+
+    result = asyncio.run(watch.run_once())
+
+    assert result["ok"] is True
+    assert result["signals"] == []  # 75, no boost -> below threshold
+
+
+def test_run_once_ev_skill_returns_none_degrades_gracefully(monkeypatch, tmp_path):
+    monkeypatch.setattr("ops.screener_manip_watch.get_ev_criteria", lambda symbol: None)
+    rows = [_ev_boost_row("NONE")]
+    path = tmp_path / "all_stocks_summary_today.csv"
+    _write_csv(path, rows)
+    watch, _, _ = _make_watch(monkeypatch)
+    monkeypatch.setattr(watch, "_artifact_paths", lambda: [path])
+
+    result = asyncio.run(watch.run_once())
+
+    assert result["ok"] is True
+    assert result["signals"] == []
+
+
 def test_signals_filters_by_threshold_and_sorts_desc(monkeypatch):
     watch, _, _ = _make_watch(monkeypatch)
     rows = [_clean_row("AAA"), _signal_row("BBB"), _clean_row("CCC")]

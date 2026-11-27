@@ -36,15 +36,26 @@ from memory_pkg.unified import get_unified_memory
 
 from ops.self_healing import FleetSelfHealing, HealingAction
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills"))  # dost/skills
+try:
+    from screener_ev_integration import get_ev_criteria
+except ImportError:  # skill not shipped -> degrade gracefully, no EV scoring
+
+    def get_ev_criteria(symbol: str) -> Optional[dict[str, Any]]:  # type: ignore[misc]
+        return None
+
+
 SCREENER_MANIP_CONFIG = {
     "enabled": True,
     "check_interval_sec": 300,
     "thresholds": {
-        "manipulation_score_pct": 80,    # composite manipulation risk score per stock
-        "manipulation_rate_pct": 30,     # fraction of universe flagged = high severity
-        "critical_rate_pct": 60,         # fraction of universe flagged = critical severity
-        "stuck_scan_minutes": 180,       # screener artifact freshness threshold
-        "min_stocks_screened": 10,       # universe must have at least N stocks
+        "manipulation_score_pct": 80,      # composite manipulation risk score per stock
+        "manipulation_rate_pct": 30,       # fraction of universe flagged = high severity
+        "critical_rate_pct": 60,           # fraction of universe flagged = critical severity
+        "ev_new_age_enabled": False,       # controlled rollout gate; flip to True to enable the boost
+        "ev_new_age_boost_pct": 10,        # points added when EV/new-age criteria confirm symbol
+        "stuck_scan_minutes": 180,         # screener artifact freshness threshold
+        "min_stocks_screened": 10,         # universe must have at least N stocks
     },
     "cooldown_sec": 300,  # 5 min between repeat manipulation actions for the same symbol
     "delivery_channels": ["web", "memory"],
@@ -68,6 +79,8 @@ class ManipSignal:
     score: float
     reason: str
     source: str
+    ev_new_age_score: Optional[float] = None
+    ev_new_age: bool = False
 
 
 @dataclass
@@ -84,6 +97,13 @@ class ScreenerManipWatch:
         healing: FleetSelfHealing | None = None,
     ):
         self.config = {**SCREENER_MANIP_CONFIG, **(config or {})}
+        # Deep-merge thresholds so a partial thresholds config (e.g. just the
+        # ev_new_age_enabled rollout flag) keeps the default threshold values.
+        if config and "thresholds" in config:
+            self.config["thresholds"] = {
+                **SCREENER_MANIP_CONFIG["thresholds"],
+                **config["thresholds"],
+            }
         self.memory = get_unified_memory()
         self.healing = healing or FleetSelfHealing()
         self._last_action: dict[str, float] = {}
@@ -193,6 +213,9 @@ class ScreenerManipWatch:
         if current_ratio is not None and current_ratio < 1:
             score += 10
 
+        if row.get("ev_new_age") is True and self.config["thresholds"].get("ev_new_age_enabled", False):
+            score += float(self.config["thresholds"].get("ev_new_age_boost_pct", 10))
+
         return min(score, 100.0)
 
     def _signals(self, rows: list[dict[str, Any]], source: str) -> list[ManipSignal]:
@@ -213,12 +236,16 @@ class ScreenerManipWatch:
             pct = self._to_float(row.get("pct_from_52w_high"))
             if pct is not None and pct >= 90:
                 reasons.append(f"within {100 - pct:.0f}% of 52-week high")
+            if row.get("ev_new_age") is True:
+                reasons.append("ev/new-age criteria confirmed")
             signals.append(
                 ManipSignal(
                     symbol=symbol,
                     score=score,
                     reason=", ".join(reasons) or f"composite score {score:.0f}",
                     source=source,
+                    ev_new_age_score=self._to_float(row.get("ev_new_age_score")),
+                    ev_new_age=bool(row.get("ev_new_age")),
                 )
             )
         signals.sort(key=lambda s: s.score, reverse=True)
@@ -312,9 +339,30 @@ class ScreenerManipWatch:
 
         artifacts = self.fetch_screener_artifacts()
         rows = [row for artifact in artifacts for row in artifact["rows"]]
+
+        # Enrich each row with EV/new-age criteria from the external skill.
+        # Any skill failure degrades gracefully: the row scores without the boost.
+        def _enrich(row: dict[str, Any]) -> dict[str, Any]:
+            enriched = dict(row)
+            symbol = str(row.get("symbol") or row.get("name") or "").strip()
+            if not symbol:
+                return enriched
+            try:
+                criteria = get_ev_criteria(symbol)
+            except Exception:
+                return enriched
+            if not criteria:
+                return enriched
+            if criteria.get("ev_new_age") is not None:
+                enriched["ev_new_age"] = bool(criteria["ev_new_age"])
+            score = criteria.get("ev_new_age_score")
+            if score is not None:
+                enriched["ev_new_age_score"] = score
+            return enriched
+
         signals: list[ManipSignal] = []
         for artifact in artifacts:
-            signals.extend(self._signals(artifact["rows"], artifact["source"]))
+            signals.extend(self._signals([_enrich(row) for row in artifact["rows"]], artifact["source"]))
 
         now = datetime.now(timezone.utc).isoformat()
         actions: list[HealingAction] = []
@@ -383,6 +431,7 @@ class ScreenerManipWatch:
                 "rows_screened": len(rows),
                 "manipulation_signals": len(signals),
                 "manipulation_rate": round(manipulation_rate, 4),
+                "ev_new_age_signals": sum(1 for s in signals if s.ev_new_age),
                 "actions": [
                     {
                         "id": a.id,
@@ -399,6 +448,8 @@ class ScreenerManipWatch:
                         "score": s.score,
                         "reason": s.reason,
                         "source": s.source,
+                        "ev_new_age": s.ev_new_age,
+                        "ev_new_age_score": s.ev_new_age_score,
                     }
                     for s in signals[:50]
                 ],
@@ -423,7 +474,14 @@ class ScreenerManipWatch:
                 for a in actions
             ],
             "signals": [
-                {"symbol": s.symbol, "score": s.score, "reason": s.reason, "source": s.source}
+                {
+                    "symbol": s.symbol,
+                    "score": s.score,
+                    "reason": s.reason,
+                    "source": s.source,
+                    "ev_new_age": s.ev_new_age,
+                    "ev_new_age_score": s.ev_new_age_score,
+                }
                 for s in signals
             ],
             "pipeline_ok": pipeline_ok,
