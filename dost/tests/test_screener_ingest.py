@@ -19,6 +19,7 @@ from ops.screener_ingest import (
     _parse_tv_response_all,
     _tv_numbers,
     fetch_tradingview_batch,
+    fetch_yfinance_batch,
     ingest,
     normalize,
     write_artifact,
@@ -233,6 +234,50 @@ def test_fetch_tradingview_batch_network_failure_returns_empty(monkeypatch: pyte
 
     results = fetch_tradingview_batch(["AAPL", "MSFT"])
     assert results == {}
+
+
+# ----------------------- yfinance batch queries -----------------------
+
+
+def test_fetch_yfinance_batch_returns_multiple_symbols(monkeypatch: pytest.MonkeyPatch):
+    results = {"AAPL": FUNDAMENTALS, "MSFT": FUNDAMENTALS}
+    calls: list[str] = []
+
+    def fake(symbol: str) -> dict | None:
+        calls.append(symbol)
+        return results.get(symbol)
+
+    monkeypatch.setattr("ops.screener_ingest.fetch_yfinance", fake)
+
+    out = fetch_yfinance_batch(["AAPL", "MSFT"])
+    assert set(out) == {"AAPL", "MSFT"}
+    assert out["AAPL"] == FUNDAMENTALS
+    assert set(calls) == {"AAPL", "MSFT"}
+
+
+def test_fetch_yfinance_batch_empty_symbols(monkeypatch: pytest.MonkeyPatch):
+    called: list[str] = []
+
+    def fake(symbol: str) -> dict | None:
+        called.append(symbol)
+        return FUNDAMENTALS
+
+    monkeypatch.setattr("ops.screener_ingest.fetch_yfinance", fake)
+
+    assert fetch_yfinance_batch([]) == {}
+    assert called == []  # no fetch calls for empty input
+
+
+def test_fetch_yfinance_batch_skips_failures(monkeypatch: pytest.MonkeyPatch):
+    def fake(symbol: str) -> dict | None:
+        if symbol == "DEAD":
+            return None
+        return FUNDAMENTALS
+
+    monkeypatch.setattr("ops.screener_ingest.fetch_yfinance", fake)
+
+    out = fetch_yfinance_batch(["AAPL", "DEAD", "MSFT"])
+    assert set(out) == {"AAPL", "MSFT"}
 
 
 # ----------------------- artifact writing -----------------------

@@ -14,6 +14,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -220,6 +221,34 @@ def fetch_yfinance(symbol: str) -> dict[str, Any] | None:
     return values
 
 
+def fetch_yfinance_batch(
+    symbols: list[str], max_workers: int = 8, timeout: float = 10.0
+) -> dict[str, dict[str, Any]]:
+    """Parallel yfinance fundamental queries for multiple symbols.
+
+    yfinance has no reliable batch endpoint, so each symbol is fetched with
+    ``fetch_yfinance`` in a bounded thread pool. Returns a dict of symbol ->
+    fundamentals. Symbols that fail are omitted — callers skip them.
+    """
+    if not symbols:
+        return {}
+    results: dict[str, dict[str, Any]] = {}
+    workers = max(1, min(max_workers, len(symbols)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        future_to_symbol = {
+            pool.submit(fetch_yfinance, symbol): symbol for symbol in symbols
+        }
+        for future in as_completed(future_to_symbol):
+            symbol = future_to_symbol[future]
+            try:
+                data = future.result()
+            except Exception:
+                continue
+            if data:
+                results[symbol] = data
+    return results
+
+
 def _ev_new_age_score(yf_data: dict[str, Any]) -> float:
     """Internal EV/new-age score (0-100) from yfinance fundamentals."""
     score = 0.0
@@ -319,10 +348,12 @@ def ingest(symbols: list[str], artifact_dir: Path | None = None) -> Path:
     artifact with headers only is still written (pipeline health can detect
     the empty universe).
     """
-    tv = fetch_tradingview_batch(list(symbols))
+    symbols = list(symbols)
+    tv = fetch_tradingview_batch(symbols)
+    yf = fetch_yfinance_batch(symbols)
     rows: list[dict[str, Any]] = []
     for symbol in symbols:
-        row = normalize(symbol, tv.get(symbol), fetch_yfinance(symbol))
+        row = normalize(symbol, tv.get(symbol), yf.get(symbol))
         if row is not None:
             rows.append(row)
     return write_artifact(rows, artifact_dir=artifact_dir)
