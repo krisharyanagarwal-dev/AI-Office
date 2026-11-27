@@ -34,7 +34,7 @@ DOST_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(COMPANY_DIR))
 sys.path.insert(0, str(DOST_DIR))
 
-from dost import companion_respond, generate_daily_briefing, MEMORY  # noqa: E402  (dost package now uses dost_main)
+from dost.dost_main import companion_respond, generate_daily_briefing, MEMORY  # noqa: E402  (package submodule: a flat `dost_main` would be a second module object)
 from openai_components import provider_health, speech_to_text, text_to_speech  # noqa: E402
 
 

@@ -23,10 +23,22 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# The package import below needs the repo root, not just dost/, and relying on
+# the cwd for it only works when started from AI-Office.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from chat_core import Handler, ChatStore, DostChatServer, chunk_text  # noqa: E402
-from dost import MEMORY, companion_respond, dost_respond, dost_greeting  # noqa: E402
-from dost.dost_main import log  # noqa: E402
+# dost.py is now dost_main.py. Import it as the PACKAGE submodule, never as a
+# flat `dost_main`: with dost/ also on sys.path both spellings load the same
+# file as two separate module objects, so MEMORY would be two instances and a
+# test that patches one would not affect the other.
+from dost.dost_main import (  # noqa: E402
+    MEMORY,
+    companion_respond,
+    dost_respond,
+    dost_greeting,
+    log,
+)
 from openai_components import speech_to_text, get_key  # noqa: E402
 import models  # noqa: E402
 
