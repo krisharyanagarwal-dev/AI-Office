@@ -21,7 +21,9 @@ def create_app(reports_dir: Path) -> FastAPI:
         limit: int = Query(100, ge=1, le=1000),
         offset: int = Query(0, ge=0),
     ):
-        fills_path = reports_dir / "fills.jsonl"
+        fills_path = reports_dir / "best_signal_fills.jsonl"
+        if not fills_path.exists():
+            fills_path = reports_dir / "fills.jsonl"
         if not fills_path.exists():
             return []
         lines = fills_path.read_text().strip().splitlines()
@@ -35,7 +37,9 @@ def create_app(reports_dir: Path) -> FastAPI:
         symbol: Optional[str] = Query(None),
         hours: int = Query(24, ge=1, le=168),
     ):
-        telemetry_path = reports_dir / "telemetry.jsonl"
+        telemetry_path = reports_dir / "best_signal_telemetry.jsonl"
+        if not telemetry_path.exists():
+            telemetry_path = reports_dir / "telemetry.jsonl"
         if not telemetry_path.exists():
             return []
         lines = telemetry_path.read_text().strip().splitlines()
@@ -68,7 +72,9 @@ def create_app(reports_dir: Path) -> FastAPI:
     async def stream_fills(symbol: Optional[str] = Query(None)):
         """SSE stream for live fill updates."""
         async def event_generator():
-            fills_path = reports_dir / "fills.jsonl"
+            fills_path = reports_dir / "best_signal_fills.jsonl"
+            if not fills_path.exists():
+                fills_path = reports_dir / "fills.jsonl"
             last_pos = 0
             while True:
                 if fills_path.exists():

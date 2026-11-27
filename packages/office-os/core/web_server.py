@@ -47,6 +47,7 @@ from billing.plans import get_plan, calculate_monthly_cost
 
 sys.path.insert(0, "/Users/aryanagarwal/AI-Office/dost")
 from collab.activity_feed import get_activity_feed
+from memory_pkg.unified import get_unified_memory
 
 OFFICE_ROOT = Path("/Users/aryanagarwal/AI-Office/packages/office-os")
 CONFIG_DIR = OFFICE_ROOT / "config"
@@ -2115,6 +2116,8 @@ class OfficeHandler(BaseHTTPRequestHandler):
             self._serve_health_dispatcher()
         elif path == "/health/providers":
             self._serve_health_providers()
+        elif path == "/health/ops":
+            self._serve_health_ops()
         elif path == "/api/health":
             self._serve_health()
         elif path == "/events":
@@ -3003,6 +3006,37 @@ class OfficeHandler(BaseHTTPRequestHandler):
             "check": check,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+        self._send_json(payload)
+
+    def _serve_health_ops(self):
+        """GET /health/ops - self-healing observability.
+
+        Returns per-service heartbeat snapshots (status, last_run, error_count,
+        last_error), recent healing actions, and failed-over pool routing
+        preferences persisted by FleetSelfHealing.
+        """
+        try:
+            memory = get_unified_memory()
+            heartbeats = memory.get_preference("service_heartbeats", {}) or {}
+            healing_actions = memory.get_preference("last_healing_actions", []) or []
+            failed_over_pools = memory.get_preference("failed_over_pools", []) or []
+        except Exception as e:
+            heartbeats = {}
+            healing_actions = []
+            failed_over_pools = []
+            error = str(e)
+        else:
+            error = None
+
+        payload = {
+            "endpoint": "/health/ops",
+            "services": heartbeats,
+            "failed_over_pools": sorted(failed_over_pools),
+            "recent_healing_actions": healing_actions[-20:],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        if error:
+            payload["error"] = error
         self._send_json(payload)
 
     def _serve_sse_events(self):
