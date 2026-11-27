@@ -44,6 +44,13 @@ except ImportError:  # skill not shipped -> degrade gracefully, no EV scoring
     def get_ev_criteria(symbol: str) -> Optional[dict[str, Any]]:  # type: ignore[misc]
         return None
 
+try:
+    from skills.news_sentiment import get_news_sentiment
+except ImportError:  # skill not shipped -> degrade gracefully, no news scoring
+
+    def get_news_sentiment(symbol: str) -> dict[str, Any]:  # type: ignore[misc]
+        return {"symbol": symbol, "score": 0.0, "signal": "neutral", "reason": "skill unavailable", "sources": 0}
+
 
 SCREENER_MANIP_CONFIG = {
     "enabled": True,
@@ -54,6 +61,8 @@ SCREENER_MANIP_CONFIG = {
         "critical_rate_pct": 60,           # fraction of universe flagged = critical severity
         "ev_new_age_enabled": False,       # controlled rollout gate; flip to True to enable the boost
         "ev_new_age_boost_pct": 10,        # points added when EV/new-age criteria confirm symbol
+        "news_sentiment_enabled": False,   # controlled rollout gate; flip to True to enable news sentiment boost
+        "news_sentiment_boost_pct": 5,     # points added when news sentiment is negative
         "stuck_scan_minutes": 180,         # screener artifact freshness threshold
         "min_stocks_screened": 10,         # universe must have at least N stocks
     },
@@ -82,6 +91,8 @@ class ManipSignal:
     source: str
     ev_new_age_score: Optional[float] = None
     ev_new_age: bool = False
+    news_sentiment_score: Optional[float] = None
+    news_sentiment: str = "neutral"
 
 
 @dataclass
@@ -217,6 +228,13 @@ class ScreenerManipWatch:
         if row.get("ev_new_age") is True and self.config["thresholds"].get("ev_new_age_enabled", False):
             score += float(self.config["thresholds"].get("ev_new_age_boost_pct", 10))
 
+        news = row.get("news_sentiment") or {}
+        if (
+            self.config["thresholds"].get("news_sentiment_enabled", False)
+            and news.get("signal") == "negative"
+        ):
+            score += float(self.config["thresholds"].get("news_sentiment_boost_pct", 5))
+
         return min(score, 100.0)
 
     def _signals(self, rows: list[dict[str, Any]], source: str) -> list[ManipSignal]:
@@ -239,6 +257,9 @@ class ScreenerManipWatch:
                 reasons.append(f"within {100 - pct:.0f}% of 52-week high")
             if row.get("ev_new_age") is True:
                 reasons.append("ev/new-age criteria confirmed")
+            news = row.get("news_sentiment") or {}
+            if news.get("signal") == "negative":
+                reasons.append("negative news sentiment")
             signals.append(
                 ManipSignal(
                     symbol=symbol,
@@ -247,6 +268,8 @@ class ScreenerManipWatch:
                     source=source,
                     ev_new_age_score=self._to_float(row.get("ev_new_age_score")),
                     ev_new_age=bool(row.get("ev_new_age")),
+                    news_sentiment_score=self._to_float(news.get("score")),
+                    news_sentiment=str(news.get("signal", "neutral")),
                 )
             )
         signals.sort(key=lambda s: s.score, reverse=True)
@@ -341,8 +364,9 @@ class ScreenerManipWatch:
         artifacts = self.fetch_screener_artifacts()
         rows = [row for artifact in artifacts for row in artifact["rows"]]
 
-        # Enrich each row with EV/new-age criteria from the external skill.
-        # Any skill failure degrades gracefully: the row scores without the boost.
+        # Enrich each row with EV/new-age criteria and news sentiment from the
+        # external skills. Any skill failure degrades gracefully: the row scores
+        # without the boost from that skill.
         def _enrich(row: dict[str, Any]) -> dict[str, Any]:
             enriched = dict(row)
             symbol = str(row.get("symbol") or row.get("name") or "").strip()
@@ -351,14 +375,20 @@ class ScreenerManipWatch:
             try:
                 criteria = get_ev_criteria(symbol)
             except Exception:
-                return enriched
-            if not criteria:
-                return enriched
-            if criteria.get("ev_new_age") is not None:
-                enriched["ev_new_age"] = bool(criteria["ev_new_age"])
-            score = criteria.get("ev_new_age_score")
-            if score is not None:
-                enriched["ev_new_age_score"] = score
+                criteria = None
+            if criteria:
+                if criteria.get("ev_new_age") is not None:
+                    enriched["ev_new_age"] = bool(criteria["ev_new_age"])
+                score = criteria.get("ev_new_age_score")
+                if score is not None:
+                    enriched["ev_new_age_score"] = score
+            if self.config["thresholds"].get("news_sentiment_enabled", False):
+                try:
+                    sentiment = get_news_sentiment(symbol)
+                except Exception:
+                    sentiment = {"signal": "neutral", "score": 0.0}
+                if sentiment:
+                    enriched["news_sentiment"] = sentiment
             return enriched
 
         signals: list[ManipSignal] = []
@@ -433,6 +463,7 @@ class ScreenerManipWatch:
                 "manipulation_signals": len(signals),
                 "manipulation_rate": round(manipulation_rate, 4),
                 "ev_new_age_signals": sum(1 for s in signals if s.ev_new_age),
+                "news_sentiment_signals": sum(1 for s in signals if s.news_sentiment == "negative"),
                 "actions": [
                     {
                         "id": a.id,
@@ -451,6 +482,8 @@ class ScreenerManipWatch:
                         "source": s.source,
                         "ev_new_age": s.ev_new_age,
                         "ev_new_age_score": s.ev_new_age_score,
+                        "news_sentiment": s.news_sentiment,
+                        "news_sentiment_score": s.news_sentiment_score,
                     }
                     for s in signals[:50]
                 ],
@@ -482,6 +515,8 @@ class ScreenerManipWatch:
                     "source": s.source,
                     "ev_new_age": s.ev_new_age,
                     "ev_new_age_score": s.ev_new_age_score,
+                    "news_sentiment": s.news_sentiment,
+                    "news_sentiment_score": s.news_sentiment_score,
                 }
                 for s in signals
             ],

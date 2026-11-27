@@ -103,5 +103,48 @@
     "last_test_passed": null,
     "deploy_status": "pending",
     "deploy_ts": null
+  },
+  "news_sentiment": {
+    "name": "news_sentiment",
+    "version": "1.0.0",
+    "description": "Keyless news sentiment per symbol, wrapping the web_search skill",
+    "author": "dost",
+    "created_at": "2026-11-28T00:00:00+00:00",
+    "updated_at": "2026-11-28T00:00:00+00:00",
+    "dependencies": [
+      "web_search"
+    ],
+    "entry_point": "main",
+    "module_file": "news_sentiment.py",
+    "test_file": "test_news_sentiment.py",
+    "config_schema": {
+      "type": "object",
+      "properties": {
+        "max_results": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "timeout": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 60
+        }
+      }
+    },
+    "default_config": {
+      "max_results": 5,
+      "timeout": 10
+    },
+    "tags": [
+      "screener",
+      "news",
+      "sentiment"
+    ],
+    "enabled": true,
+    "last_test_run": null,
+    "last_test_passed": null,
+    "deploy_status": "pending",
+    "deploy_ts": null
   }
 }
