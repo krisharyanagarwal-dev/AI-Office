@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """View a specific task result in full. User-based: only your own tasks."""
+import os
 import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, "/Users/aryanagarwal/office-os")
+sys.path.insert(0, str(Path((os.environ.get("OFFICE_OS_HOME") or str(Path.home() / "office-os")))))
 from core.hive import Hive
 
 if len(sys.argv) < 2:

@@ -2,10 +2,12 @@
 CLI for Office OS - create tasks, check status, list agents.
 User-based: each task is tagged with a user_id.
 """
+from pathlib import Path
+import os
 import json
 import sys
 
-sys.path.insert(0, "/Users/aryanagarwal/office-os")
+sys.path.insert(0, str(Path((os.environ.get("OFFICE_OS_HOME") or str(Path.home() / "office-os")))))
 from core.hive import Hive
 from core.router import ProviderRouter
 from agents.god_agent import GodAgent
@@ -60,7 +62,7 @@ def cmd_providers():
 
 def cmd_users():
     import json as _json
-    with open("/Users/aryanagarwal/office-os/config/users.json") as f:
+    with open(str(Path((os.environ.get("OFFICE_OS_HOME") or str(Path.home() / "office-os"))) / "config" / "users.json")) as f:
         cfg = _json.load(f)
     for uid, u in cfg.get("users", {}).items():
         print(f"{uid}: {u.get('name', uid)} (role: {u.get('role', '?')})")

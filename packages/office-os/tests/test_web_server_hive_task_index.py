@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-OFFICE_OS_ROOT = Path("/Users/aryanagarwal/AI-Office/packages/office-os")
+OFFICE_OS_ROOT = (Path(__file__).resolve().parents[3] / "packages" / "office-os")
 sys.path.insert(0, str(OFFICE_OS_ROOT))
 
 web_server = pytest.importorskip("core.web_server")

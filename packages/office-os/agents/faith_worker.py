@@ -11,13 +11,14 @@ Pipeline stages (six-stage autonomy):
 
 The worker never decides what to post — it only executes what the director assigns.
 """
+import os
 import json
 import subprocess
 import sys
 import asyncio
 from pathlib import Path
 
-sys.path.insert(0, "/Users/aryanagarwal/office-os")
+sys.path.insert(0, str(Path((os.environ.get("OFFICE_OS_HOME") or str(Path.home() / "office-os")))))
 from core.hive import Hive
 from core.router import ProviderRouter
 
@@ -43,11 +44,11 @@ class FaithWorker:
         }
 
         # Render temp directory
-        self.render_tmp = Path("/Users/aryanagarwal/office-os/faith_render_tmp")
+        self.render_tmp = (Path((os.environ.get("OFFICE_OS_HOME") or str(Path.home() / "office-os"))) / "faith_render_tmp")
         self.render_tmp.mkdir(parents=True, exist_ok=True)
 
         # Output directory
-        self.output_dir = Path("/Users/aryanagarwal/office-os/faith_output")
+        self.output_dir = (Path((os.environ.get("OFFICE_OS_HOME") or str(Path.home() / "office-os"))) / "faith_output")
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     # ---------- Execute task ----------
@@ -543,7 +544,7 @@ class FaithWorker:
                 "publish_time": publish_result.get("url", ""),
             }
             # Write to a metrics file
-            metrics_path = Path("/Users/aryanagarwal/office-os/faith_metrics.json")
+            metrics_path = (Path((os.environ.get("OFFICE_OS_HOME") or str(Path.home() / "office-os"))) / "faith_metrics.json")
             state = {}
             if metrics_path.exists():
                 state = json.loads(metrics_path.read_text())
@@ -552,7 +553,7 @@ class FaithWorker:
 
             # Also update the director's state for topic mix adjustment
             # This enables cross-reel performance tracking
-            director_state_path = Path("/Users/aryanagarwal/office-os/faith_state.json")
+            director_state_path = (Path((os.environ.get("OFFICE_OS_HOME") or str(Path.home() / "office-os"))) / "faith_state.json")
             director_state = {}
             if director_state_path.exists():
                 director_state = json.loads(director_state_path.read_text())
@@ -594,7 +595,7 @@ class FaithWorker:
     def _maybe_adjust_topic_mix(self):
         """Adjust topic mix after every 3 reels based on performance."""
         try:
-            state_path = Path("/Users/aryanagarwal/office-os/faith_state.json")
+            state_path = (Path((os.environ.get("OFFICE_OS_HOME") or str(Path.home() / "office-os"))) / "faith_state.json")
             if not state_path.exists():
                 return
 

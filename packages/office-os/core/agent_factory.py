@@ -12,11 +12,11 @@ import sys
 import uuid
 from pathlib import Path
 
-sys.path.insert(0, "/Users/aryanagarwal/AI-Office/office-os")
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "office-os"))
 from core.subs.cloud_orchestrator import CloudModelOrchestrator
 
-CONFIG_PATH = "/Users/aryanagarwal/AI-Office/office-os/config/office.json"
-OUTPUT_PATH = "/Users/aryanagarwal/AI-Office/office-os/config/generated_agents.json"
+CONFIG_PATH = str(Path(__file__).resolve().parents[3] / "office-os" / "config" / "office.json")
+OUTPUT_PATH = str(Path(__file__).resolve().parents[3] / "office-os" / "config" / "generated_agents.json")
 
 # Department taxonomy: (department, [roles])
 DEPARTMENTS = {

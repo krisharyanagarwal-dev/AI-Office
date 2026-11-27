@@ -15,13 +15,14 @@ Rules:
   * Task types are an explicit allowlist. Anything else is refused and marked failed locally.
   * Verdict files for unknown ids are logged and ignored.
 """
+import os
 import json
 import re
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-ROOT = Path("/Users/aryanagarwal/office-os")
+ROOT = (Path((os.environ.get("OFFICE_OS_HOME") or str(Path.home() / "office-os"))))
 STOP_FILE = ROOT / "STOP"
 MINI = "a@macmini"
 INBOX = "~/ai-office/data/office-inbox"

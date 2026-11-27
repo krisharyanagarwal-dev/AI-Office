@@ -2596,7 +2596,7 @@ def doctor() -> tuple:
 
     # 13. Cost anomaly detection — today's cost vs 7-day average.
     cost_anomaly_ok, cost_anomaly_detail = _cost_anomaly_check(
-        Path("/Users/aryanagarwal/.openclaw/office_pnl.json")
+        (Path.home() / ".openclaw" / "office_pnl.json")
     )
     checks.append(("Cost anomaly", cost_anomaly_ok, cost_anomaly_detail))
 

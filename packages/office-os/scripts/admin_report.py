@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 # Load the jev_dispatcher module for its findings functions.
-_DISPATCHER_PATH = "/Users/aryanagarwal/.openclaw/jev-dispatcher.py"
+_DISPATCHER_PATH = str(Path.home() / ".openclaw" / "jev-dispatcher.py")
 _spec = importlib.util.spec_from_file_location("jev_dispatcher", _DISPATCHER_PATH)
 jev = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(jev)

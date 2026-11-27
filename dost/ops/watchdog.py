@@ -1,24 +1,37 @@
-"""Launchd watchdog for the Dost proactive agent.
+"""Launchd watchdog for Dost services.
 
-Periodically checks whether the proactive agent (com.aryan.dost-proactive-agent)
-is running, and restarts it via launchctl if it has died. Intended to be run
-as its own launchd LaunchAgent with a short ThrottleInterval, layered on top
-of the proactive agent's own KeepAlive for extra resilience.
+Periodically checks whether each configured dost service is running via
+`launchctl list <label>`, and restarts any that have died via
+`launchctl kickstart -k -p gui/<uid>/<label>`. Intended to be run as its
+own launchd LaunchAgent with a short ThrottleInterval, layered on top of
+each service's own KeepAlive for extra resilience.
 
 Paper/testnet-only: restarting a dost service never places live orders.
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-PROACTIVE_LABEL = "com.aryan.dost-proactive-agent"
-PROACTIVE_PROC_PATTERN = "ops/proactive_agent.py"
-LOG_PATH = Path("/Users/aryanagarwal/.openclaw/dost-watchdog.log")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # dost/  (for `import ops`)
+
+from ops.self_healing import SERVICE_LABELS  # noqa: E402  (path inserted above)
+
+LOG_PATH = (Path.home() / ".openclaw" / "dost-watchdog.log")
+
+
+def _domain_target(label: str) -> str:
+    """Return the launchd domain target for the current user session.
+
+    macOS requires `gui/<uid>/<label>` for kickstart to resolve the service;
+    a bare label yields "Unrecognized target specifier".
+    """
+    return f"gui/{os.getuid()}/{label}"
 
 
 def _log(message: str) -> None:
@@ -33,55 +46,62 @@ def _log(message: str) -> None:
     print(line, end="")
 
 
-def _is_running() -> bool:
-    """Return True if the proactive agent process is alive."""
+def _is_running(label: str) -> bool:
+    """Return True if the dost service process is running.
+
+    Uses ``pgrep -f`` to detect the live process rather than ``launchctl list``,
+    which only reports whether launchd knows the label. A service can be known
+    to launchd but have a dead process, so pgrep is the correct health signal
+    for a watchdog.
+    """
     try:
         result = subprocess.run(
-            ["pgrep", "-f", PROACTIVE_PROC_PATTERN],
+            ["pgrep", "-f", label],
             capture_output=True,
             text=True,
             timeout=10,
         )
-        return result.returncode == 0 and bool(result.stdout.strip())
+        return result.returncode == 0
     except Exception as e:
-        _log(f"[watchdog] pgrep failed: {e}")
+        _log(f"[watchdog] pgrep {label} failed: {e}")
         return False
 
 
-def _restart() -> bool:
-    """Restart the proactive agent via launchctl kickstart."""
+def _restart(label: str) -> bool:
+    """Restart the launchd service with the given label via kickstart."""
     try:
         result = subprocess.run(
-            ["launchctl", "kickstart", "-p", PROACTIVE_LABEL],
+            ["launchctl", "kickstart", "-k", "-p", _domain_target(label)],
             capture_output=True,
             text=True,
             timeout=20,
         )
         if result.returncode == 0:
-            _log(f"[watchdog] Restarted {PROACTIVE_LABEL} via kickstart")
+            _log(f"[watchdog] Restarted {label} via kickstart")
             return True
         _log(
-            f"[watchdog] kickstart failed rc={result.returncode} "
-            f"stderr={result.stderr.strip()}"
+            f"[watchdog] kickstart failed for {label} "
+            f"rc={result.returncode} stderr={result.stderr.strip()}"
         )
         return False
     except Exception as e:
-        _log(f"[watchdog] kickstart exception: {e}")
+        _log(f"[watchdog] kickstart exception for {label}: {e}")
         return False
 
 
 def run_once() -> None:
-    """Single watchdog check: restart the proactive agent if it is not running."""
-    if _is_running():
-        _log(f"[watchdog] {PROACTIVE_LABEL} is running")
-        return
-    _log(f"[watchdog] {PROACTIVE_LABEL} not running; attempting restart")
-    if _restart():
-        time.sleep(2)
-        if _is_running():
-            _log(f"[watchdog] {PROACTIVE_LABEL} confirmed running after restart")
-        else:
-            _log(f"[watchdog] {PROACTIVE_LABEL} still not running after restart")
+    """Single watchdog cycle: restart any dost service that is not running."""
+    for service_name, label in SERVICE_LABELS.items():
+        if _is_running(label):
+            _log(f"[watchdog] {service_name} ({label}) is running")
+            continue
+        _log(f"[watchdog] {service_name} ({label}) not running; attempting restart")
+        if _restart(label):
+            time.sleep(2)
+            if _is_running(label):
+                _log(f"[watchdog] {service_name} ({label}) confirmed running after restart")
+            else:
+                _log(f"[watchdog] {service_name} ({label}) still not running after restart")
 
 
 def main() -> None:

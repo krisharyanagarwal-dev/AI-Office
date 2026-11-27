@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-ROOT = Path(os.environ.get("OFFICE_OS_ROOT", "/Users/aryanagarwal/office-os"))
+ROOT = Path(os.environ.get("OFFICE_OS_ROOT", str(Path((os.environ.get("OFFICE_OS_HOME") or str(Path.home() / "office-os"))))))
 CONFIG = ROOT / "config" / "office.json"
 TASKS = ROOT / "tasks"
 HOST = "127.0.0.1"

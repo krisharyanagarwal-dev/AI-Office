@@ -1,5 +1,6 @@
 """Executor tests. The agent call is stubbed; everything else (git, gate, merge) is real,
 run against scratch repos in tmp_path."""
+import os
 import json
 import subprocess
 from pathlib import Path
@@ -8,7 +9,7 @@ import pytest
 
 import core.executor as ex
 
-PATTERNS = json.loads(Path("/Users/aryanagarwal/office-os/config/office.json").read_text())["autonomy"]["forbidden_path_patterns"]
+PATTERNS = json.loads((Path((os.environ.get("OFFICE_OS_HOME") or str(Path.home() / "office-os"))) / "config" / "office.json").read_text())["autonomy"]["forbidden_path_patterns"]
 GIT_ID = ["-c", "user.name=t", "-c", "user.email=t@t"]
 
 

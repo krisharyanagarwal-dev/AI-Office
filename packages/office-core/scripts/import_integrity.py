@@ -89,6 +89,17 @@ def python_files() -> list:
     # inside the package. Checking only dost/ reported OK on the laptop while
     # the mini failed on company_dispatcher.py -- so these are in scope.
     out += [f for f in sorted(AI_OFFICE.glob("*.py")) if f.is_file()]
+    # packages/office-os is the office itself -- the orchestrator and the
+    # services around it. Its pins are what kept the orchestrator on one
+    # machine, and they were found by crashing on the mini one module at a
+    # time rather than by any check. Scanned for path pins; its imports are
+    # not swept, since those modules are entered as scripts with their own
+    # sys.path setup rather than as a package.
+    office_os = AI_OFFICE / "packages" / "office-os"
+    for sub in ("core", "agents"):
+        d = office_os / sub
+        if d.is_dir():
+            out += [f for f in sorted(d.glob("*.py")) if f.is_file()]
     return sorted(out)
 
 
@@ -131,8 +142,12 @@ def scan() -> list:
         in_subpkg = fp.parent.name in SUBPACKAGES and fp.parent.parent == DOST
 
         for lineno, head, full in imported_names(tree):
-            # A bare name that now lives in a subpackage.
-            if head in moved and head not in roots:
+            # A bare name that now lives in a subpackage. A DOTTED import
+            # (from X.Y import ...) names a package with submodules, which a
+            # moved single-file module can never be -- packages/shared/python/
+            # structured_logging is a real package unrelated to
+            # dost/ops/structured_logging.py, and flagging it was wrong.
+            if head in moved and head not in roots and "." not in full:
                 findings.append({
                     "kind": "STALE_FLAT", "file": rel, "line": lineno,
                     "detail": f"{full} -> {moved[head]}.{head}",

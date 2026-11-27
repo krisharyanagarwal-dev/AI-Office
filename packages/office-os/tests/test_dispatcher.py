@@ -14,10 +14,10 @@ from pathlib import Path
 import pytest
 
 # Ensure the office-os package is importable (dispatcher imports from core.*).
-sys.path.insert(0, "/Users/aryanagarwal/AI-Office/packages/office-os")
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "packages" / "office-os"))
 
 # Load the dispatcher module from its hyphenated filename.
-_DISPATCHER_PATH = "/Users/aryanagarwal/.openclaw/jev-dispatcher.py"
+_DISPATCHER_PATH = str(Path.home() / ".openclaw" / "jev-dispatcher.py")
 _spec = importlib.util.spec_from_file_location("jev_dispatcher", _DISPATCHER_PATH)
 jev = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(jev)  # noqa: E402

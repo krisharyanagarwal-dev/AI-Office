@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 # External office-os checkout (queue, state, tasks). Override with OFFICE_OS_DIR.
-OFFICE_OS = os.environ.get("OFFICE_OS_DIR", "/Users/aryanagarwal/office-os")
+OFFICE_OS = os.environ.get("OFFICE_OS_DIR", str(Path((os.environ.get("OFFICE_OS_HOME") or str(Path.home() / "office-os")))))
 sys.path.insert(0, OFFICE_OS)
 from core.hive import Hive
 from core.router import ProviderRouter

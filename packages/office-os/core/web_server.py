@@ -17,12 +17,12 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
-sys.path.insert(0, "/Users/aryanagarwal/AI-Office/packages/office-os")
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "packages" / "office-os"))
 from core.hive import Hive
 from core.router import ProviderRouter
 from agents.god_agent import GodAgent
 
-sys.path.insert(0, "/Users/aryanagarwal/AI-Office/dost")
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "dost"))
 # `workspace` and `activity_feed` moved into the `collab` subpackage in
 # ec37280d ("group 36 modules into 7 subpackages"). The bare imports below
 # stopped resolving, so this module died at import time with
@@ -45,11 +45,11 @@ from collab.workspace import (
 from billing.meter import get_usage_summary, get_current_month_cost, workspace_pnl_dir
 from billing.plans import get_plan, calculate_monthly_cost
 
-sys.path.insert(0, "/Users/aryanagarwal/AI-Office/dost")
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "dost"))
 from collab.activity_feed import get_activity_feed
 from memory_pkg.unified import get_unified_memory
 
-OFFICE_ROOT = Path("/Users/aryanagarwal/AI-Office/packages/office-os")
+OFFICE_ROOT = (Path(__file__).resolve().parents[3] / "packages" / "office-os")
 CONFIG_DIR = OFFICE_ROOT / "config"
 
 
@@ -143,7 +143,7 @@ def _workspace_pnl_costs(pnl_dir: Path) -> dict:
     return stats
 
 # Qwen autonomous worker directories
-QWEN_DIR = Path("/Users/aryanagarwal/.openclaw/autonomous-qwen")
+QWEN_DIR = (Path.home() / ".openclaw" / "autonomous-qwen")
 TASK_QUEUE_DIR = QWEN_DIR / "queue"
 QWEN_RESULT_DIR = QWEN_DIR / "results"
 os.makedirs(TASK_QUEUE_DIR, exist_ok=True)
@@ -153,11 +153,11 @@ os.makedirs(QWEN_RESULT_DIR, exist_ok=True)
 HIVE_DIR = str(OFFICE_ROOT / "tasks")
 
 # JEV dispatcher log & kill switch (used by the public /dashboard route)
-JEV_LOG = "/Users/aryanagarwal/.openclaw/jev-dispatcher.log"
-KILL_SWITCH_PATH = "/Users/aryanagarwal/AI-Office/packages/_archive/openalice-fleet/state/trader_killswitch_status.json"
+JEV_LOG = str(Path.home() / ".openclaw" / "jev-dispatcher.log")
+KILL_SWITCH_PATH = str(Path(__file__).resolve().parents[3] / "packages" / "_archive" / "openalice-fleet" / "state" / "trader_killswitch_status.json")
 
 # Stock bot metrics file (written by all_stocks_bot.py after each run)
-STOCKS_METRICS_FILE = Path("/Users/aryanagarwal/.openclaw/stocks_metrics.json")
+STOCKS_METRICS_FILE = (Path.home() / ".openclaw" / "stocks_metrics.json")
 
 # Load users
 with open(CONFIG_DIR / "users.json") as f:
@@ -1423,6 +1423,7 @@ DASHBOARD_PUBLIC_TEMPLATE = """<!DOCTYPE html>
         <h1><span class="dot"></span> JEV Dispatcher Dashboard</h1>
         <div>
             <a href="/metrics" class="btn secondary">/metrics (JSON)</a>
+            <a href="/health/ops/ui" class="btn secondary">/health/ops (UI)</a>
             <span class="user-bar">http://localhost:8083/dashboard</span>
             <a href="/logout" class="logout">Sign out</a>
         </div>
@@ -2118,6 +2119,8 @@ class OfficeHandler(BaseHTTPRequestHandler):
             self._serve_health_providers()
         elif path == "/health/ops":
             self._serve_health_ops()
+        elif path == "/health/ops/ui":
+            self._serve_health_ops_page()
         elif path == "/api/health":
             self._serve_health()
         elif path == "/events":
@@ -2778,7 +2781,7 @@ class OfficeHandler(BaseHTTPRequestHandler):
         # Provider pool status from router
         pool_status = {}
         try:
-            sys.path.insert(0, "/Users/aryanagarwal/AI-Office/packages/office-os")
+            sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "packages" / "office-os"))
             from core.router import ProviderRouter
             router = ProviderRouter()
             pool_status = router.status()
@@ -2872,7 +2875,7 @@ class OfficeHandler(BaseHTTPRequestHandler):
         except Exception as e:
             detail["error"] = str(e)
         # Supplemental context: pid file + log freshness
-        pid_path = Path("/Users/aryanagarwal/.openclaw/jev-dispatcher.pid")
+        pid_path = (Path.home() / ".openclaw" / "jev-dispatcher.pid")
         log_path = Path(JEV_LOG)
         try:
             detail["pid"] = int(pid_path.read_text().strip())
@@ -2917,7 +2920,7 @@ class OfficeHandler(BaseHTTPRequestHandler):
 
     def _check_findings_store(self):
         """Is the findings store accessible?"""
-        paths = [Path("/Users/aryanagarwal/Documents/polymarket/research/findings.json")]
+        paths = [(Path.home() / "Documents" / "polymarket" / "research" / "findings.json")]
         try:
             paths.append(workspace_findings_dir(DEFAULT_WORKSPACE_ID))
         except Exception:
@@ -2938,7 +2941,7 @@ class OfficeHandler(BaseHTTPRequestHandler):
 
     def _check_office_pnl(self):
         """Is office_pnl.json accessible?"""
-        pnl_path = Path("/Users/aryanagarwal/.openclaw/office_pnl.json")
+        pnl_path = (Path.home() / ".openclaw" / "office_pnl.json")
         try:
             data = json.loads(pnl_path.read_text())
             count = len(data) if isinstance(data, list) else (1 if isinstance(data, dict) else 0)
@@ -3038,6 +3041,143 @@ class OfficeHandler(BaseHTTPRequestHandler):
         if error:
             payload["error"] = error
         self._send_json(payload)
+
+    def _serve_health_ops_page(self):
+        """GET /health/ops/ui - self-healing observability dashboard (HTML)."""
+        timestamp = datetime.now(timezone.utc).isoformat()
+        try:
+            memory = get_unified_memory()
+            heartbeats = memory.get_preference("service_heartbeats", {}) or {}
+            healing_actions = memory.get_preference("last_healing_actions", []) or []
+            failed_over_pools = memory.get_preference("failed_over_pools", []) or []
+            pool_scale_factors = memory.get_preference("pool_scale_factors", {}) or {}
+        except Exception as e:
+            heartbeats = {}
+            healing_actions = []
+            failed_over_pools = []
+            pool_scale_factors = {}
+            error = str(e)
+        else:
+            error = None
+
+        # Service heartbeat rows
+        service_rows = ""
+        if heartbeats:
+            for name, hb in sorted(heartbeats.items()):
+                status = hb.get("status", "unknown")
+                status_class = "ok" if status == "healthy" else ("warn" if status == "degraded" else "err")
+                service_rows += f"""
+                    <tr>
+                        <td>{escape(str(name))}</td>
+                        <td class="{status_class}">{escape(str(status))}</td>
+                        <td class="mono">{escape(str(hb.get('last_run', '-')))}</td>
+                        <td class="mono">{escape(str(hb.get('error_count', '-')))}</td>
+                        <td>{escape(str(hb.get('last_error', '-')))}</td>
+                    </tr>
+                """
+        else:
+            service_rows = '<tr><td colspan="5" class="empty">No service heartbeats recorded.</td></tr>'
+
+        # Pool scale factor rows
+        scale_rows = ""
+        if pool_scale_factors:
+            for name, factor in sorted(pool_scale_factors.items()):
+                scale_rows += f"""
+                    <tr><td>{escape(str(name))}</td><td class="mono">{escape(str(factor))}</td></tr>
+                """
+        else:
+            scale_rows = '<tr><td colspan="2" class="empty">No pool scale factors recorded.</td></tr>'
+
+        # Healing action rows
+        action_rows = ""
+        if healing_actions:
+            for a in healing_actions[-20:]:
+                ok = a.get("success")
+                cls = "ok" if ok is True else ("err" if ok is False else "neutral")
+                result = "✓" if ok is True else ("✗" if ok is False else "–")
+                action_rows += f"""
+                    <tr>
+                        <td class="mono">{escape(str(a.get('timestamp', '')))}</td>
+                        <td>{escape(str(a.get('type', '')))}</td>
+                        <td>{escape(str(a.get('target', '')))}</td>
+                        <td>{escape(str(a.get('reason', '')))}</td>
+                        <td class="{cls}">{result}</td>
+                    </tr>
+                """
+        else:
+            action_rows = '<tr><td colspan="5" class="empty">No healing actions recorded.</td></tr>'
+
+        fop_items = ", ".join(escape(str(p)) for p in sorted(failed_over_pools)) or "None"
+        error_box = (
+            f'<div class="card" style="border-color:#ef4444">'
+            f'<p style="color:#ef4444;margin:0">Error reading memory: {escape(error)}</p></div>'
+            if error else ""
+        )
+
+        html = f"""<!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Dost Ops — Self-Healing Dashboard</title>
+            <style>
+                body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #0f0f0f; color: #e0e0e0; }}
+                a {{ color: #3b82f6; }}
+                .btn {{ background: #3b82f6; color: white; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; text-decoration: none; display: inline-block; }}
+                .btn.secondary {{ background: #2a2a2a; }}
+                .card {{ background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }}
+                table {{ width: 100%; border-collapse: collapse; font-size: 0.85rem; }}
+                th, td {{ padding: 0.5rem 0.75rem; text-align: left; border-bottom: 1px solid #2a2a2a; }}
+                th {{ color: #94a3b8; font-size: 0.7rem; text-transform: uppercase; }}
+                tr:last-child td {{ border-bottom: none; }}
+                .mono {{ font-family: monospace; }}
+                .ok {{ color: #10b981; }}
+                .err {{ color: #ef4444; }}
+                .warn {{ color: #f59e0b; }}
+                .neutral {{ color: #94a3b8; }}
+                .empty {{ color: #64748b; }}
+                .kv {{ display: flex; gap: 1.5rem; margin-bottom: 0.5rem; }}
+                .kv .label {{ color: #94a3b8; font-size: 0.8rem; }}
+                .refresh {{ display: flex; gap: 0.5rem; align-items: center; margin-bottom: 1rem; }}
+                .small {{ color: #64748b; font-size: 0.75rem; }}
+                h1 {{ font-size: 1rem; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; margin: 0 0 1rem 0; }}
+                h2 {{ font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; margin: 1rem 0 0.5rem 0; }}
+            </style>
+        </head>
+        <body>
+            <a href="/" class="btn secondary">← Dashboard</a>
+            <a href="/health/ops" class="btn secondary">JSON endpoint</a>
+            <button class="btn" onclick="location.reload()">Refresh</button>
+            <h1>Ops — Self-Healing Observability</h1>
+            {error_box}
+            <div class="refresh"><span class="small">Auto-refresh every 30s · {len(heartbeats)} services · {len(failed_over_pools)} failed-over pools · {len(healing_actions)} healing actions</span></div>
+            <script>setTimeout(() => location.reload(), 30000);</script>
+
+            <h2>Services</h2>
+            <table>
+                <thead><tr><th>Service</th><th>Status</th><th>Last run</th><th>Errors</th><th>Last error</th></tr></thead>
+                <tbody>{service_rows}</tbody>
+            </table>
+
+            <h2>Routing</h2>
+            <div class="kv"><span class="label">Failed-over pools</span><span class="mono">{fop_items}</span></div>
+            <table>
+                <thead><tr><th>Pool</th><th>Scale factor</th></tr></thead>
+                <tbody>{scale_rows}</tbody>
+            </table>
+
+            <h2>Recent healing actions</h2>
+            <table>
+                <thead><tr><th>Time</th><th>Action</th><th>Target</th><th>Reason</th><th>Result</th></tr></thead>
+                <tbody>{action_rows}</tbody>
+            </table>
+            <div class="kv"><span class="label">Generated</span><span class="mono">{escape(timestamp)}</span></div>
+        </body>
+        </html>"""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(html.encode("utf-8"))
 
     def _serve_sse_events(self):
         """GET /events - Server-Sent Events stream for real-time metrics."""
@@ -3528,7 +3668,7 @@ class OfficeHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            findings_path = Path("/Users/aryanagarwal/Documents/polymarket/research/findings.json")
+            findings_path = (Path.home() / "Documents" / "polymarket" / "research" / "findings.json")
             if findings_path.exists():
                 data = json.loads(findings_path.read_text())
                 findings = data.get("findings", [])
@@ -3541,8 +3681,8 @@ class OfficeHandler(BaseHTTPRequestHandler):
     def _serve_api_synthesis(self):
         """API endpoint: return synthesis detail."""
         try:
-            sys.path.insert(0, "/Users/aryanagarwal/AI-Office/packages/office-os")
-            sys.path.insert(0, "/Users/aryanagarwal/AI-Office/dost")
+            sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "packages" / "office-os"))
+            sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "dost"))
             from dost import synthesis_detail
             text = synthesis_detail()
         except Exception as e:
@@ -3804,7 +3944,7 @@ class OfficeHandler(BaseHTTPRequestHandler):
 
         # Cost cap (advisory; threshold comes from office.json)
         try:
-            pnl_path = Path("/Users/aryanagarwal/.openclaw/office_pnl.json")
+            pnl_path = (Path.home() / ".openclaw" / "office_pnl.json")
             cap_limit = advisory_cost_cap_limit()
             if pnl_path.exists():
                 today_cost = _daily_ledger_cost(pnl_path)
@@ -3821,7 +3961,7 @@ class OfficeHandler(BaseHTTPRequestHandler):
 
         # Findings
         try:
-            findings_path = Path("/Users/aryanagarwal/Documents/polymarket/research/findings.json")
+            findings_path = (Path.home() / "Documents" / "polymarket" / "research" / "findings.json")
             if findings_path.exists():
                 data = json.loads(findings_path.read_text())
                 findings = data.get("findings", [])
@@ -3883,8 +4023,8 @@ class OfficeHandler(BaseHTTPRequestHandler):
 
     def _serve_review_page(self):
         """Tier C review page — findings review board."""
-        sys.path.insert(0, "/Users/aryanagarwal/AI-Office/packages/office-os")
-        sys.path.insert(0, "/Users/aryanagarwal/AI-Office/dost")
+        sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "packages" / "office-os"))
+        sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "dost"))
         from dost import synthesis_detail
         try:
             text = synthesis_detail()
@@ -4006,7 +4146,7 @@ def release_lock(lock_path: str):
 
 
 def run(port=8083):
-    lock_path = "/Users/aryanagarwal/AI-Office/packages/office-os/logs/web_server.lock"
+    lock_path = str(Path(__file__).resolve().parents[3] / "packages" / "office-os" / "logs" / "web_server.lock")
     if not acquire_lock(lock_path):
         print("[web_server] Another instance is already running. Exiting.")
         return

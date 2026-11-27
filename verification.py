@@ -22,7 +22,7 @@ try:
     import sqlite3
     from pathlib import Path
     
-    DB_PATH = Path("/Users/aryanagarwal/AI-Office/packages/office-core/tasks.db")
+    DB_PATH = (Path(__file__).resolve().parents[0] / "packages" / "office-core" / "tasks.db")
     
     def get_task(task_id: str) -> dict | None:
         """Get task record from central registry."""
@@ -137,7 +137,7 @@ except ImportError:
     import sqlite3
     from pathlib import Path
     
-    DB_PATH = Path("/Users/aryanagarwal/AI-Office/packages/office-core/tasks.db")
+    DB_PATH = (Path(__file__).resolve().parents[0] / "packages" / "office-core" / "tasks.db")
     
     # Same implementation as above, inlined
     def get_task(task_id: str) -> dict | None:

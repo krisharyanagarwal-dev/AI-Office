@@ -11,6 +11,7 @@ Reads session_registry.json to find workers assigned to the session.
 Submits the prompt via Ollama /api/generate to the worker(s).
 """
 
+from pathlib import Path
 import json
 import os
 import sys
@@ -19,7 +20,7 @@ import urllib.request
 import urllib.error
 
 REGISTRY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "session_registry.json")
-RESULT_DIR = "/Users/aryanagarwal/.openclaw/autonomous-qwen/results"
+RESULT_DIR = str(Path.home() / ".openclaw" / "autonomous-qwen" / "results")
 
 os.makedirs(RESULT_DIR, exist_ok=True)
 

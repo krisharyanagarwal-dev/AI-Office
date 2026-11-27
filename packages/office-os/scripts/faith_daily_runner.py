@@ -8,12 +8,13 @@ Orchestrates the full six-stage pipeline:
 3. Metrics recorded for adaptation
 4. Heartbeat logged
 """
+import os
 import sys
 import json
 from pathlib import Path
 
 # Add office-os to path
-sys.path.insert(0, "/Users/aryanagarwal/office-os")
+sys.path.insert(0, str(Path((os.environ.get("OFFICE_OS_HOME") or str(Path.home() / "office-os")))))
 
 from core.hive import Hive
 from agents.faith_director import FaithDirector

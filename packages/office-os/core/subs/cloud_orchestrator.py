@@ -20,7 +20,7 @@ import threading
 import time
 from pathlib import Path
 
-sys.path.insert(0, "/Users/aryanagarwal/AI-Office/packages/office-os")
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "packages" / "office-os"))
 from core.provider_client import ProviderClient
 
 PoolUnavailable = ProviderClient.PoolUnavailable
@@ -82,7 +82,7 @@ class CloudModelOrchestrator:
     - No DNS gate - real call results drive key health
     """
 
-    def __init__(self, config_path="/Users/aryanagarwal/AI-Office/packages/office-os/config/office.json"):
+    def __init__(self, config_path=str(Path(__file__).resolve().parents[4] / "packages" / "office-os" / "config" / "office.json")):
         self.router = ProviderRouter(config_path)
         self._consecutive_cloud_failures = 0
         self._cloud_failover_threshold = 3

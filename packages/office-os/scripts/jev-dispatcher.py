@@ -30,22 +30,22 @@ try:
 except ImportError:  # pragma: no cover
     argparse = None
 
-sys.path.insert(0, "/Users/aryanagarwal/AI-Office/packages/office-os")
-sys.path.insert(0, "/Users/aryanagarwal/AI-Office/dost")
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "packages" / "office-os"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "dost"))
 from core.subs.cloud_orchestrator import CloudModelOrchestrator
 
 from billing.meter import workspace_pnl_dir, get_usage_summary  # noqa: E402
 import billing.meter as _billing_meter  # noqa: E402
 
-OFFICE_CONFIG = "/Users/aryanagarwal/AI-Office/packages/office-os/config/office.json"
-HIVE_DIR = "/Users/aryanagarwal/AI-Office/packages/office-os/tasks"
-JEV_LOG = "/Users/aryanagarwal/.openclaw/jev-dispatcher.log"
-JEV_PID_FILE = "/Users/aryanagarwal/.openclaw/jev-dispatcher.pid"
+OFFICE_CONFIG = str(Path(__file__).resolve().parents[3] / "packages" / "office-os" / "config" / "office.json")
+HIVE_DIR = str(Path(__file__).resolve().parents[3] / "packages" / "office-os" / "tasks")
+JEV_LOG = str(Path.home() / ".openclaw" / "jev-dispatcher.log")
+JEV_PID_FILE = str(Path.home() / ".openclaw" / "jev-dispatcher.pid")
 PLAN_INTERVAL_SEC = 300  # Re-plan every 5 minutes
 PLAN_INTERVAL_MAX_SEC = 900  # Max re-plan interval (15 min) when nothing to do
 _plan_interval_sec = PLAN_INTERVAL_SEC  # Current (adaptive) interval
 _consecutive_skip_cycles = 0  # Consecutive cycles with 0 done and 0 error
-RESULT_DIR = "/Users/aryanagarwal/.openclaw/autonomous-qwen/results"
+RESULT_DIR = str(Path.home() / ".openclaw" / "autonomous-qwen" / "results")
 MAX_WORKERS = 20  # Threads per process for I/O concurrency
 WORKER_PROCESSES = os.cpu_count() or 4  # True multi-core parallelism
 SKIP_DONE_MIN = 15  # Don't re-plan agents done within this many minutes
@@ -79,11 +79,11 @@ STUCK_TASK_MIN_AGE_SEC = 300  # 5 minutes
 # --- State bundle: real trading data injected into prompts so agents reason
 # about ground truth instead of role-playing in a vacuum. ---
 
-KILL_SWITCH_PATH = "/Users/aryanagarwal/AI-Office/packages/_archive/openalice-fleet/state/trader_killswitch_status.json"
-OFFICE_CONFIG_PATH = "/Users/aryanagarwal/AI-Office/packages/office-os/config/office.json"
-POLYMARKET_RESEARCH_DIR = "/Users/aryanagarwal/Documents/polymarket/research"
-POLYMARKET_OUT_DIR = "/Users/aryanagarwal/Documents/polymarket/out"
-POLYMARKET_FRAMEWORK = "/Users/aryanagarwal/Documents/polymarket/RISK_MANAGEMENT_FRAMEWORK.md"
+KILL_SWITCH_PATH = str(Path(__file__).resolve().parents[3] / "packages" / "_archive" / "openalice-fleet" / "state" / "trader_killswitch_status.json")
+OFFICE_CONFIG_PATH = str(Path(__file__).resolve().parents[3] / "packages" / "office-os" / "config" / "office.json")
+POLYMARKET_RESEARCH_DIR = str(Path.home() / "Documents" / "polymarket" / "research")
+POLYMARKET_OUT_DIR = str(Path.home() / "Documents" / "polymarket" / "out")
+POLYMARKET_FRAMEWORK = str(Path.home() / "Documents" / "polymarket" / "RISK_MANAGEMENT_FRAMEWORK.md")
 
 # Agent-specific state files: (label, path). JSON files are dumped compactly;
 # text/markdown files are read raw and truncated.
@@ -457,7 +457,7 @@ def acquire_pid_lock():
 # --- Findings store: compounding research output with a verdict gate ---
 # Prevents the every-15-minutes-same-task loop by persisting conclusions
 # and requiring new cycles to refute or extend, not repeat.
-FINDINGS_STORE_PATH = "/Users/aryanagarwal/Documents/polymarket/research/findings.json"
+FINDINGS_STORE_PATH = str(Path.home() / "Documents" / "polymarket" / "research" / "findings.json")
 FINDINGS_EXPIRY_DAYS = 30  # Pending findings older than this are marked expired
 
 
@@ -745,7 +745,7 @@ OUTCOME_VALUE = {
 
 # Task ledger: in-memory record of every task's cost and outcome value.
 # Populated from Hive tasks on demand by office_pnl().
-TASK_LEDGER_PATH = "/Users/aryanagarwal/.openclaw/office_pnl.json"
+TASK_LEDGER_PATH = str(Path.home() / ".openclaw" / "office_pnl.json")
 
 
 def agent_autonomy_tier(agent_id: str) -> str:
@@ -2399,7 +2399,7 @@ def synthesize_cycle():
         "risk_agents": risk_agents,
     }
     synthesis_path = (
-        Path("/Users/aryanagarwal/Documents/polymarket/research")
+        (Path.home() / "Documents" / "polymarket" / "research")
         / f"synthesis_{time.strftime('%Y%m%d_%H%M%S')}.json"
     )
     with open(synthesis_path, "w") as f:
@@ -2477,7 +2477,7 @@ def generate_dashboard_html():
     # --- Provider pools available count ---
     pools_available = pools_total = 0
     try:
-        sys.path.insert(0, "/Users/aryanagarwal/AI-Office/packages/office-os")
+        sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "packages" / "office-os"))
         from core.router import ProviderRouter
         pool_status = ProviderRouter().status()
         pools_total = len(pool_status)

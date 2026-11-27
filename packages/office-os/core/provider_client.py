@@ -370,7 +370,7 @@ class ProviderClient:
     def _log_token_usage(self, usage: dict):
         """Log token usage to a file for tracking free-tier consumption."""
         try:
-            log_path = Path("/Users/aryanagarwal/office-os/logs/token_usage.jsonl")
+            log_path = (Path((os.environ.get("OFFICE_OS_HOME") or str(Path.home() / "office-os"))) / "logs" / "token_usage.jsonl")
             entry = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "pool": self.pool_name,

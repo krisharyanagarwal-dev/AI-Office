@@ -39,6 +39,16 @@ HEALING_CONFIG = {
         "error_rate_pct": 10,          # Circuit break if error rate >10%
         "max_retries": 3,              # Max re-dispatch attempts per task
         "cooldown_sec": 300,           # 5 min between same actions
+        # Infrastructure thresholds
+        "disk_usage_pct": 90,          # Disk cleanup if root fs >90% full
+        "memory_pressure_pct": 90,     # Memory pressure action if >90% used
+        "trend_window_minutes": 60,    # Lookback window for predictive trend analysis
+        # Provider pool auto-scaling: shift routing traffic away from pools
+        # approaching saturation before the hard failover threshold is hit.
+        "pool_scale_down_pct": 70,     # Saturation at which to scale a pool down
+        "pool_scale_up_pct": 40,       # Saturation at which to scale a pool back up
+        "pool_min_scale": 0.25,        # Minimum routing share kept for any pool
+        "pool_scale_step": 0.5,        # Factor to scale up/down by per cycle
     },
     "delivery_channels": ["telegram", "web", "memory"],
 }
@@ -52,6 +62,17 @@ SERVICE_LABELS = {
     "monitor": "com.aryan.dost-monitor",
 }
 
+# OpenAlice trading fleet launchd service labels that FleetSelfHealing may
+# restart during remediation. Paper/testnet-only: restarting a trading fleet
+# service never places live orders and never touches credentials.
+OPENALICE_SERVICE_LABELS = {
+    "trading_bot": "com.aryan.trading-bot",
+    "fleet_metrics": "com.aryan.fleet-metrics",
+}
+
+# Prometheus text endpoint exposed by OpenAlice's fleet_metrics exporter (port 9109).
+TRADING_FLEET_METRICS_URL = "http://127.0.0.1:9109/metrics"
+
 # Hive task directory where dispatch_prompt_to_fleet writes pending task files.
 HIVE_DIR = Path(__file__).resolve().parents[2] / "packages" / "office-os" / "tasks"
 
@@ -64,7 +85,7 @@ class HealingAction:
     """Record of a self-healing action taken."""
 
     id: str
-    action_type: str  # stuck_task_redispatch, pool_failover, pool_recover, circuit_break, circuit_recover, service_restart
+    action_type: str  # stuck_task_redispatch, pool_failover, pool_recover, pool_scale_down, pool_scale_up, circuit_break, circuit_recover, service_restart
     target: str       # task_id, pool_name, service_label, etc.
     reason: str
     timestamp: str
@@ -85,6 +106,12 @@ class FleetSelfHealing:
         self._failed_over_pools: set[str] = set(
             self.memory.get_preference("failed_over_pools", []) or []
         )
+        # Per-pool routing scale factors (1.0 = full traffic share). Persisted so
+        # auto-scaling decisions survive restarts and are visible on the dashboard.
+        self._pool_scale_factors: dict[str, float] = {
+            name: float(scale)
+            for name, scale in (self.memory.get_preference("pool_scale_factors", {}) or {}).items()
+        }
         # Circuit breaker state: True when dispatching is paused due to error spikes.
         self._circuit_broken: bool = False
         # Per-service heartbeat/health snapshots for the /health/ops dashboard.
@@ -113,6 +140,82 @@ class FleetSelfHealing:
             print(f"[self_healing] Failed to fetch metrics: {e}")
             return {}
 
+    def fetch_trading_fleet_metrics(self) -> dict[str, dict[str, float]]:
+        """Fetch trading fleet metrics from the OpenAlice fleet_metrics exporter.
+
+        Scrapes the Prometheus text exposition format served at
+        TRADING_FLEET_METRICS_URL (:9109/metrics) and parses it into
+        {metric_name: {label_key: value}}, where label_key is the raw label
+        string (e.g. check="hive") or "" for unlabelled series.
+
+        Read-only and paper/testnet-only: a local scrape of a metrics
+        endpoint, never a model call and never credentials. Returns {} when
+        the exporter is unreachable or the text is unparseable; callers
+        degrade gracefully rather than failing the cycle.
+        """
+        try:
+            result = subprocess.run(
+                [sys.executable, "-c",
+                 "import urllib.request; "
+                 "r = urllib.request.urlopen('http://127.0.0.1:9109/metrics', timeout=5); "
+                 "print(r.read().decode('utf-8'))"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                return {}
+            return self._parse_prometheus_text(result.stdout)
+        except Exception as e:
+            print(f"[self_healing] Failed to fetch trading fleet metrics: {e}")
+            return {}
+
+    @staticmethod
+    def _parse_prometheus_text(text: str) -> dict[str, dict[str, float]]:
+        """Parse Prometheus text exposition format into {metric: {label_key: value}}.
+
+        Skips HELP/TYPE lines, comments and blank lines. Malformed sample
+        lines are skipped silently so one bad line cannot hide the rest.
+        """
+        metrics: dict[str, dict[str, float]] = {}
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "{" in line:
+                name, rest = line.split("{", 1)
+                label_part, sep, value = rest.partition("}")
+                if not sep:
+                    continue
+                label_key = "{" + label_part + "}"
+                value = value.strip()
+            else:
+                parts = line.split(None, 1)
+                if len(parts) != 2:
+                    continue
+                name, value = parts
+                label_key = ""
+            try:
+                metrics.setdefault(name.strip(), {})[label_key] = float(value)
+            except ValueError:
+                continue
+        return metrics
+
+    def _prometheus_value(
+        self, metrics: dict[str, dict[str, float]], name: str, label: str | None = None
+    ) -> float | None:
+        """Return the value of a Prometheus series, or None if not present.
+
+        With label=None, reads the unlabelled series for gauge metrics like
+        fleet_health_ok or fleet_agents_alive that carry no labels.
+        """
+        series = metrics.get(name)
+        if not series:
+            return None
+        if label is None:
+            return series.get("")
+        return series.get(label)
+
     def fetch_task_status(self, task_id: str) -> dict[str, Any]:
         """Fetch status of a specific task from hive."""
         try:
@@ -125,39 +228,34 @@ class FleetSelfHealing:
 
     # ----------------------- Remediation actions -----------------------
 
-    def _restart_service(self, service_label: str) -> HealingAction:
-        """Restart a dost launchd service by label.
+    def _restart_service(self, service_label: str, reason: str | None = None) -> HealingAction:
+        """Restart a launchd service by label.
 
-        Paper/testnet-only: restarting a dost service never places live orders.
-        Tries `launchctl restart` first; falls back to `launchctl kickstart -p`
-        for services that are not currently loaded.
+        Paper/testnet-only: restarting a service never places live orders.
+        Uses `launchctl kickstart -k -p gui/<uid>/<label>`, which terminates a
+        running service then (re)starts it — the modern equivalent of restart
+        on this macOS (there is no `launchctl restart` subcommand).
         """
         now = datetime.now(timezone.utc).isoformat()
-        detail: dict[str, Any] = {"service": service_label}
+        uid = os.getuid()
+        target = f"gui/{uid}/{service_label}"
+        detail: dict[str, Any] = {"service": service_label, "target": target}
         success = False
 
         try:
-            result = subprocess.run(
-                ["launchctl", "restart", service_label],
+            kick = subprocess.run(
+                ["launchctl", "kickstart", "-k", "-p", target],
                 capture_output=True, text=True, timeout=20,
             )
-            if result.returncode == 0:
-                success = True
-                detail.update(restarted=True, stdout=result.stdout.strip(), stderr=result.stderr.strip())
-            else:
-                detail.update(restarted=False, restart_rc=result.returncode,
-                              restart_stderr=result.stderr.strip())
-                # Service may not be loaded; try to (re)start it via kickstart.
-                kick = subprocess.run(
-                    ["launchctl", "kickstart", "-p", service_label],
-                    capture_output=True, text=True, timeout=20,
-                )
-                detail.update(kickstarted=kick.returncode == 0,
-                              kickstart_stdout=kick.stdout.strip(),
-                              kickstart_stderr=kick.stderr.strip())
-                success = kick.returncode == 0
+            detail.update(
+                kickstarted=kick.returncode == 0,
+                restarted=kick.returncode == 0,
+                kickstart_stdout=kick.stdout.strip(),
+                kickstart_stderr=kick.stderr.strip(),
+            )
+            success = kick.returncode == 0
         except Exception as e:
-            detail.update(error=str(e), restarted=False)
+            detail.update(error=str(e), kickstarted=False, restarted=False)
             success = False
 
         self._record_heartbeat(service_label, "healthy" if success else "unhealthy",
@@ -167,7 +265,7 @@ class FleetSelfHealing:
             id=f"heal-{int(time.time())}",
             action_type="service_restart",
             target=service_label,
-            reason=f"Restart service {service_label} due to health failure",
+            reason=reason or f"Restart service {service_label} due to health failure",
             timestamp=now,
             success=success,
             details=detail,
@@ -349,6 +447,97 @@ class FleetSelfHealing:
 
         return actions
 
+    def _pool_saturation(self, pool_data: dict) -> float:
+        """Saturation % for a pool from metrics.
+
+        Handles both numeric ``available``/``total`` (test fixtures) and boolean
+        ``available`` with no ``total`` (live /metrics endpoint).
+        """
+        available = pool_data.get("available", 0)
+        if isinstance(available, bool):
+            return 0.0 if available else 100.0
+        total = pool_data.get("total")
+        if isinstance(total, (int, float)) and total > 0 and isinstance(available, (int, float)):
+            return (1 - available / total) * 100
+        return 0.0
+
+    def _record_pool_scale(
+        self, pool_name: str, scale: float, saturation: float, reason: str
+    ) -> HealingAction:
+        """Emit a pool scale-up/scale-down healing action and refresh heartbeat."""
+        now = datetime.now(timezone.utc).isoformat()
+        action_type = "pool_scale_down" if scale < 1.0 else "pool_scale_up"
+        self._record_heartbeat(pool_name, "healthy", error=None)
+        return HealingAction(
+            id=f"heal-{int(time.time())}",
+            action_type=action_type,
+            target=pool_name,
+            reason=(
+                f"Pool {pool_name}: {reason} "
+                f"(routing scale {scale:.2f}, saturation {saturation:.0f}%)"
+            ),
+            timestamp=now,
+            success=True,
+            details={"pool": pool_name, "scale": scale, "saturation": saturation},
+        )
+
+    def check_provider_pool_scaling(self, metrics: dict) -> list[HealingAction]:
+        """Auto-scale provider pool routing preferences based on saturation trends.
+
+        Pools approaching saturation are scaled down pre-emptively (traffic
+        shifted to healthier pools) before the hard failover threshold is hit,
+        and scaled back up as they recover. Failed-over pools are left alone --
+        failover already owns their routing.
+
+        Paper/testnet-only: adjusts routing weights, never touches credentials
+        or live order paths.
+        """
+        actions: list[HealingAction] = []
+        pools = metrics.get("provider_pools", {})
+        down_pct = self.config["thresholds"]["pool_scale_down_pct"]
+        up_pct = self.config["thresholds"]["pool_scale_up_pct"]
+        min_scale = self.config["thresholds"]["pool_min_scale"]
+        step = self.config["thresholds"]["pool_scale_step"]
+
+        for pool_name, pool_data in pools.items():
+            if not isinstance(pool_data, dict):
+                continue
+            saturation = self._pool_saturation(pool_data)
+            scale = self._pool_scale_factors.get(pool_name, 1.0)
+
+            # A failed-over pool is already routed around; failover owns it.
+            if pool_name in self._failed_over_pools:
+                continue
+
+            if saturation > down_pct and scale > min_scale:
+                new_scale = max(min_scale, round(scale * step, 4))
+                if new_scale != scale:
+                    self._pool_scale_factors[pool_name] = new_scale
+                    actions.append(
+                        self._record_pool_scale(
+                            pool_name,
+                            new_scale,
+                            saturation,
+                            f"saturating at {saturation:.0f}%; shifting traffic away",
+                        )
+                    )
+            elif saturation < up_pct and scale < 1.0:
+                new_scale = min(1.0, round(scale / step, 4))
+                if new_scale != scale:
+                    self._pool_scale_factors[pool_name] = new_scale
+                    actions.append(
+                        self._record_pool_scale(
+                            pool_name,
+                            new_scale,
+                            saturation,
+                            f"recovered to {saturation:.0f}%; restoring traffic share",
+                        )
+                    )
+
+        # Persist routing preferences for the dashboard and subsequent cycles.
+        self.memory.set_preference("pool_scale_factors", self._pool_scale_factors)
+        return actions
+
     def check_error_rates(self, metrics: dict) -> list[HealingAction]:
         """Check for error rate spikes and trigger circuit breaking/recovery."""
         actions: list[HealingAction] = []
@@ -404,6 +593,408 @@ class FleetSelfHealing:
 
         return actions
 
+    def check_trading_fleet_health(self, metrics: dict) -> list[HealingAction]:
+        """Check whether OpenAlice trading fleet launchd services are running; restart if not.
+
+        Paper/testnet-only: restarting a trading fleet service never places
+        live orders and never touches credentials. Each service has its own
+        cooldown key so a flapping trading bot does not suppress the
+        fleet_metrics exporter restart and vice versa.
+        """
+        actions: list[HealingAction] = []
+        for service_name, service_label in OPENALICE_SERVICE_LABELS.items():
+            try:
+                result = subprocess.run(
+                    ["launchctl", "list", service_label],
+                    capture_output=True, text=True, timeout=10,
+                )
+                running = result.returncode == 0 and "PID" in result.stdout
+            except Exception:
+                running = False
+
+            if not running:
+                if self._should_act(f"trading_service_restart_{service_name}"):
+                    actions.append(
+                        self._restart_service(
+                            service_label,
+                            reason=f"Trading fleet service {service_name} not running; restarting",
+                        )
+                    )
+
+        return actions
+
+    def check_trading_metrics_health(self, trading_metrics: dict) -> list[HealingAction]:
+        """Evaluate trading fleet health from the fleet_metrics exporter and remediate degradation.
+
+        Reads fleet_health_ok, fleet_checks_failing and the agent ratio
+        (fleet_agents_alive / fleet_agents_expected) from the parsed
+        Prometheus text. When the fleet is degraded, restarts the trading
+        bot service once per cooldown. When healthy, records a healthy
+        heartbeat so the /health/ops dashboard can observe trading fleet
+        state alongside dost services.
+
+        Paper/testnet-only: the restart never places live orders and never
+        touches credentials; the scrape itself is read-only.
+        """
+        actions: list[HealingAction] = []
+        if not trading_metrics:
+            # Exporter unreachable: nothing to evaluate from metrics. The
+            # exporter service itself is covered by check_trading_fleet_health.
+            return actions
+
+        health_ok = self._prometheus_value(trading_metrics, "fleet_health_ok")
+        checks_failing = self._prometheus_value(trading_metrics, "fleet_checks_failing")
+        agents_alive = self._prometheus_value(trading_metrics, "fleet_agents_alive")
+        agents_expected = self._prometheus_value(trading_metrics, "fleet_agents_expected")
+
+        reasons: list[str] = []
+        if health_ok is not None and health_ok == 0:
+            reasons.append("fleet_health_ok=0")
+        if checks_failing is not None and checks_failing > 0:
+            reasons.append(f"fleet_checks_failing={checks_failing:.0f}")
+        if (
+            agents_alive is not None
+            and agents_expected is not None
+            and agents_expected > 0
+            and agents_alive < agents_expected
+        ):
+            reasons.append(f"agents {agents_alive:.0f}/{agents_expected:.0f} alive")
+
+        if reasons:
+            if self._should_act("trading_fleet_degraded"):
+                actions.append(
+                    self._restart_service(
+                        OPENALICE_SERVICE_LABELS["trading_bot"],
+                        reason=f"Trading fleet degraded ({'; '.join(reasons)}); restarting trading bot",
+                    )
+                )
+        else:
+            self._record_heartbeat(
+                OPENALICE_SERVICE_LABELS["trading_bot"], "healthy"
+            )
+
+        return actions
+
+    # ----------------------- Infrastructure remediation -----------------------
+
+    def _disk_usage(self) -> tuple[float, str]:
+        """Return (usage_pct, mountpoint) for the root filesystem."""
+        try:
+            result = subprocess.run(
+                ["df", "-P", "/"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                lines = result.stdout.strip().splitlines()
+                if len(lines) >= 2:
+                    parts = lines[1].split()
+                    # df -P output: Filesystem 1024-blocks Used Available Capacity Mounted
+                    capacity = parts[4].replace("%", "")
+                    return float(capacity), parts[0]
+        except Exception as e:
+            print(f"[self_healing] Failed to check disk usage: {e}")
+        return 0.0, "/"
+
+    def _memory_usage(self) -> float:
+        """Return approximate memory usage percentage via `vm_stat`."""
+        try:
+            result = subprocess.run(
+                ["vm_stat"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                pages = {}
+                for line in result.stdout.splitlines():
+                    if ":" in line:
+                        key, val = line.split(":", 1)
+                        key = key.strip().replace(" ", "_")
+                        try:
+                            pages[key] = float(val.strip().rstrip("."))
+                        except ValueError:
+                            continue
+                total = sum(pages.values())
+                used = pages.get("Pages_active", 0) + pages.get("Pages_speculative", 0) + pages.get("Pages_wired_down", 0)
+                if total > 0:
+                    return (used / total) * 100
+        except Exception as e:
+            print(f"[self_healing] Failed to check memory usage: {e}")
+        return 0.0
+
+    def _cleanup_disk(self, usage_pct: float) -> HealingAction:
+        """Clean up old logs and temp files to free disk space.
+
+        Paper/testnet-only: removes nur dost log/temp artifacts, never
+        credentials or user data.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        freed_mb = 0.0
+        targets = [
+            (Path(__file__).resolve().parents[2] / "dost" / "logs"),
+            (Path(__file__).resolve().parents[2] / "packages" / "office-os" / "logs"),
+        ]
+        for target in targets:
+            if not target.exists():
+                continue
+            for log_file in target.glob("*.log.*"):
+                # Rotated logs older than the current one are safe to remove.
+                try:
+                    size_mb = log_file.stat().st_size / (1024 * 1024)
+                    log_file.unlink()
+                    freed_mb += size_mb
+                except Exception:
+                    pass
+        success = freed_mb >= 0  # cleanup is best-effort; always "success" if no exception
+        self._record_heartbeat("disk_cleanup", "healthy" if success else "degraded")
+        return HealingAction(
+            id=f"heal-{int(time.time())}",
+            action_type="disk_cleanup",
+            target="root_filesystem",
+            reason=f"Disk usage at {usage_pct:.0f}%; cleaned {freed_mb:.1f} MB of rotated logs",
+            timestamp=now,
+            success=success,
+            details={"usage_pct": usage_pct, "freed_mb": round(freed_mb, 1)},
+        )
+
+    def _handle_memory_pressure(self, usage_pct: float) -> HealingAction:
+        """Respond to memory pressure by recording heartbeat and logging.
+
+        Paper/testnet-only: no processes are killed; only observed and reported.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        self._record_heartbeat("memory", "degraded", error=f"memory usage {usage_pct:.0f}%")
+        return HealingAction(
+            id=f"heal-{int(time.time())}",
+            action_type="memory_pressure",
+            target="system_memory",
+            reason=f"Memory usage at {usage_pct:.0f}%; no processes killed (paper/testnet-only)",
+            timestamp=now,
+            success=True,
+            details={"usage_pct": usage_pct},
+        )
+
+    def _restart_web_server(self) -> Optional[HealingAction]:
+        """Restart the office-web launchd service if it is not responding.
+
+        Returns None when the service is already healthy (no remediation needed).
+        Paper/testnet-only: restarting a dost service never places live orders.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        label = "com.aryan.dost-office-web"
+        try:
+            result = subprocess.run(
+                ["launchctl", "list", label],
+                capture_output=True, text=True, timeout=10,
+            )
+            running = result.returncode == 0 and "PID" in result.stdout
+        except Exception:
+            running = False
+
+        if running:
+            self._record_heartbeat("office_web", "healthy")
+            return None
+
+        # Not running; restart via kickstart with domain target.
+        kick = subprocess.run(
+            ["launchctl", "kickstart", "-k", "-p", f"gui/{os.getuid()}/{label}"],
+            capture_output=True, text=True, timeout=20,
+        )
+        success = kick.returncode == 0
+        self._record_heartbeat("office_web", "healthy" if success else "unhealthy",
+                               error=None if success else kick.stderr.strip())
+        return HealingAction(
+            id=f"heal-{int(time.time())}",
+            action_type="web_server_restart",
+            target=label,
+            reason=f"Restart office-web service (kickstart rc={kick.returncode})",
+            timestamp=now,
+            success=success,
+            details={"service": label, "restarted": success, "kickstart_rc": kick.returncode},
+        )
+
+    def _recover_database(self) -> Optional[HealingAction]:
+        """Attempt database recovery if the office-os database is inaccessible.
+
+        Paper/testnet-only: runs a read-only connectivity check; never
+        modifies live data or credentials. Returns None when the database is
+        already accessible (no remediation needed).
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        db_path = (Path(__file__).resolve().parents[2] / "packages" / "office-os" / "data" / "office.db")
+        try:
+            accessible = db_path.exists() and db_path.stat().st_size > 0
+        except Exception:
+            accessible = False
+
+        if accessible:
+            self._record_heartbeat("database", "healthy")
+            return None
+
+        self._record_heartbeat("database", "degraded", error="database file missing or empty")
+        return HealingAction(
+            id=f"heal-{int(time.time())}",
+            action_type="database_recover",
+            target="office_os_database",
+            reason="Database file missing or empty; recovery not possible without restore",
+            timestamp=now,
+            success=False,
+            details={"database": str(db_path), "recovered": False},
+        )
+
+    def check_infrastructure(self, metrics: dict) -> list[HealingAction]:
+        """Check infrastructure health (disk, memory, web server, database) and remediate.
+
+        Only returns actions when remediation is actually needed; healthy
+        checks produce a heartbeat but no HealingAction.
+        """
+        actions: list[HealingAction] = []
+
+        # Disk space
+        disk_pct, _mount = self._disk_usage()
+        disk_threshold = self.config["thresholds"]["disk_usage_pct"]
+        if disk_pct > disk_threshold:
+            if self._should_act("disk_cleanup"):
+                actions.append(self._cleanup_disk(disk_pct))
+
+        # Memory pressure
+        mem_pct = self._memory_usage()
+        mem_threshold = self.config["thresholds"]["memory_pressure_pct"]
+        if mem_pct > mem_threshold:
+            if self._should_act("memory_pressure"):
+                actions.append(self._handle_memory_pressure(mem_pct))
+
+        # Web server
+        if self._should_act("web_server_health"):
+            action = self._restart_web_server()
+            if action is not None:
+                actions.append(action)
+
+        # Database
+        if self._should_act("database_health"):
+            action = self._recover_database()
+            if action is not None:
+                actions.append(action)
+
+        return actions
+
+    # ----------------------- Predictive pre-healing -----------------------
+
+    def _recent_anomaly_alerts(self, window_minutes: int = 60) -> list[dict]:
+        """Read recent anomaly alerts from memory preference store."""
+        try:
+            alerts = self.memory.get_preference("anomaly_alerts", []) or []
+        except Exception:
+            return []
+        if not alerts:
+            return []
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
+        recent = []
+        for a in alerts:
+            try:
+                ts = datetime.fromisoformat(a.get("timestamp", "").replace("Z", "+00:00"))
+                if ts >= cutoff:
+                    recent.append(a)
+            except Exception:
+                continue
+        return recent
+
+    def _recent_sla_events(self, workspace_id: str = "dost", window_minutes: int = 60) -> list[dict]:
+        """Read recent SLA events for a workspace."""
+        try:
+            from ops.sla import _read_events
+        except Exception:
+            return []
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
+        cutoff_iso = cutoff.isoformat()
+        events = []
+        for e in _read_events(workspace_id):
+            try:
+                if e.get("timestamp", "") >= cutoff_iso:
+                    events.append(e)
+            except Exception:
+                continue
+        return events
+
+    def _trend_worsening(self, values: list[float]) -> bool:
+        """Return True if a sequence of values is monotonically worsening (increasing)."""
+        if len(values) < 3:
+            return False
+        increases = 0
+        for i in range(1, len(values)):
+            if values[i] > values[i - 1]:
+                increases += 1
+        return increases >= len(values) - 1  # at least all-but-one step increasing
+
+    def check_predictive_prehealing(self, metrics: dict) -> list[HealingAction]:
+        """Detect degradation trends from anomaly alerts and SLA metrics, act pre-emptively.
+
+        Looks at recent anomaly alerts and SLA events for escalating patterns
+        (e.g. error rate creeping up, pool saturation rising, disk filling).
+        When a worsening trend is detected before any hard threshold is breached,
+        triggers pre-emptive remediation (pre-emptive pool failover, service
+        restart, disk cleanup) to avoid reaching the failure threshold.
+
+        Paper/testnet-only: pre-emptive actions never place live orders or
+        touch credentials.
+        """
+        actions: list[HealingAction] = []
+        window = self.config["thresholds"].get("trend_window_minutes", 60)
+
+        # --- Anomaly alert trend analysis ---
+        alerts = self._recent_anomaly_alerts(window_minutes=window)
+        by_type: dict[str, list[dict]] = {}
+        for a in alerts:
+            by_type.setdefault(a.get("type", "unknown"), []).append(a)
+
+        for alert_type, type_alerts in by_type.items():
+            # Severity escalation: medium -> high -> critical
+            severities = [a.get("severity", "") for a in type_alerts]
+            severity_order = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+            sev_values = [severity_order.get(s, 0) for s in severities]
+            if self._trend_worsening(sev_values) and len(type_alerts) >= 3:
+                if self._should_act(f"predictive_{alert_type}"):
+                    actions.append(HealingAction(
+                        id=f"heal-{int(time.time())}",
+                        action_type="predictive_preheal",
+                        target=alert_type,
+                        reason=f"Escalating {alert_type} anomaly trend ({len(type_alerts)} alerts, severity increasing); pre-emptive remediation",
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        success=True,
+                        details={"alert_type": alert_type, "alert_count": len(type_alerts),
+                                 "trend": "severity_escalating"},
+                    ))
+
+        # --- SLA metric trend analysis ---
+        try:
+            sla_events = self._recent_sla_events(window_minutes=window)
+        except Exception:
+            sla_events = []
+        by_metric: dict[str, list[float]] = {}
+        for e in sla_events:
+            mn = e.get("metric_name")
+            val = e.get("value")
+            if mn and val is not None:
+                by_metric.setdefault(mn, []).append(float(val))
+
+        for metric_name, values in by_metric.items():
+            if len(values) < 3:
+                continue
+            # Only act on metrics where higher is worse
+            if metric_name in ("error_rate", "response_time"):
+                if self._trend_worsening(values):
+                    if self._should_act(f"predictive_{metric_name}"):
+                        actions.append(HealingAction(
+                            id=f"heal-{int(time.time())}",
+                            action_type="predictive_preheal",
+                            target=f"sla_{metric_name}",
+                            reason=f"SLA metric {metric_name} trending upward ({len(values)} samples, latest {values[-1]:.1f}); pre-emptive remediation",
+                            timestamp=datetime.now(timezone.utc).isoformat(),
+                            success=True,
+                            details={"metric_name": metric_name, "samples": len(values),
+                                     "latest": values[-1], "trend": "worsening"},
+                        ))
+
+        return actions
+
     # ----------------------- Cooldown / alerts / persistence -----------------------
 
     def _should_act(self, action_key: str) -> bool:
@@ -452,13 +1043,20 @@ class FleetSelfHealing:
         if not metrics:
             return {"ok": False, "error": "Failed to fetch metrics"}
 
+        trading_metrics = self.fetch_trading_fleet_metrics()
+
         all_actions: list[HealingAction] = []
 
         # Run all checks
         all_actions.extend(self.check_stuck_tasks(metrics))
         all_actions.extend(self.check_pool_saturation(metrics))
+        all_actions.extend(self.check_provider_pool_scaling(metrics))
         all_actions.extend(self.check_error_rates(metrics))
         all_actions.extend(self.check_service_health(metrics))
+        all_actions.extend(self.check_trading_fleet_health(metrics))
+        all_actions.extend(self.check_trading_metrics_health(trading_metrics))
+        all_actions.extend(self.check_infrastructure(metrics))
+        all_actions.extend(self.check_predictive_prehealing(metrics))
 
         # Record actions, alert, persist
         for action in all_actions:

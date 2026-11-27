@@ -5,6 +5,7 @@ The office must spend nothing on cloud models while the local MLX server is
 healthy, but it must still reach the cloud when MLX is down. Selection order is
 therefore (cost, task_count): cheapest pool first, round-robin among equals.
 """
+from pathlib import Path
 import json
 import time
 
@@ -13,7 +14,7 @@ import pytest
 from core.router import ProviderRouter
 
 MLX_MODEL = "TheCluster/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-MLX-mxfp4"
-REAL_CONFIG = "/Users/aryanagarwal/AI-Office/packages/office-os/config/office.json"
+REAL_CONFIG = str(Path(__file__).resolve().parents[3] / "packages" / "office-os" / "config" / "office.json")
 
 
 def _router(tmp_path, pools, fallback_chain=None):

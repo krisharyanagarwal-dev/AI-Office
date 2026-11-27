@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import sys
-sys.path.insert(0, "/Users/aryanagarwal/AI-Office/packages/office-core")
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "packages" / "office-core"))
 """
 office-core API Server
 FastAPI on :8080 - REST API for tasks, agents, models, launchd

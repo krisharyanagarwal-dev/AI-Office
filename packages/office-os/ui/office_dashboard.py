@@ -9,11 +9,11 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-sys.path.insert(0, "/Users/aryanagarwal/office-os")
+sys.path.insert(0, str(Path((os.environ.get("OFFICE_OS_HOME") or str(Path.home() / "office-os")))))
 from core.hive import Hive
 from core.router import ProviderRouter
 
-OFFICE_ROOT = Path("/Users/aryanagarwal/office-os")
+OFFICE_ROOT = (Path((os.environ.get("OFFICE_OS_HOME") or str(Path.home() / "office-os"))))
 HOME = Path.home()
 DISPATCHER_LOG = HOME / ".openclaw" / "jev-dispatcher.log"
 OFFICE_PNL = HOME / ".openclaw" / "office_pnl.json"

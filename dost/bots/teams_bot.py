@@ -35,11 +35,11 @@ COMPANY_DIR = Path(__file__).resolve().parent.parent.parent
 DOST_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(COMPANY_DIR))
 
-# Load the inner dost module (dost/dost.py) directly by file path. Importing
+# Load the inner dost module (dost/dost_main.py) directly by file path. Importing
 # the plain name "dost" is ambiguous here: a top-level dost.py wrapper and a
 # dost/ package both exist, and "from dost import ..." would bind to the
 # empty package __init__ when this module is imported as dost.teams_bot.
-_DOST_INNER = DOST_DIR / "dost.py"
+_DOST_INNER = DOST_DIR / "dost_main.py"
 _dost_spec = importlib.util.spec_from_file_location("dost_inner", _DOST_INNER)
 _dost = importlib.util.module_from_spec(_dost_spec)
 sys.modules["dost_inner"] = _dost
