@@ -75,6 +75,14 @@ def record_fill(journal: FillJournal, fill, order, broker) -> None:
     # Serialize side to string if it's an enum
     side_str = fill_side.value if hasattr(fill_side, "value") else str(fill_side)
 
+    # Extract additional execution data from fill if available
+    spread_bps = getattr(fill, "spread_bps", 0.0)
+    bid = getattr(fill, "bid", 0.0)
+    ask = getattr(fill, "ask", 0.0)
+    fill_fraction = getattr(fill, "fill_fraction", 1.0)
+    leg_sequence = getattr(fill, "leg_sequence", 0)
+    venue_latency_ms = getattr(fill, "venue_latency_ms", 0.0)
+
     rec = FillRecord(
         ts=datetime.now(timezone.utc).isoformat(),
         symbol=fill.symbol,
@@ -88,5 +96,11 @@ def record_fill(journal: FillJournal, fill, order, broker) -> None:
         latency_ms=getattr(realism, "latency_ms", 0.0),
         partial_fill=getattr(fill, "partial_fill", False),
         order_id=fill.order_id,
+        spread_bps=spread_bps,
+        bid=bid,
+        ask=ask,
+        fill_fraction=fill_fraction,
+        leg_sequence=leg_sequence,
+        venue_latency_ms=venue_latency_ms,
     )
     journal.record(rec)

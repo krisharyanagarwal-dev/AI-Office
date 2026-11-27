@@ -10,6 +10,7 @@ from best_signal.execution import (
     ExecutionResult,
 )
 from best_signal.telemetry import CycleMetrics, TelemetrySink, record_cycle
+from best_signal.fill_journal import FillJournal, FillRecord, record_fill
 
 
 class _FakeRealism:
@@ -87,6 +88,73 @@ class TestTelemetrySink:
         )
         sink.record(metrics)
         assert not path.exists()
+
+    def test_cycle_metrics_captures_actual_slippage_and_timeline(self, tmp_path):
+        """CycleMetrics records measured slippage and fill timeline."""
+        path = tmp_path / "telemetry.jsonl"
+        sink = TelemetrySink(path, enabled=True)
+        journal = FillJournal(tmp_path / "fills.jsonl", enabled=True)
+
+        # Create mock fill and order with actual execution data
+        class MockFill:
+            order_id = "ord123"
+            symbol = "BTCUSDT"
+            side = "buy"
+            quantity = 100.0
+            price = 100.10
+            commission = 5.005
+            # Actual execution data
+            spread_bps = 2.0
+            bid = 99.99
+            ask = 100.01
+            fill_fraction = 1.0
+            leg_sequence = 0
+            venue_latency_ms = 3.0
+            partial_fill = False
+
+        class MockOrder:
+            client_order_id = "ord123"
+            symbol = "BTCUSDT"
+            side = "buy"
+            price = 100.0  # mid price at order time
+
+        class MockRealism:
+            slippage_bps = 10.0
+            latency_ms = 5.0
+
+        class MockBroker:
+            realism = MockRealism()
+            fill_journal = journal
+
+        # Pre-record a fill in the journal
+        fill = MockFill()
+        order = MockOrder()
+        broker = MockBroker()
+        record_fill(journal, fill, order, broker)
+
+        result = ExecutionResult(
+            symbol="BTCUSDT", action="OPEN", legs=(), fees=10.0,
+            filled=True, reason="filled", partial=False
+        )
+
+        record_cycle(
+            sink=sink,
+            symbol="BTCUSDT",
+            side=1,
+            notional=10000.0,
+            action="OPEN",
+            result=result,
+            broker=broker,
+        )
+
+        # Verify actual measured slippage recorded
+        payload = json.loads(path.read_text().strip())
+        assert "actual_slippage_bps" in payload
+        assert payload["actual_slippage_bps"] == pytest.approx(10.0)  # (100.10-100)/100*10000
+        assert "bid_ask_spread_bps" in payload
+        assert payload["bid_ask_spread_bps"] == 2.0
+        assert "fill_timeline" in payload
+        assert len(payload["fill_timeline"]) >= 1
 
 
 class TestRecordCycle:
