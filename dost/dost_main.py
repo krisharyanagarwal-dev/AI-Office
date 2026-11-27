@@ -63,6 +63,7 @@ from collab.workspace import (  # noqa: E402
 # Cloud model orchestrator (same orchestration the dispatcher uses) for direct
 # debate calls that bypass the dispatcher's general-assistant override.
 OFFICE_OS = (Path(__file__).resolve().parents[1] / "packages" / "office-os")
+OFFICE_CORE = OFFICE_OS / "core"  # holds sources.py, the read-only collectors
 if str(OFFICE_OS) not in sys.path:
     sys.path.insert(0, str(OFFICE_OS))
 from core.subs.cloud_orchestrator import CloudModelOrchestrator  # noqa: E402
@@ -70,7 +71,7 @@ from core.subs.cloud_orchestrator import CloudModelOrchestrator  # noqa: E402
 RESEARCH_DIR = (Path.home() / "Documents" / "indian-paper-trading")
 O3_RUNNER = RESEARCH_DIR / "o3_runner.py"
 
-RESEARCH_COMMANDS = {"register", "gate", "holdout", "calibrate", "report", "all"}
+RESEARCH_COMMANDS = {"register", "gate", "holdout", "calibrate", "report", "all", "web_search"}
 
 
 def log(msg: str) -> None:
@@ -153,6 +154,28 @@ def run_research_command(cmd: str) -> str:
         return f"Error running research command: {e}"
 
 
+def run_web_search(query: str) -> str:
+    """Run a keyless public web search and return ranked results as text.
+
+    Delegates to the web_search skill (DuckDuckGo HTML, no API key).
+    Returns a short, narratable summary of results.
+    """
+    from skills.registry import get_registry
+
+    registry = get_registry()
+    registry.discover_skills()
+    result = registry.run_skill("web_search", query=query)
+    if not result.get("ok"):
+        return f"Web search failed: {result.get('error', 'unknown error')}"
+    results = result.get("results", [])
+    if not results:
+        return "No web results found for that query."
+    lines = [f"Web results for '{query}':"]
+    for r in results:
+        lines.append(f"- {r['title']}: {r['snippet']} ({r['url']})")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # LLM prompts
 # ---------------------------------------------------------------------------
@@ -165,7 +188,9 @@ CONTEXT (live company data — use these verbatim for any numbers):
 The user said: "{task}"
 
 Decide how to respond:
-- If they're asking to run a research pipeline command (report/register/gate/holdout/calibrate/all), reply with ONLY: COMMAND:<command_name>
+- If they're asking to run a research pipeline command (report/register/gate/holdout/calibrate/all/web_search), reply with ONLY: COMMAND:<command_name>
+- If they want analysis delegated to the company fleet, reply with ONLY: FLEET:<prompt>
+- If they want a multi-step plan executed through web search and the fleet, reply with ONLY: ORCHESTRATE:<goal>
 - Otherwise, write a warm, natural response in your own voice. Ground any numbers in the CONTEXT above. Be honest about failures — don't hide them. Don't expose internal IDs, provider names, model names, task IDs, or technical plumbing. Sound like a capable friend who knows about trading research.
 """
 
@@ -228,13 +253,22 @@ def mlx_chat_completion(messages: list[dict], temperature: float = 0.3,
     return {"text": text, "provider": "mlx_local", "model": MLX_MODEL}
 
 
-def _chat(messages: list[dict], temperature: float, max_tokens: int) -> dict:
-    """Local MLX first, then the external OpenAI-compatible chain."""
-    result = mlx_chat_completion(messages, temperature=temperature, max_tokens=max_tokens)
+def _chat(messages: list[dict], temperature: float, max_tokens: int) -> dict | None:
+    """Local MLX first, then the external OpenAI-compatible chain.
+
+    Returns None when no LLM provider is reachable so callers can degrade
+    gracefully to the deterministic fallback instead of blocking.
+    """
+    mlx_timeout = int(os.environ.get("DOST_MLX_TIMEOUT", "10"))
+    result = mlx_chat_completion(messages, temperature=temperature,
+                                 max_tokens=max_tokens, timeout=mlx_timeout)
     if result is not None:
         return result
     log("MLX local unavailable, falling back to external providers")
-    return chat_completion(messages, temperature=temperature, max_tokens=max_tokens)
+    result = chat_completion(messages, temperature=temperature, max_tokens=max_tokens)
+    if result.get("provider") == "none":
+        return None
+    return result
 
 
 def llm_decide(task: str, context: str, style: str = "") -> str:
@@ -250,6 +284,8 @@ def llm_decide(task: str, context: str, style: str = "") -> str:
         temperature=0.3,
         max_tokens=400,
     )
+    if not result:
+        return ""
     text = result["text"].strip()
     return text
 
@@ -265,6 +301,8 @@ def llm_narrate(command: str, output: str, context: str) -> str:
         temperature=0.4,
         max_tokens=500,
     )
+    if not result:
+        return ""
     return result["text"].strip()
 
 
@@ -272,7 +310,7 @@ def llm_narrate(command: str, output: str, context: str) -> str:
 # Deterministic fallbacks (when no LLM provider is available)
 # ---------------------------------------------------------------------------
 
-def fallback_decide(task: str, context: str) -> str:
+def fallback_decide(task: str, context: str) -> str | None:
     """Keyword-based decision when no LLM is available."""
     t = task.strip().lower()
     if t in RESEARCH_COMMANDS:
@@ -350,54 +388,145 @@ def fallback_narrate(command: str, output: str) -> str:
     )
 
 
+TOOL_LOOP_MAX_STEPS = 4  # decide -> act -> re-decide cycles allowed per turn
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def dost_respond(task, department=None):
+def dost_respond(
+    task,
+    department=None,
+    conversation_id: str = "cli-default",
+    interface: str = "cli",
+):
     context = build_context()
-    conv = _conversation_prefix()
+    conv = _conversation_prefix(conversation_id)
     if conv:
         context = f"{context}\n\n{conv}"
 
-    # Ask the LLM to decide: command or conversation?
+    # Inject persistent cross-session memory (facts, preferences, prior turns)
+    # so follow-ups across CLI/voice/direct calls remember what was said.
+    remembered = ""
+    try:
+        remembered = get_unified_memory().build_context_prompt(conversation_id, task)
+    except Exception as exc:
+        log(f"Conversation memory lookup failed: {type(exc).__name__}")
+    if remembered:
+        context = f"{context}\n\n{remembered}"
+
+    def finish(response: str) -> str:
+        try:
+            get_unified_memory().record_turn(
+                conversation_id, interface, task, response
+            )
+        except Exception as exc:
+            log(f"Conversation memory update failed: {type(exc).__name__}")
+        return f"{dost_greeting()}\n\n{response}"
+
+    # Claude-like tool-use loop: decide -> act -> re-decide -> ... -> final answer.
+    # The LLM picks a tool (research command, fleet dispatch, or orchestrate) or a
+    # natural reply; after each tool run the result is fed back so the LLM can
+    # synthesize, chain another tool, or answer directly. Capped at
+    # TOOL_LOOP_MAX_STEPS so a turn always terminates.
     decision = llm_decide(task, context)
-
-    if decision and decision.startswith("COMMAND:"):
-        command = decision[len("COMMAND:"):].strip()
-        if command in RESEARCH_COMMANDS:
-            output = run_research_command(command)
-            MEMORY.add_interaction(task, "research", f"Executed research command: {command}")
-            # Narrate the output with the LLM
-            narration = llm_narrate(command, output, context)
-            if narration:
-                response = f"{dost_greeting()}\n\n{narration}\n\nWhat would you like to do next?"
+    step = 0
+    parent_task_id: str | None = None
+    while decision:
+        if decision.startswith("COMMAND:"):
+            command = decision[len("COMMAND:"):].strip()
+            parts = command.split(None, 1)
+            cmd_name = parts[0]
+            if cmd_name not in RESEARCH_COMMANDS:
+                break  # unknown command -> fall through to fallback/conversation
+            if cmd_name == "web_search":
+                output = run_web_search(parts[1] if len(parts) > 1 else "")
             else:
-                response = f"{dost_greeting()}\n\n{fallback_narrate(command, output)}"
-            _record_conversation_turn(task, response)
-            return response
+                output = run_research_command(cmd_name)
+            MEMORY.add_interaction(task, "research", f"Executed research command: {command}")
+            step += 1
+            label = command
+        elif decision.startswith("FLEET:"):
+            prompt = decision[len("FLEET:"):].strip()
+            result = dispatch_prompt_to_fleet(
+                prompt,
+                agent_id="strategy-advisor",
+                priority="normal",
+                parent_task_id=parent_task_id,
+            )
+            if not result.get("ok"):
+                output = f"Fleet dispatch failed: {result.get('error', 'unknown error')}"
+            else:
+                parent_task_id = result["task_id"]
+                fleet_task = _wait_for_task(result["task_id"])
+                if fleet_task is None:
+                    output = f"Fleet task {result['task_id']} still pending."
+                elif fleet_task.get("status") == "error":
+                    output = f"Fleet task errored: {fleet_task.get('error', 'unknown error')}"
+                else:
+                    task_result = fleet_task.get("result") or {}
+                    if isinstance(task_result, dict):
+                        output = task_result.get("text") or task_result.get("preview") or ""
+                    elif isinstance(task_result, str):
+                        output = task_result
+                    else:
+                        output = ""
+                    if not output:
+                        output = f"(fleet task {result['task_id']} completed with no result text)"
+            MEMORY.add_interaction(task, "fleet", f"Dispatched fleet prompt: {prompt[:80]}")
+            step += 1
+            label = f"fleet: {prompt[:60]}"
+        elif decision.startswith("ORCHESTRATE:"):
+            goal = decision[len("ORCHESTRATE:"):].strip()
+            output = orchestrate(goal, conversation_id=conversation_id, interface=interface)
+            MEMORY.add_interaction(task, "orchestrate", f"Orchestrated goal: {goal[:80]}")
+            step += 1
+            label = f"orchestrate: {goal[:60]}"
+        else:
+            # Natural-language final answer (one-shot or after tool results).
+            MEMORY.add_interaction(task, route_department(task), "Conversational response")
+            _record_conversation_turn(task, decision, conversation_id)
+            return finish(f"{decision}\n\nIs there anything else I can help you with?")
 
-    # Not a command — have the LLM write a warm conversational response
-    if decision and not decision.startswith("COMMAND:"):
-        # LLM already gave us a natural response
-        MEMORY.add_interaction(task, route_department(task), "Conversational response")
-        _record_conversation_turn(task, decision)
-        return f"{dost_greeting()}\n\n{decision}\n\nIs there anything else I can help you with?"
+        if step >= TOOL_LOOP_MAX_STEPS:
+            # Step cap reached: narrate the last tool result plainly and stop.
+            narration = llm_narrate(label, output, context)
+            response = narration or fallback_narrate(label, output)
+            _record_conversation_turn(task, response, conversation_id)
+            return finish(response)
+        # Feed the tool result back and let the LLM decide the next move.
+        tool_context = (
+            f"{context}\n\n"
+            f"I ran the tool '{label}' and got this result:\n{output}\n\n"
+            f"Reply with your final answer to the user's request based on the result "
+            f"above, or COMMAND:<name> / FLEET:<prompt> / ORCHESTRATE:<goal> to run "
+            f"another tool. Ground any numbers in the result; if it is empty or failed, "
+            f"say so plainly."
+        )
+        decision = llm_decide(task, tool_context)
+        continue
 
-    # Fallback: no LLM available or decision unparseable
+    # Fallback: no LLM available, empty/unparseable decision, or unknown command.
     fb = fallback_decide(task, context)
     if fb and fb.startswith("COMMAND:"):
         command = fb[len("COMMAND:"):].strip()
-        output = run_research_command(command)
-        MEMORY.add_interaction(task, "research", f"Executed research command: {command} (fallback)")
-        response = f"{dost_greeting()}\n\n{fallback_narrate(command, output)}"
-        _record_conversation_turn(task, response)
-        return response
+        parts = command.split(None, 1)
+        cmd_name = parts[0]
+        if cmd_name in RESEARCH_COMMANDS:
+            if cmd_name == "web_search":
+                output = run_web_search(parts[1] if len(parts) > 1 else "")
+            else:
+                output = run_research_command(cmd_name)
+            MEMORY.add_interaction(task, "research", f"Executed research command: {command} (fallback)")
+            response = fallback_narrate(command, output)
+            _record_conversation_turn(task, response, conversation_id)
+            return finish(response)
 
     response = fallback_converse(task, context)
     MEMORY.add_interaction(task, route_department(task), "Conversational response (fallback)")
-    _record_conversation_turn(task, response)
-    return f"{dost_greeting()}\n\n{response}\n\nIs there anything else I can help you with?"
+    _record_conversation_turn(task, response, conversation_id)
+    return finish(f"{response}\n\nIs there anything else I can help you with?")
 
 
 COMPANION_STYLE = """Talk like a close, warm friend who also happens to run the research team.
@@ -658,7 +787,7 @@ def _cost_units_for_pool(pool_name: str | None) -> int:
     tier = _pool_tier_from_config(pool_name)
     if isinstance(tier, list):
         return min(MODEL_COST_UNITS.get(t, 2) for t in tier)
-    return MODEL_COST_UNITS.get(tier, 2)
+    return MODEL_COST_UNITS.get(tier or "", 2)
 
 
 def _record_debate_to_pnl(
@@ -723,7 +852,8 @@ def _select_available_pool(
     currently cooling down, retry decide_model (different pool next time) up
     to max_attempts. Returns (model, pool_name, is_cloud).
     """
-    for _ in range(max_attempts):
+    # At least one decide_model call, so the names below are always bound.
+    for _ in range(max(1, max_attempts)):
         model, pool_name, is_cloud = orchestrator.decide_model(agent_info, task_type="exec")
         if pool_cooldowns.get(pool_name, 0) == 0:
             return model, pool_name, is_cloud
@@ -1067,16 +1197,24 @@ def _cache_answer(
 
 # --- Multi-turn conversation memory -----------------------------------------
 # Remember last N turns so follow-ups ("and the error rate?") know what
-# you're talking about. Stored in dost/conversation.json.
+# Per-conversation turns, stored in dost/conversations/<conversation_id>.json.
+# Scoped by conversation_id so CLI/voice/Telegram/web sessions never leak into
+# each other. UnifiedMemory (build_context_prompt/record_turn) is the
+# authoritative cross-session memory; this legacy path is a short rolling window
+# kept per conversation for the LLM's immediate context.
 
-DOST_CONVERSATION_PATH = DOST_DIR / "conversation.json"
+DOST_CONVERSATIONS_DIR = DOST_DIR / "conversations"
 DOST_CONVERSATION_TURNS = 3  # how many previous turns to remember
 
 
-def _load_conversation() -> list[dict]:
-    """Load previous conversation turns."""
+def _conversation_path(conversation_id: str) -> Path:
+    return DOST_CONVERSATIONS_DIR / f"{conversation_id}.json"
+
+
+def _load_conversation(conversation_id: str) -> list[dict]:
+    """Load previous conversation turns for one conversation_id."""
     try:
-        with open(DOST_CONVERSATION_PATH) as f:
+        with open(_conversation_path(conversation_id)) as f:
             turns = json.load(f)
         if isinstance(turns, list):
             return turns[-DOST_CONVERSATION_TURNS:]
@@ -1085,17 +1223,18 @@ def _load_conversation() -> list[dict]:
     return []
 
 
-def _save_conversation(turns: list[dict]) -> None:
-    """Atomically write conversation turns."""
-    tmp = str(DOST_CONVERSATION_PATH) + ".tmp"
+def _save_conversation(turns: list[dict], conversation_id: str) -> None:
+    """Atomically write conversation turns for one conversation_id."""
+    DOST_CONVERSATIONS_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = str(_conversation_path(conversation_id)) + ".tmp"
     with open(tmp, "w") as f:
         json.dump(turns[-DOST_CONVERSATION_TURNS:], f, indent=2)
-    os.replace(tmp, DOST_CONVERSATION_PATH)
+    os.replace(tmp, _conversation_path(conversation_id))
 
 
-def _conversation_prefix() -> str:
+def _conversation_prefix(conversation_id: str) -> str:
     """Format previous turns as a context prefix for the LLM."""
-    turns = _load_conversation()
+    turns = _load_conversation(conversation_id)
     if not turns:
         return ""
     lines = ["PREVIOUS CONVERSATION:"]
@@ -1108,9 +1247,9 @@ def _conversation_prefix() -> str:
     return "\n".join(lines)
 
 
-def _record_conversation_turn(user: str, response: str) -> None:
-    """Append a turn to the conversation history."""
-    turns = _load_conversation()
+def _record_conversation_turn(user: str, response: str, conversation_id: str) -> None:
+    """Append a turn to the conversation history for one conversation_id."""
+    turns = _load_conversation(conversation_id)
     turns.append(
         {
             "user": user,
@@ -1118,7 +1257,7 @@ def _record_conversation_turn(user: str, response: str) -> None:
             "at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
     )
-    _save_conversation(turns)
+    _save_conversation(turns, conversation_id)
 
 
 def _agent_tiers() -> dict[str, str]:
@@ -1212,6 +1351,11 @@ def _metrics_freshness(status: dict | None) -> tuple[bool, str]:
     return fresh, f"data_ready={data_ready} data age={age_text}"
 
 
+# Dispatch prompts longer than this are rejected before any task file is
+# written — keeps the hive from filling with oversized task descriptions.
+MAX_DISPATCH_PROMPT_LEN = 4000
+
+
 def dispatch_prompt_to_fleet(
     prompt: str,
     agent_id: str | None = None,
@@ -1235,6 +1379,15 @@ def dispatch_prompt_to_fleet(
     auto-dispatches a follow-up task when this task completes (done).
     If debug is True, prints the task being written.
     """
+    if len(prompt) > MAX_DISPATCH_PROMPT_LEN:
+        return {
+            "ok": False,
+            "error": (
+                f"Prompt too long: {len(prompt)} characters "
+                f"(max {MAX_DISPATCH_PROMPT_LEN}). "
+                "Shorten the prompt and retry."
+            ),
+        }
     import uuid
 
     task_id = f"jev-{uuid.uuid4().hex[:8]}"
@@ -1410,7 +1563,7 @@ def dispatch_debate_to_fleet(
                     "tier": a.get("tier", "cached"),
                     "model": a.get("model"),
                     "pool": a.get("pool"),
-                    "answer": cached.get("answer", ""),
+                    "answer": a.get("answer", ""),
                     "error": None,
                 }
                 for a in cached.get("agent_answers", [])
@@ -1575,6 +1728,196 @@ def dispatch_debate_to_fleet(
         "answers": answers,
         "synthesis": synthesis,
     }
+
+
+# ---------------------------------------------------------------------------
+# Orchestrate: plan-and-execute a multi-step goal through the fleet
+# ---------------------------------------------------------------------------
+
+ORCHESTRATE_MAX_STEPS = 6            # cap on decomposition steps per goal
+ORCHESTRATE_POLL_TIMEOUT_SEC = 20    # how long to wait for a fleet task to finish
+ORCHESTRATE_POLL_INTERVAL_SEC = 2    # poll interval for task completion
+
+
+def _orchestrate_task_path(task_id: str) -> Path:
+    return HIVE_DIR / f"{task_id}.json"
+
+
+def _read_orchestrate_task(task_id: str) -> dict | None:
+    try:
+        return json.loads(_orchestrate_task_path(task_id).read_text())
+    except Exception:
+        return None
+
+
+def _wait_for_task(task_id: str, timeout_sec: float = ORCHESTRATE_POLL_TIMEOUT_SEC) -> dict | None:
+    """Poll a fleet task file until it reaches done/error or times out.
+
+    Returns the last-read task dict (may still be pending on timeout) or None.
+    """
+    deadline = time.time() + timeout_sec
+    last = None
+    while time.time() < deadline:
+        task = _read_orchestrate_task(task_id)
+        if task is not None:
+            last = task
+            if task.get("status") in ("done", "error"):
+                return task
+        time.sleep(ORCHESTRATE_POLL_INTERVAL_SEC)
+    return last
+
+
+def _orchestrate_plan(goal: str, context: str) -> list[dict]:
+    """Ask the LLM to decompose a goal into ordered execution steps.
+
+    Each step: {"tool": "web_search" | "fleet", "prompt": "<query or prompt>"}.
+    Falls back to a single fleet step when the LLM is unavailable or its
+    answer isn't usable.
+    """
+    prompt = (
+        f"{context}\n\n"
+        f"You are the dost chief of staff. Decompose this goal into an ordered "
+        f"plan of execution steps.\n\nGOAL: {goal}\n\n"
+        f"Available step tools:\n"
+        f"  web_search <query> — search the public web for current information\n"
+        f"  fleet <prompt> — send a prompt to the company fleet for analysis\n\n"
+        f"Reply with ONLY a JSON array of steps, e.g.\n"
+        f"  [{{\"tool\": \"web_search\", \"prompt\": \"NSE RELIANCE stock news\"}}, "
+        f"   {{\"tool\": \"fleet\", \"prompt\": \"Analyze the RELIANCE news above\"}}]\n"
+        f"Keep it to {ORCHESTRATE_MAX_STEPS} steps or fewer. If the goal is a "
+        f"single question, one fleet step is fine.\n"
+    )
+    result = _chat(
+        [
+            {"role": "system", "content": "You are a careful planner. Output valid JSON only."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.3,
+        max_tokens=600,
+    )
+    if not result:
+        return [{"tool": "fleet", "prompt": goal}]
+    text = result["text"].strip()
+    try:
+        start = text.find("[")
+        end = text.rfind("]")
+        if start != -1 and end != -1:
+            steps = json.loads(text[start:end + 1])
+        else:
+            steps = json.loads(text)
+        if isinstance(steps, list) and steps:
+            clean = []
+            for s in steps:
+                if not isinstance(s, dict):
+                    continue  # LLM returned a non-object step; skip it
+                tool = str(s.get("tool", "fleet")).strip()
+                p = str(s.get("prompt", "")).strip()
+                if tool not in ("web_search", "fleet") or not p:
+                    continue
+                clean.append({"tool": tool, "prompt": p})
+            if clean:
+                return clean[:ORCHESTRATE_MAX_STEPS]
+    except (json.JSONDecodeError, ValueError, TypeError):
+        pass
+    return [{"tool": "fleet", "prompt": goal}]
+
+
+def orchestrate(
+    goal: str,
+    conversation_id: str = "cli-default",
+    interface: str = "cli",
+    debug: bool = False,
+) -> str:
+    """Plan-and-execute a multi-step goal through the fleet.
+
+    Decomposes the goal into ordered steps (web_search for current public
+    info, fleet for analysis), executes each step in order with
+    parent_task_id threading so steps form a chain, waits for each fleet task
+    to complete, and synthesizes all results into a final plain-language
+    answer. Paper-only: no live orders, no credentials, no kill-switch
+    changes.
+    """
+    context = build_context()
+    steps = _orchestrate_plan(goal, context)
+    step_outputs: list[str] = []
+    parent_task_id: str | None = None
+
+    for index, step in enumerate(steps, 1):
+        tool = step["tool"]
+        prompt = step["prompt"]
+        if debug:
+            print(f"[orchestrate] step {index}/{len(steps)}: {tool} -> {prompt[:80]}")
+        if tool == "web_search":
+            output = run_web_search(prompt)
+            step_outputs.append(f"Step {index} (web search): {output}")
+            continue
+        # Fleet step — dispatch and wait for completion.
+        result = dispatch_prompt_to_fleet(
+            prompt,
+            agent_id="strategy-advisor",
+            priority="normal",
+            parent_task_id=parent_task_id,
+            debug=debug,
+        )
+        if not result.get("ok"):
+            step_outputs.append(
+                f"Step {index} (fleet): dispatch failed — "
+                f"{result.get('error', 'unknown error')}"
+            )
+            continue
+        task_id = result["task_id"]
+        parent_task_id = task_id
+        task = _wait_for_task(task_id)
+        if task is None:
+            step_outputs.append(f"Step {index} (fleet): task {task_id} still pending.")
+            continue
+        if task.get("status") == "error":
+            step_outputs.append(
+                f"Step {index} (fleet): task errored — "
+                f"{task.get('error', 'unknown error')}"
+            )
+            continue
+        task_result = task.get("result") or {}
+        if isinstance(task_result, dict):
+            output = task_result.get("text") or task_result.get("preview") or ""
+        elif isinstance(task_result, str):
+            output = task_result
+        else:
+            output = ""
+        if not output:
+            output = f"(task {task_id} completed with no result text)"
+        step_outputs.append(f"Step {index} (fleet): {output}")
+
+    # Synthesis: combine the goal and every step result into the final answer.
+    results_block = "\n\n".join(step_outputs) if step_outputs else "(no step results)"
+    synthesis_prompt = (
+        f"{context}\n\n"
+        f"You are the dost chief of staff. You executed a plan for this goal:\n"
+        f"GOAL: {goal}\n\n"
+        f"STEP RESULTS:\n{results_block}\n\n"
+        f"Write a short plain-language final answer (2-4 sentences) that directly "
+        f"addresses the goal using only the step results above. Ground any numbers "
+        f"in the results. If the results are incomplete or empty, say so plainly. "
+        f"No bullet lists, no internal task IDs, no model names, no technical plumbing."
+    )
+    synthesis = _chat(
+        [
+            {"role": "system", "content": "You are a warm, honest chief of staff."},
+            {"role": "user", "content": synthesis_prompt},
+        ],
+        temperature=0.4,
+        max_tokens=500,
+    )
+    if synthesis and synthesis.get("text"):
+        answer = synthesis["text"].strip()
+    else:
+        answer = (
+            results_block[:800]
+            if results_block.strip() != "(no step results)"
+            else "I couldn't gather any results for that goal."
+        )
+    MEMORY.add_interaction(goal, "orchestrate", f"Orchestrated {len(steps)} steps")
+    return answer
 
 
 def dispatcher_status_line() -> str:
@@ -2605,6 +2948,8 @@ def main():
                         help="Submit a prompt to the fleet orchestrator (optional prompt text)")
     parser.add_argument("--debate", nargs="?", const="",
                         help="Debate mode: fan a question to multiple pro agents and synthesize")
+    parser.add_argument("--orchestrate", nargs="?", const="",
+                        help="Orchestrate a multi-step goal through web search and the fleet")
     parser.add_argument("--template", nargs="?", const="",
                         help="Task template: load saved prompt from dost/templates/<name>.json")
     parser.add_argument("--memory", action="store_true")
@@ -2693,6 +3038,10 @@ def main():
         prompt = args.debate if args.debate else input("Debate question: ")
         result = dispatch_debate_to_fleet(prompt)
         print(json.dumps(result, indent=2))
+    elif args.orchestrate is not None:
+        goal = args.orchestrate if args.orchestrate else input("Goal to orchestrate: ")
+        answer = orchestrate(goal, conversation_id="cli-default", interface="cli")
+        print(answer)
     elif args.template is not None:
         template_name = args.template if args.template else input("Template name: ")
         template = load_template(template_name)

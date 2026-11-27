@@ -33,8 +33,7 @@
    "provider": "nvidia",
    "models": [
     "nvidia/nemotron-3-ultra-550b-a55b",
-    "nvidia/llama-3.1-405b-instruct",
-    "deepseek-ai/deepseek-v4.1-flash"
+    "nvidia/llama-3.1-405b-instruct"
    ],
    "tier": "pro",
    "rate_limit_rpm": 1000,
@@ -69,7 +68,6 @@
   "nvidia_key4": {
    "provider": "nvidia4",
    "models": [
-    "deepseek-ai/deepseek-v4.1-flash",
     "nvidia/nemotron-3-ultra-550b-a55b"
    ],
    "tier": "general",

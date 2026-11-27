@@ -45,6 +45,11 @@ export default function AlertsPage({ acknowledgedAlertIds, onAcknowledge }: Aler
     return !latest || new Date(observed) > new Date(latest) ? observed : latest
   }, null)
 
+  const [isLive, setIsLive] = useState(true)
+  useEffect(() => {
+    setIsLive(alertsQuery.isSuccess && alertsQuery.data?.length > 0)
+  }, [alertsQuery.isSuccess, alertsQuery.data])
+
   return (
     <>
       <PageHeader
@@ -56,6 +61,15 @@ export default function AlertsPage({ acknowledgedAlertIds, onAcknowledge }: Aler
             <Badge variant="outline" className="h-9 gap-2 px-3 text-[10px] uppercase tracking-[0.12em]">
               <BellRing className="h-3.5 w-3.5 text-primary" />
               {unread} unread
+            </Badge>
+            <Badge
+              className={cn(
+                'bg-primary/10 text-primary',
+                !isLive && 'bg-destructive/10 text-destructive',
+                !isLive && 'animate-pulse'
+              )}
+            >
+              {isLive ? 'LIVE DATA' : 'MOCK FIXTURES'}
             </Badge>
             <Button type="button" variant="outline" className="h-11" onClick={() => void alertsQuery.refetch()} disabled={alertsQuery.isFetching}>
               <RefreshCw className={`mr-2 h-4 w-4 ${alertsQuery.isFetching ? 'animate-spin' : ''}`} />
@@ -105,7 +119,7 @@ export default function AlertsPage({ acknowledgedAlertIds, onAcknowledge }: Aler
           </section>
 
           <Card className="mt-5 min-w-0 overflow-hidden border-border/70 bg-card/80">
-            <AlertsPanel alerts={panelAlerts} onAcknowledge={onAcknowledge} />
+            <AlertsPanel alerts={panelAlerts} onAcknowledge={onAcknowledge} isLive={isLive} />
           </Card>
           <p className="mt-3 text-[11px] leading-5 text-muted-foreground">
             Acknowledgements are local to this browser session. The monitoring API remains read-only.

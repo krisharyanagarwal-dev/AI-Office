@@ -8,9 +8,11 @@ import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { performanceApi, portfolioApi } from '@/lib/api'
+import { useWebSocket } from '@/lib/use-websocket'
 import { formatAge, formatDateTime, formatMoney, formatPercent } from '@/lib/format'
 import { refetchKeys } from '@/lib/query-client'
 import type { PortfolioPosition } from '@/types'
+import type { PerformanceSnapshot, PortfolioSnapshot } from '@/types'
 
 interface PnLAggregation {
   label: string
@@ -254,6 +256,35 @@ export default function PnLPage() {
   const isLoading = performanceQuery.isPending || portfolioQuery.isPending
   const isUnavailable = portfolioQuery.isError || !portfolio?.available
 
+  const { isConnected, lastMessage, disconnect } = useWebSocket(
+    'ws://127.0.0.1:4749',
+    (event) => {
+      let data: unknown
+      try {
+        data = JSON.parse(event.data)
+      } catch {
+        return
+      }
+      if (data && typeof data === 'object') {
+        const payload = data as Record<string, unknown>
+        if (payload.type === 'portfolio') {
+          void portfolioQuery.refetch()
+        } else if (payload.type === 'performance') {
+          void performanceQuery.refetch()
+        } else if (payload.type === 'alert') {
+          // Handle alert updates
+        }
+      }
+    },
+    () => {
+      // onOpen
+    },
+    () => {
+      // onClose
+    },
+    30_000,
+  )
+
   const refresh = () => {
     void performanceQuery.refetch()
     void portfolioQuery.refetch()
@@ -270,6 +301,21 @@ export default function PnLPage() {
             <Badge variant="outline" className="h-9 gap-2 px-3 text-[10px] uppercase tracking-[0.12em]">
               <Wallet className="h-3.5 w-3.5 text-primary" />
               {portfolio?.broker ?? 'paper'} · read-only
+            </Badge>
+            <Badge
+              className={cn(
+                'bg-primary/10 text-primary',
+                !portfolio?.available && 'bg-destructive/10 text-destructive',
+                !portfolio?.available && 'animate-pulse'
+              )}
+            >
+              {portfolio?.available ? 'LIVE DATA' : 'MOCK FIXTURES'}
+            </Badge>
+            <Badge
+              variant="outline"
+              className={cn('h-9 gap-2 px-3 text-[10px] uppercase tracking-[0.12em]', isConnected && 'bg-success/20 text-success')}
+            >
+              {isConnected ? 'WS CONNECTED' : 'WS DISCONNECTED'}
             </Badge>
             <Button type="button" variant="outline" className="h-11" onClick={refresh} disabled={isLoading}>
               <RefreshCw className={`mr-2 h-4 w-4 ${isLoading ? 'animate-spin' : ''}`} />

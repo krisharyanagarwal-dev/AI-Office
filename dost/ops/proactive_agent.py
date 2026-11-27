@@ -18,7 +18,8 @@ import sys
 from pathlib import Path
 from typing import Any, Optional
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # dost/  (for `import ops`)
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # AI-Office/ (for `import dost`)
 
 from ops.proactive_scheduler import ProactiveScheduler
 from ops.anomaly_watch import AnomalyWatch

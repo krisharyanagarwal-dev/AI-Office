@@ -53,7 +53,7 @@ class FleetSelfHealing:
     """Self-healing system for fleet operations."""
 
     def __init__(self, config: dict | None = None):
-        self.config = config or HEALING_CONFIG
+        self.config = {**HEALING_CONFIG, **(config or {})}
         self.memory = get_unified_memory()
         self._last_action: dict[str, float] = {}
         self._action_history: list[HealingAction] = []
@@ -64,7 +64,7 @@ class FleetSelfHealing:
             result = subprocess.run(
                 [sys.executable, "-c",
                  "import urllib.request, json; "
-                 "r = urllib.request.urlopen('http://localhost:8083/api/metrics', timeout=5); "
+                 "r = urllib.request.urlopen('http://127.0.0.1:8083/metrics', timeout=5); "
                  "print(json.dumps(json.load(r)))"],
                 capture_output=True,
                 text=True,
@@ -78,16 +78,13 @@ class FleetSelfHealing:
             return {}
 
     def fetch_task_status(self, task_id: str) -> dict[str, Any]:
-        """Fetch status of a specific task."""
+        """Fetch status of a specific task from hive."""
         try:
-            result = subprocess.run(
-                [sys.executable, "-m", "dost.dost", "--results", task_id],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if result.returncode == 0:
-                return json.loads(result.stdout)
+            # dost/ops/self_healing.py -> parents[0]=ops, [1]=dost, [2]=AI-Office repo root
+            HIVE_DIR = (Path(__file__).resolve().parents[2] / "packages" / "office-os" / "tasks")
+            task_path = HIVE_DIR / f"{task_id}.json"
+            if task_path.exists():
+                return json.loads(task_path.read_text())
             return {}
         except Exception:
             return {}

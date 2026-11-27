@@ -23,6 +23,12 @@ COMPANY_DIR = Path(__file__).resolve().parent.parent.parent
 DOST_DIR = COMPANY_DIR / "dost"
 RESEARCH_DIR = (Path.home() / "Documents" / "indian-paper-trading")
 
+# Unified-api read-only endpoints (:4749) — the same live sources
+# context_builder.py injects into the LLM. Every number the dost narrates
+# from portfolio/performance/fleet must be traceable here.
+UNIFIED_API_BASE_TEST = "http://127.0.0.1:4749"
+UNIFIED_API_TIMEOUT_TEST = 4
+
 sys_path_inserted = False
 
 
@@ -96,6 +102,58 @@ def _source_text() -> str:
     except Exception:
         pass
 
+    # Unified-api portfolio / performance / fleet (read-only, :4749) — the
+    # same live sources context_builder.py injects into the LLM, so every
+    # number the dost narrates from them must be traceable here too.
+    parts.append(_unified_section())
+
+    return "\n".join(parts)
+
+
+def _fetch_unified_test(path: str) -> Any:
+    """Fetch JSON from a read-only unified-api endpoint, or None on failure."""
+    try:
+        with urllib.request.urlopen(UNIFIED_API_BASE_TEST + path, timeout=UNIFIED_API_TIMEOUT_TEST) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return None
+
+
+def _unified_section() -> str:
+    """Dump unified-api payloads plus derived aggregates (drawdown %, agent/
+    session/terminal counts) so the haystack holds every number the LLM can
+    narrate from portfolio/performance/fleet context."""
+    parts = []
+
+    portfolio = _fetch_unified_test("/api/portfolio")
+    if portfolio:
+        parts.append(json.dumps(portfolio))
+        dd = portfolio.get("drawdownPercent")
+        if dd is not None:
+            try:
+                # context_builder.py multiplies drawdownPercent by 100 when
+                # narrating, so the derived percentage must be in the haystack.
+                parts.append(f"drawdown_pct={float(dd) * 100}")
+            except (TypeError, ValueError):
+                pass
+
+    performance = _fetch_unified_test("/api/performance")
+    if performance:
+        parts.append(json.dumps(performance))
+
+    fleet = _fetch_unified_test("/api/fleet")
+    if fleet:
+        agents = fleet.get("agents") or []
+        sessions = fleet.get("sessions") or []
+        terminals = fleet.get("terminals") or []
+        busy = sum(1 for a in agents if str(a.get("status", "")).lower() == "busy")
+        healthy = sum(1 for a in agents if str(a.get("status", "")).lower() == "healthy")
+        parts.append(json.dumps(fleet))
+        parts.append(
+            f"agent_count={len(agents)} busy_count={busy} healthy_count={healthy} "
+            f"session_count={len(sessions)} terminal_count={len(terminals)}"
+        )
+
     return "\n".join(parts)
 
 
@@ -153,8 +211,14 @@ def haystack():
 
 
 def _haystack_numbers(haystack: str) -> list[float]:
-    """Extract all numeric values from the haystack for rounding-tolerant matching."""
-    pattern = r"\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?"
+    """Extract all numeric values from the haystack for rounding-tolerant matching.
+
+    The haystack is already comma/rupee-normalized by _normalize_haystack, so a
+    single integer-plus-decimal token captures large integers and decimals
+    (the older thousands-grouped form wrongly split e.g. 100000 into 100+000
+    and 49999.98 into 499+99.98, breaking rounding matches for portfolio data).
+    """
+    pattern = r"\d+(?:\.\d+)?"
     nums = re.findall(pattern, haystack)
     vals = []
     for n in nums:

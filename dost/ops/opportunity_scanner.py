@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -21,6 +20,7 @@ from typing import Any, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from dost.dost_main import dispatch_prompt_to_fleet
 from memory_pkg.unified import get_unified_memory
 
 
@@ -44,7 +44,7 @@ class OpportunityScanner:
     """Scans for trading/research opportunities."""
 
     def __init__(self, config: dict | None = None):
-        self.config = config or SCANNER_CONFIG
+        self.config = {**SCANNER_CONFIG, **(config or {})}
         self.memory = get_unified_memory()
 
     def run_fundamental_screen(self, screen_name: str) -> list[dict]:
@@ -75,24 +75,17 @@ class OpportunityScanner:
     def _dispatch_research(self, prompt: str, screen_type: str) -> list[dict]:
         """Dispatch research task to fleet and parse results."""
         try:
-            result = subprocess.run(
-                [sys.executable, "-m", "dost.dost", "--dispatch", prompt, "--department", "research"],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            if result.returncode == 0:
-                data = json.loads(result.stdout)
-                if data.get("ok"):
-                    # Store task ID for tracking
-                    return [{
-                        "screen": screen_type,
-                        "task_id": data.get("task_id"),
-                        "agent": data.get("agent_id"),
-                        "prompt": prompt[:200],
-                        "status": "dispatched",
-                    }]
-            return [{"screen": screen_type, "error": result.stderr[:200], "status": "failed"}]
+            result = dispatch_prompt_to_fleet(prompt, agent_id="research")
+            if result.get("ok"):
+                # Store task ID for tracking
+                return [{
+                    "screen": screen_type,
+                    "task_id": result.get("task_id"),
+                    "agent": result.get("agent_id"),
+                    "prompt": prompt[:200],
+                    "status": "dispatched",
+                }]
+            return [{"screen": screen_type, "error": result.get("error", "dispatch failed"), "status": "failed"}]
         except Exception as e:
             return [{"screen": screen_type, "error": str(e), "status": "failed"}]
 

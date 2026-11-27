@@ -60,7 +60,7 @@ class ProactiveScheduler:
     """Manages scheduled proactive jobs for Dost."""
 
     def __init__(self, config: dict | None = None):
-        self.config = config or SCHEDULER_CONFIG
+        self.config = {**SCHEDULER_CONFIG, **(config or {})}
         self.memory = get_unified_memory()
         self.scheduler: Optional[BackgroundScheduler] = None
         self._running = False

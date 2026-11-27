@@ -45,7 +45,11 @@ def say_line(text: str) -> None:
 
 def ask_dost(text: str) -> str:
     with DOST_LOCK:
-        return dost_respond(text)
+        return dost_respond(
+            text,
+            conversation_id="voice-owner",
+            interface="voice",
+        )
 
 
 def voice_turn(seconds: int) -> None:

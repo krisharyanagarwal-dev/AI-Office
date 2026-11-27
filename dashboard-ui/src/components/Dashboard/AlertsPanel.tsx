@@ -19,6 +19,7 @@ interface AlertsPanelProps {
   }>
   onAcknowledge?: (alertId: string) => void
   unavailable?: boolean
+  isLive?: boolean
 }
 
 const severityClass: Record<AlertsPanelProps["alerts"][number]["severity"], string> = {
@@ -39,6 +40,10 @@ export function AlertsPanel({ alerts, onAcknowledge, unavailable = false }: Aler
       : new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
     )
 
+  const liveBadge = isLive
+      ? <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">LIVE</span>
+      : <span className="rounded-full bg-destructive/10 px-2 py-0.5 text-[10px] font-medium text-destructive">MOCK</span>
+
   return (
     <div className="flex h-full min-h-[420px] flex-col">
       <div className="flex items-center justify-between gap-3 border-b border-border/70 px-5 py-4">
@@ -48,7 +53,7 @@ export function AlertsPanel({ alerts, onAcknowledge, unavailable = false }: Aler
           <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
             {alerts.filter((alert) => !alert.acknowledged).length} unread
           </span>
-        </div>
+          {isLive ? liveBadge : null}
         <div className="flex items-center gap-1">
           <select
             value={filter}

@@ -549,8 +549,101 @@ class FaithWorker:
                 state = json.loads(metrics_path.read_text())
             state[reel_id] = task_data
             metrics_path.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+
+            # Also update the director's state for topic mix adjustment
+            # This enables cross-reel performance tracking
+            director_state_path = Path("/Users/aryanagarwal/office-os/faith_state.json")
+            director_state = {}
+            if director_state_path.exists():
+                director_state = json.loads(director_state_path.read_text())
+
+            # Record engagement rate for this reel
+            views = task_data.get("views", 0)
+            likes = task_data.get("likes", 0)
+            comments = task_data.get("comments", 0)
+            shares = task_data.get("shares", 0)
+            engagement_rate = self._calculate_engagement_rate({
+                "views": views,
+                "likes": likes,
+                "comments": comments,
+                "shares": shares,
+            }) if views > 0 else 0
+
+            director_state[reel_id] = {
+                "metrics": task_data,
+                "language": task_data.get("language", "english"),
+                "engagement_rate": engagement_rate,
+                "last_recorded": self.hive._now() if hasattr(self, 'hive') else None,
+            }
+            director_state_path.write_text(json.dumps(director_state, ensure_ascii=False, indent=2))
+
+            # Trigger topic mix adjustment after every 3 reels
+            self._maybe_adjust_topic_mix()
+
         except Exception as e:
             print(f"[faith-worker] Metrics recording error: {e}")
+
+    def _calculate_engagement_rate(self, metrics):
+        """Calculate engagement rate from raw metrics."""
+        views = metrics.get("views", 0)
+        if views == 0:
+            return 0
+        engagement = (metrics.get("likes", 0) + metrics.get("comments", 0) + metrics.get("shares", 0)) / views * 100
+        return round(engagement, 2)
+
+    def _maybe_adjust_topic_mix(self):
+        """Adjust topic mix after every 3 reels based on performance."""
+        try:
+            state_path = Path("/Users/aryanagarwal/office-os/faith_state.json")
+            if not state_path.exists():
+                return
+
+            state = json.loads(state_path.read_text())
+
+            # Only adjust after at least 3 recorded reels
+            # Skip entries where metrics data is not available (e.g. old boolean entries)
+            recorded = []
+            for k, v in state.items():
+                if isinstance(v, dict) and v.get("metrics", {}).get("views", 0) > 0:
+                    recorded.append(k)
+            if len(recorded) < 3:
+                return
+
+            # Calculate average engagement by language
+            english_engagements = []
+            hindi_engagements = []
+
+            for reel_id in recorded:
+                data = state.get(reel_id, {})
+                lang = data.get("language", "english")
+                er = data.get("engagement_rate", 0)
+
+                if lang == "english" or reel_id.endswith("_english"):
+                    english_engagements.append(er)
+                elif lang == "hindi" or reel_id.endswith("_hindi"):
+                    hindi_engagements.append(er)
+
+            avg_english_er = sum(english_engagements) / len(english_engagements) if english_engagements else 0
+            avg_hindi_er = sum(hindi_engagements) / len(hindi_engagements) if hindi_engagements else 0
+
+            # Gentle adjustment: if one language consistently outperforms, slight weighting
+            # Maximum 10% shift per adjustment cycle to avoid drastic changes
+            shift_pct = 0.0
+
+            if avg_english_er > avg_hindi_er * 1.2 and len(english_engagements) >= 3:
+                shift_pct = min(0.1, (avg_english_er - avg_hindi_er) / max(avg_english_er, 1))
+            elif avg_hindi_er > avg_english_er * 1.2 and len(hindi_engagements) >= 3:
+                shift_pct = min(0.1, (avg_hindi_er - avg_english_er) / max(avg_hindi_er, 1))
+
+            if shift_pct > 0:
+                # Notify director to apply queue shift
+                from agents.faith_director import FaithDirector
+                director = FaithDirector()
+                director._apply_queue_shift(shift_pct, avg_english_er > avg_hindi_er)
+                print(f"[faith-worker] Topic mix adjustment triggered: English ER={avg_english_er:.2f}%, Hindi ER={avg_hindi_er:.2f}%, shift={shift_pct:.1%}")
+
+        except Exception as e:
+            print(f"[faith-worker] Topic mix adjustment error: {e}")
 
     # ---------- Heartbeat / Status ----------
     def heartbeat(self):

@@ -1,0 +1,436 @@
+{
+ "office": {
+  "name": "Office OS",
+  "version": "1.0.0",
+  "god_agent": "michael",
+  "heartbeat_interval_sec": 120,
+  "max_concurrent_workers": 4,
+  "task_poll_interval_sec": 5,
+  "provider_cooldown_sec": 60,
+  "max_retries_per_task": 3,
+  "task_timeout_sec": 300
+ },
+ "cost_cap": {
+  "daily_units": 5000,
+  "mode": "advisory"
+ },
+ "provider_pools": {
+  "mlx_local": {
+   "provider": "mlx",
+   "models": [
+    "TheCluster/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-MLX-mxfp4"
+   ],
+   "tier": [
+    "pro",
+    "general",
+    "lite"
+   ],
+   "cost": 0,
+   "rate_limit_rpm": 0,
+   "cooldown_sec": 30
+  },
+  "nvidia_key1": {
+   "provider": "nvidia",
+   "models": [
+    "nvidia/nemotron-3-ultra-550b-a55b",
+    "nvidia/llama-3.1-405b-instruct",
+    "deepseek-ai/deepseek-v4.1-flash"
+   ],
+   "tier": "pro",
+   "rate_limit_rpm": 1000,
+   "cooldown_sec": 60
+  },
+  "nvidia_key2": {
+   "provider": "nvidia2",
+   "models": [
+    "mistralai/mistral-large-4-1t-a52b",
+    "nvidia/nemotron-3.5-lightning-30b-a3b",
+    "nvidia/llama-3.1-70b-instruct",
+    "minimax/minimax-01"
+   ],
+   "tier": "pro",
+   "rate_limit_rpm": 1000,
+   "cooldown_sec": 60
+  },
+  "nvidia_key3": {
+   "provider": "nvidia3",
+   "models": [
+    "nvidia/nemotron-3.5-lightning-30b-a3b",
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+    "minimax/minimax-01"
+   ],
+   "tier": [
+    "general",
+    "lite"
+   ],
+   "rate_limit_rpm": 1000,
+   "cooldown_sec": 60
+  },
+  "nvidia_key4": {
+   "provider": "nvidia4",
+   "models": [
+    "deepseek-ai/deepseek-v4.1-flash",
+    "nvidia/nemotron-3-ultra-550b-a55b"
+   ],
+   "tier": "general",
+   "rate_limit_rpm": 1000,
+   "cooldown_sec": 60
+  },
+  "google": {
+   "provider": "google",
+   "models": [
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite"
+   ],
+   "tier": "general",
+   "rate_limit_rpm": 250,
+   "cooldown_sec": 120
+  },
+  "openrouter": {
+   "provider": "openrouter",
+   "models": [
+    "nvidia/nemotron-3.5-lightning:free",
+    "nvidia/nemotron-3-ultra-550b-a55b:free"
+   ],
+   "tier": "lite",
+   "rate_limit_rpm": 50,
+   "cooldown_sec": 300
+  }
+ },
+ "agent_tiers": {
+  "general": [
+   "general-assistant"
+  ],
+  "pro": [
+   "quant-research-manager",
+   "quant-researcher",
+   "backtest-auditor",
+   "quant-model-validator",
+   "risk-manager",
+   "risk-control-verifier",
+   "execution-strategist",
+   "execution-analyst",
+   "market-maker",
+   "portfolio-manager",
+   "portfolio-allocation-researcher",
+   "cost-analyst",
+   "strategy-advisor",
+   "market-regime-analyst",
+   "correlation-researcher",
+   "volatility-researcher",
+   "order-book-researcher",
+   "liquidity-researcher",
+   "exposure-analyst",
+   "performance-attribution",
+   "drawdown-analyst",
+   "liquidation-heatmap",
+   "perp-funding-analyst",
+   "signal-analyst",
+   "event-driven-researcher",
+   "ops-health-auditor",
+   "mini-deploy-steward",
+   "model-stack-warden",
+   "paper-safety-sentinel",
+   "repo-safety-guard",
+   "office-registry-auditor",
+   "source-truth-auditor"
+  ],
+  "lite": [
+   "data-feed-monitor",
+   "position-sizing-analyst",
+   "trade-journal-reviewer",
+   "market-data-analyst",
+   "compliance-checker",
+   "research-archivist",
+   "trade-log-archivist",
+   "launchd-janitor",
+   "autopilot-cadence-watch",
+   "provider-pool-warden",
+   "faith-director",
+   "faith-worker"
+  ]
+ },
+ "default_model": "google/gemini-3.5-flash",
+ "small_model": "google/gemini-3.5-flash-lite",
+ "fallback_chain": [
+  "mlx_local",
+  "nvidia_key3",
+  "nvidia_key4",
+  "google",
+  "openrouter"
+ ],
+ "autopilot": {
+  "enabled": true,
+  "interval_min": 30,
+  "max_rounds_per_day": 24,
+  "startup_delay_sec": 60,
+  "topic": "Look at what this office has recently done and say what the single most valuable next piece of work in your specialty would be, and why.",
+  "create_tasks": true,
+  "max_reply_tokens": 2000,
+  "parallel_agents": 3,
+  "call_timeout_sec": 150
+ },
+ "autonomy": {
+  "enabled": true,
+  "stop_file": "/Users/aryanagarwal/office-os/STOP",
+  "max_act_tasks_per_day": 6,
+  "repo_allowlist": [
+   "/Users/aryanagarwal/office-os",
+   "/Users/aryanagarwal/dashboard-hub"
+  ],
+  "restart_label_allowlist": [
+   "com.aryan.office-os",
+   "com.aryan.office-os-web"
+  ],
+  "forbidden_path_patterns": [
+   ".env",
+   "*.plist",
+   "*key*",
+   "*secret*",
+   "*token*",
+   "live_orders",
+   "order",
+   "executor"
+  ],
+  "executor_enabled": false
+ },
+ "departments": [
+  {
+   "id": "quant-research",
+   "leads": [
+    "quant-research-manager",
+    "quant-researcher",
+    "signal-analyst"
+   ],
+   "sources": [
+    "office-hud"
+   ],
+   "brief": "Discover and validate trading edges on PAPER/TESTNET only. Gross edge is not profit: any claim must state venue, fee and funding. A horizon is viable only when its confidence interval excludes zero AND it clears modelled costs. Never lower a sample floor to get a verdict.",
+   "guardrails": [
+    "paper/testnet only",
+    "no order path ever",
+    "live_orders_allowed stays false",
+    "output to research/ only",
+    "state venue, fee and funding for every claim"
+   ]
+  },
+  {
+   "id": "backtest-validation",
+   "leads": [
+    "backtest-auditor",
+    "quant-model-validator",
+    "event-driven-researcher"
+   ],
+   "sources": [
+    "office-hud"
+   ],
+   "brief": "Audit backtests for look-ahead bias, data leakage, survivorship bias and overfitting. Verify CI excludes zero and that edge clears modelled costs before any strategy is considered viable.",
+   "guardrails": [
+    "paper/testnet only",
+    "no order path ever",
+    "never lower sample floor to force a verdict",
+    "output to research/ only"
+   ]
+  },
+  {
+   "id": "faith",
+   "leads": [
+    "faith-director",
+    "faith-worker"
+   ],
+   "sources": [
+    "office-hud"
+   ],
+   "brief": "Manages the daily faith content pipeline: verse-to-reel generation, verification, publishing, and metrics. Operates on a fixed canon (Gita Ch. 2 \u2192 3, Dhammapada) with bilingual (English/Hindi) output. One reel per day at 09:00. Never posts without quality-gate approval.",
+   "guardrails": [
+    "canon_stay_fixed: no optimizer drift toward sensationalism",
+    "one_reel_per_day: no volume spam",
+    "quality_gate_before_publish: duration, LUFS, bitrate, safe area",
+    "bilingual_output: english + hindi always paired",
+    "no_live_orders_allowed: research/only",
+    "state_venue_fee_funding: not applicable, report metrics only"
+   ]
+  },
+  {
+   "id": "risk-management",
+   "leads": [
+    "risk-manager",
+    "risk-control-verifier",
+    "drawdown-analyst"
+   ],
+   "sources": [
+    "paper-book"
+   ],
+   "brief": "Enforce position sizing, max drawdown protocol, daily loss limits and exposure limits. Verify kill switch status and PAPER-only restrictions on every cycle.",
+   "guardrails": [
+    "paper/testnet only",
+    "no order path ever",
+    "live_orders_allowed stays false",
+    "risk limits are hard gates, not guidance"
+   ]
+  },
+  {
+   "id": "execution",
+   "leads": [
+    "execution-strategist",
+    "execution-analyst",
+    "cost-analyst"
+   ],
+   "sources": [
+    "paper-book"
+   ],
+   "brief": "Model transaction costs, slippage, funding and basis. Run cost_sensitivity on every edge claim; state venue, fee and funding assumption. Binance spot maker and taker are both 0.1% at VIP 0 \u2014 limit orders save nothing there.",
+   "guardrails": [
+    "paper/testnet only",
+    "no order path ever",
+    "every edge must pass cost_model.cost_sensitivity",
+    "output to research/ only"
+   ]
+  },
+  {
+   "id": "portfolio-management",
+   "leads": [
+    "portfolio-manager",
+    "portfolio-allocation-researcher",
+    "exposure-analyst"
+   ],
+   "sources": [
+    "paper-book"
+   ],
+   "brief": "Size allocations across strategies, monitor correlated exposure, and enforce diversification. Aggregate exposure must stay within risk-management limits.",
+   "guardrails": [
+    "paper/testnet only",
+    "no order path ever",
+    "respect risk-management position limits"
+   ]
+  },
+  {
+   "id": "market-making",
+   "leads": [
+    "market-maker",
+    "liquidity-researcher",
+    "order-book-researcher"
+   ],
+   "sources": [
+    "office-hud"
+   ],
+   "brief": "Study spread capture and inventory-risk models in simulation. Monitor liquidity depth, order book imbalance and liquidation heatmaps. PAPER/TESTNET only \u2014 no live quoting.",
+   "guardrails": [
+    "paper/testnet only",
+    "no order path ever",
+    "simulation only, no live orders"
+   ]
+  },
+  {
+   "id": "compliance",
+   "leads": [
+    "compliance-checker",
+    "trade-journal-reviewer",
+    "research-archivist"
+   ],
+   "sources": [
+    "paper-book"
+   ],
+   "brief": "Guard the PAPER-only boundary. Verify live_orders_allowed stays false, no order path exists in research/executor code, and every claim states venue, fee and funding. Audit kill switch LOCKED status.",
+   "guardrails": [
+    "paper/testnet only",
+    "no order path ever",
+    "live_orders_allowed stays false",
+    "kill switch must remain LOCKED"
+   ]
+  },
+  {
+   "id": "infrastructure-reliability",
+   "leads": [
+    "ops-health-auditor",
+    "launchd-janitor",
+    "mini-deploy-steward",
+    "model-stack-warden"
+   ],
+   "sources": [
+    "office-hud",
+    "laptop-jobs",
+    "mini-office",
+    "ops-mini-services",
+    "ops-mini-jobs",
+    "ops-market-data"
+   ],
+   "brief": "Keep the laptop and Mac mini healthy from evidence. Every recommendation cites a survey line and states how to verify the fix. Advisory only: propose exact commands, never run them. Unknown or unreachable is not ok.",
+   "guardrails": [
+    "advisory only: no start/stop/restart/delete/deploy",
+    "cite the survey line for every claim",
+    "two-machines rule: surgical, add-only changes on the mini",
+    "never copy keys between machines",
+    "never touch trading or kill-switch jobs"
+   ]
+  },
+  {
+   "id": "security-governance",
+   "leads": [
+    "paper-safety-sentinel",
+    "repo-safety-guard"
+   ],
+   "sources": [
+    "ops-paper-safety",
+    "ops-repo-safety"
+   ],
+   "brief": "Independently verify the PAPER-only boundary and git/secret hygiene. Fail closed: anything unverifiable is reported as NOT-VERIFIED, never as safe. Cannot grant itself access or approve its own findings.",
+   "guardrails": [
+    "paper/testnet only",
+    "never unlock or edit kill switches, keys or bot config",
+    "fail closed on unknown",
+    "no commits containing secret-like strings",
+    "advisory only"
+   ]
+  },
+  {
+   "id": "office-integrity",
+   "leads": [
+    "office-registry-auditor",
+    "source-truth-auditor",
+    "autopilot-cadence-watch",
+    "provider-pool-warden"
+   ],
+   "sources": [
+    "office-registry",
+    "office-wiring",
+    "office-cadence",
+    "office-pools",
+    "job-records"
+   ],
+   "brief": "Audit the office itself. Every other department looks outward; this one checks the office's own wiring: agents that have no tier or no persona, departments citing survey sources no collector produces, provider pools whose key is absent, and an autopilot that is enabled but has produced no rounds. Configured is not running, and enabled is not working. Report the defect, the config line, and the exact check that would prove it fixed.",
+   "guardrails": [
+    "advisory only: never edit config/office.json, plists, keys or bot config",
+    "cite the survey line for every claim",
+    "presence-only on keys: never read, print or copy a key value",
+    "a producer never verifies its own work: name the independent check",
+    "fail closed: unverifiable is NOT-VERIFIED, never 'fine'",
+    "paper/testnet only; never touch kill switches or order paths"
+   ]
+  },
+  {
+   "id": "assistant",
+   "leads": [
+    "general-assistant"
+   ],
+   "sources": [
+    "office-hud",
+    "office-registry"
+   ],
+   "brief": "The human-facing entry point for the whole company. Take any request, answer directly what can be answered, route the rest to the right specialised department, and synthesise across departments when a request spans them. Every number comes from live context: an unverifiable claim is NOT-VERIFIED, never 'fine'. Facts only, no directional or timing calls on securities.",
+   "guardrails": [
+    "paper/testnet only",
+    "no order path ever",
+    "live_orders_allowed stays false",
+    "advisory only: never start/stop/restart/delete/deploy \u2014 route infrastructure work to infrastructure-reliability",
+    "presence-only on keys: never read, print or copy a key value",
+    "never copy keys between machines",
+    "never touch trading or kill-switch jobs",
+    "fail closed: unverifiable is NOT-VERIFIED, never 'fine'",
+    "no directional or timing calls on securities; facts only",
+    "fleet writes stay inside autonomy.repo_allowlist"
+   ]
+  }
+ ]
+}

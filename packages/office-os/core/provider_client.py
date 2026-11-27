@@ -64,7 +64,7 @@ class ProviderClient:
         "nvidia_key4":  "https://integrate.api.nvidia.com/v1/chat/completions",
         "google":       "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
         "openrouter":   "https://openrouter.ai/api/v1/chat/completions",
-        "mlx_local":    "http://127.0.0.1:11435/v1/chat/completions",
+        "mlx_local":    "http://127.0.0.1:11437/v1/chat/completions",
     }
 
     KEY_NAMES = {

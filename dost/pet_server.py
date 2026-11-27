@@ -25,7 +25,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from chat_core import Handler, ChatStore, DostChatServer, chunk_text  # noqa: E402
-from dost import MEMORY, companion_respond, dost_greeting  # noqa: E402
+from dost import MEMORY, companion_respond, dost_respond, dost_greeting  # noqa: E402
+from dost.dost_main import log  # noqa: E402
 from openai_components import speech_to_text, get_key  # noqa: E402
 import models  # noqa: E402
 
@@ -125,6 +126,36 @@ class PetHandler(Handler):
         return models.compare(text)
 
     # ---- answers ------------------------------------------------------------
+    def _dost_reply(self, text, conversation_id, interface, history):
+        """Run a message through dost_respond's Claude-like tool-use loop.
+
+        Falls back to the companion responder if the tool loop errors out or
+        returns empty, so the web chat never hard-fails when the LLM or fleet
+        is unreachable. In Jarvis mode the existing pending-action routing is
+        left untouched.
+        """
+        if JARVIS:
+            return dost_or_jarvis(
+                text,
+                conversation_id=conversation_id,
+                interface=interface,
+                history=history,
+            )
+        try:
+            reply = dost_respond(
+                text,
+                conversation_id=conversation_id,
+                interface=interface,
+            )
+        except Exception:  # noqa: BLE001
+            log("dost_respond failed, falling back to companion reply")
+            return companion_respond(
+                text, conversation_id=conversation_id, interface=interface, history=history
+            )
+        return reply or companion_respond(
+            text, conversation_id=conversation_id, interface=interface, history=history
+        )
+
     def answer(self, text, history, backend, session_id="default"):
         if ":" in backend:
             ans = models.ask_model(backend, text, history)
@@ -134,11 +165,8 @@ class PetHandler(Handler):
         if backend == "openclaw":
             return openclaw_reply(text)
         with MODEL_LOCK:
-            return dost_or_jarvis(
-                text,
-                conversation_id=f"web-{session_id}",
-                interface="web",
-                history=history,
+            return self._dost_reply(
+                text, conversation_id=f"web-{session_id}", interface="web", history=history
             )
 
     def stream_answer(self, text, history, backend, session_id="default"):
@@ -157,11 +185,8 @@ class PetHandler(Handler):
             ms = 0
         else:
             with MODEL_LOCK:
-                reply = dost_or_jarvis(
-                    text,
-                    conversation_id=f"web-{session_id}",
-                    interface="web",
-                    history=history,
+                reply = self._dost_reply(
+                    text, conversation_id=f"web-{session_id}", interface="web", history=history
                 )
             label = None
             ms = 0

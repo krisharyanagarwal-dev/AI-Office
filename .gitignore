@@ -84,3 +84,6 @@ dost/mac_app/DostBinary
 
 # Skill deployer rollback snapshots — regenerated on every deploy
 dost/skills/.backups/
+
+# per-conversation chat history (private)
+dost/conversations/

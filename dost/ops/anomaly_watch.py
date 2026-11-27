@@ -43,7 +43,7 @@ class AnomalyWatch:
     """Monitors fleet for anomalies and sends alerts."""
 
     def __init__(self, config: dict | None = None):
-        self.config = config or ANOMALY_CONFIG
+        self.config = {**ANOMALY_CONFIG, **(config or {})}
         self.memory = get_unified_memory()
         self._last_alert: dict[str, float] = {}
 
@@ -51,7 +51,7 @@ class AnomalyWatch:
         """Fetch current fleet metrics from web server."""
         try:
             result = subprocess.run(
-                [sys.executable, "-c", "import urllib.request; import json; r = urllib.request.urlopen('http://localhost:8083/api/metrics', timeout=5); print(json.dumps(json.load(r)))"],  # noqa: E501
+                [sys.executable, "-c", "import urllib.request; import json; r = urllib.request.urlopen('http://127.0.0.1:8083/metrics', timeout=5); print(json.dumps(json.load(r)))"],  # noqa: E501
                 capture_output=True,
                 text=True,
                 timeout=10,

@@ -161,6 +161,11 @@ class UnifiedMemory:
         from memory_pkg.persistent_memory import ConversationMemory
         conv_mem = ConversationMemory(self.workspace_id, memory_dir=self.memory_dir)
         interactions = conv_mem.get_recent_context(limit=50)
+        # Filter to this conversation's interactions only, scoped via metadata session_id.
+        interactions = [
+            i for i in interactions
+            if (i.get("metadata") or {}).get("session_id") == conversation_id
+        ]
         if interactions:
             session = Session(
                 id=conversation_id,
@@ -442,8 +447,10 @@ class UnifiedMemory:
         self._vector_index[fact.id] = embedding
         self._save_vector_index()
 
-    def search(self, query: str, limit: int = 10) -> list[Fact]:
-        """Semantic search for relevant facts."""
+    def search(
+        self, query: str, limit: int = 10, conversation_id: str | None = None
+    ) -> list[Fact]:
+        """Semantic search for relevant facts, optionally scoped to one conversation."""
         if not self._vector_index or not self._facts_cache:
             return []
 
@@ -458,6 +465,8 @@ class UnifiedMemory:
 
         scored = []
         for fact in self._facts_cache:
+            if conversation_id is not None and fact.conversation_id != conversation_id:
+                continue
             if fact.id in self._vector_index:
                 sim = cosine_sim(query_emb, self._vector_index[fact.id])
                 scored.append((sim, fact))
@@ -561,7 +570,7 @@ class UnifiedMemory:
             parts.append(f"=== Conversation Summary ===\n{session.summary}\n")
 
         # 2. Relevant facts
-        facts = self.search(current_query, limit=5)
+        facts = self.search(current_query, limit=5, conversation_id=conversation_id)
         if facts:
             fact_lines = [f"- {f.type}: {f.content} (confidence: {f.confidence:.0%})" for f in facts]
             parts.append("=== Relevant Facts ===\n" + "\n".join(fact_lines) + "\n")

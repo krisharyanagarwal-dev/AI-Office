@@ -11,11 +11,14 @@ The director never produces media itself — it only enqueues tasks
 for the worker agent to execute.
 """
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
-sys.path.insert(0, "/Users/aryanagarwal/office-os")
+# External office-os checkout (queue, state, tasks). Override with OFFICE_OS_DIR.
+OFFICE_OS = os.environ.get("OFFICE_OS_DIR", "/Users/aryanagarwal/office-os")
+sys.path.insert(0, OFFICE_OS)
 from core.hive import Hive
 from core.router import ProviderRouter
 
@@ -39,8 +42,8 @@ class FaithDirector:
         }
 
         # Queue management
-        self.queue_path = Path("/Users/aryanagarwal/office-os/faith_queue.json")
-        self.queue_lock = Path("/Users/aryanagarwal/office-os/faith_queue.lock")
+        self.queue_path = Path(f"{OFFICE_OS}/faith_queue.json")
+        self.queue_lock = Path(f"{OFFICE_OS}/faith_queue.lock")
 
     # ---------- Decide ----------
     def pick_next_reel(self):
@@ -200,7 +203,7 @@ class FaithDirector:
         posted = set()
         try:
             # Check tasks database for posted reels
-            tasks_dir = Path("/Users/aryanagarwal/office-os/tasks")
+            tasks_dir = Path(f"{OFFICE_OS}/tasks")
             if tasks_dir.exists():
                 for p in tasks_dir.glob("*.json"):
                     t = json.loads(p.read_text()) if p.read_text() else None
@@ -229,7 +232,7 @@ class FaithDirector:
     def _persist_posting_state(self, queue):
         """Track which reels have been posted, alongside the task DB."""
         try:
-            state_path = Path("/Users/aryanagarwal/office-os/faith_state.json")
+            state_path = Path(f"{OFFICE_OS}/faith_state.json")
             # Read existing
             state = {}
             if state_path.exists():
@@ -247,36 +250,126 @@ class FaithDirector:
     def record_performance(self, reel_id, metrics):
         """Record performance metrics for a posted reel, to inform future topic mix."""
         try:
-            state_path = Path("/Users/aryanagarwal/office-os/faith_state.json")
+            state_path = Path(f"{OFFICE_OS}/faith_state.json")
             state = {}
             if state_path.exists():
                 state = json.loads(state_path.read_text())
 
+            # Store metrics with language and engagement info
             state[reel_id] = {
                 "metrics": metrics,
-                "last_recorded": self.hive._now(),
+                "language": metrics.get("language", "english"),
+                "views": metrics.get("views", 0),
+                "likes": metrics.get("likes", 0),
+                "comments": metrics.get("comments", 0),
+                "shares": metrics.get("shares", 0),
+                "saves": metrics.get("saves", 0),
+                "engagement_rate": self._calculate_engagement_rate(metrics),
+                "last_recorded": self.hive._now() if hasattr(self, 'hive') else None,
             }
             state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2))
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[faith-director] Performance recording error: {e}")
+
+    def _calculate_engagement_rate(self, metrics):
+        """Calculate engagement rate from raw metrics."""
+        views = metrics.get("views", 0)
+        if views == 0:
+            return 0
+        likes = metrics.get("likes", 0)
+        # Engagement rate: (likes + comments + shares) / views * 100
+        engagement = (likes + metrics.get("comments", 0) + metrics.get("shares", 0)) / views * 100
+        return round(engagement, 2)
 
     def adjust_topic_mix(self):
         """Gently adjust the queue mix based on recorded performance."""
         try:
-            state_path = Path("/Users/aryanagarwal/office-os/faith_state.json")
+            state_path = Path(f"{OFFICE_OS}/faith_state.json")
             if not state_path.exists():
                 return
 
             state = json.loads(state_path.read_text())
-            # If english reels have significantly better engagement, weight them higher
-            # This is a simple heuristic - in practice would use proper statistics
-            english_count = sum(1 for k, v in state.items() if k.endswith("_english") or v.get("metrics", {}).get("language") == "english")
-            hindi_count = sum(1 for k, v in state.items() if k.endswith("_hindi") or v.get("metrics", {}).get("language") == "hindi")
+            if not state:
+                return
 
-            # No dramatic shifts - keep the canon ratio but allow minor weighting
-            # This method is called; the actual mix stays canon-driven
-        except Exception:
-            pass
+            # Calculate average engagement by language
+            english_engagements = []
+            hindi_engagements = []
+
+            for reel_id, data in state.items():
+                # engagement_rate is stored at the record's top level (see record_performance)
+                lang = data.get("language", "english")
+                er = data.get("engagement_rate", 0) or 0
+
+                if lang == "english" or reel_id.endswith("_english"):
+                    english_engagements.append(er)
+                elif lang == "hindi" or reel_id.endswith("_hindi"):
+                    hindi_engagements.append(er)
+
+            avg_english_er = sum(english_engagements) / len(english_engagements) if english_engagements else 0
+            avg_hindi_er = sum(hindi_engagements) / len(hindi_engagements) if hindi_engagements else 0
+
+            # Gentle adjustment: if one language consistently outperforms, slight weighting
+            # Maximum 10% shift per adjustment cycle to avoid drastic changes
+            shift_pct = 0.0  # default: no shift
+
+            if avg_english_er > avg_hindi_er * 1.2 and len(english_engagements) >= 3:
+                # English performing significantly better - shift queue toward English
+                shift_pct = min(0.1, (avg_english_er - avg_hindi_er) / max(avg_english_er, 1))
+            elif avg_hindi_er > avg_english_er * 1.2 and len(hindi_engagements) >= 3:
+                # Hindi performing significantly better - shift queue toward Hindi
+                shift_pct = min(0.1, (avg_hindi_er - avg_english_er) / max(avg_hindi_er, 1))
+
+            # Apply shift to queue priorities (subtle, canonical-preserving)
+            if shift_pct > 0:
+                self._apply_queue_shift(shift_pct, avg_english_er > avg_hindi_er)
+
+            # Log the adjustment
+            print(f"[faith-director] Topic mix adjustment: English ER={avg_english_er:.2f}%, Hindi ER={avg_hindi_er:.2f}%, shift={shift_pct:.1%}")
+        except Exception as e:
+            print(f"[faith-director] Topic mix adjustment error: {e}")
+
+    def _apply_queue_shift(self, shift_pct, favor_english):
+        """Apply a subtle priority shift to the queue while preserving canon."""
+        try:
+            queue_path = Path(f"{OFFICE_OS}/faith_queue.json")
+            if not queue_path.exists():
+                return
+
+            queue = json.loads(queue_path.read_text())
+            if not isinstance(queue, list) or not queue:
+                return
+
+            # Calculate current English/Hindi distribution
+            english_reels = [r for r in queue if r.get("language") == "english"]
+            hindi_reels = [r for r in queue if r.get("language") == "hindi"]
+
+            english_count = len(english_reels)
+            hindi_count = len(hindi_reels)
+
+            # Apply subtle shift - move 1 reel position per 10% shift
+            reels_to_shift = max(1, int(len(queue) * shift_pct))
+
+            if favor_english and english_count > 0:
+                # Move first English reel higher in priority
+                for i in range(min(reels_to_shift, english_count)):
+                    idx = i * max(1, len(english_reels) // english_count)
+                    if idx < len(queue):
+                        # Mark as selected-next by adding priority flag
+                        queue[idx]["selected_at"] = self.hive._now() if hasattr(self, 'hive') else None
+
+            elif not favor_english and hindi_count > 0:
+                # Move first Hindi reel higher in priority
+                for i in range(min(reels_to_shift, hindi_count)):
+                    idx = i * max(1, len(hindi_reels) // hindi_count)
+                    if idx < len(queue):
+                        queue[idx]["selected_at"] = self.hive._now() if hasattr(self, 'hive') else None
+
+            # Save adjusted queue
+            json.dumps(queue, ensure_ascii=False, indent=2)
+            queue_path.write_text(json.dumps(queue, ensure_ascii=False, indent=2))
+        except Exception as e:
+            print(f"[faith-director] Queue shift error: {e}")
 
     def run_round(self):
         """One complete directing round: pick next reel, enqueue it."""

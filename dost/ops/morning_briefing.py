@@ -7,15 +7,16 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # dost/  (for `import ops`, `import memory_pkg`)
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # AI-Office/ (for `from dost.dost_main import ...`)
 
+from dost.dost_main import generate_daily_briefing
 from memory_pkg.unified import get_unified_memory
 
 
@@ -37,26 +38,13 @@ class MorningBriefing:
 
     def generate_briefing(self) -> dict[str, Any]:
         """Generate morning briefing by dispatching to fleet."""
-        # Dispatch briefing request to fleet
-        cmd = [
-            sys.executable,
-            "-m", "dost.dost",
-            "--briefing",
-        ]
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-            if result.returncode == 0:
-                return {
-                    "ok": True,
-                    "content": result.stdout.strip(),
-                    "generated_at": datetime.now(timezone.utc).isoformat(),
-                }
+            content = generate_daily_briefing()
             return {
-                "ok": False,
-                "error": result.stderr.strip() or "Briefing generation failed",
+                "ok": True,
+                "content": content,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
             }
-        except subprocess.TimeoutExpired:
-            return {"ok": False, "error": "Briefing timed out"}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 

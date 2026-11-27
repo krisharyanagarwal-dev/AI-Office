@@ -30,6 +30,8 @@ def stub_companion(monkeypatch, memory):
     monkeypatch.setattr(dost_main, "wants_audit", lambda task: False)
     monkeypatch.setattr(dost_main, "llm_decide", lambda task, context, style="": "Noted.")
     monkeypatch.setattr(dost_main.MEMORY, "add_interaction", lambda *args, **kwargs: None)
+    # check_fleet_health makes live network calls; stub it for deterministic tests.
+    monkeypatch.setattr("ops.proactive_monitor.check_fleet_health", lambda: [])
 
 
 class SessionEchoHandler(Handler):
@@ -144,3 +146,47 @@ def test_cli_message_uses_shared_memory(tmp_path, monkeypatch, capsys):
     assert session is not None
     assert session.messages[-2]["content"] == "I prefer concise replies."
     assert session.messages[-1]["content"] == "Noted."
+
+
+def test_dost_respond_remembers_across_calls(tmp_path, monkeypatch):
+    memory = make_memory(tmp_path)
+    captured = {}
+
+    def fake_decide(task, context, style=""):
+        captured["context"] = context
+        return "You prefer concise replies."
+
+    monkeypatch.setattr(dost_main, "get_unified_memory", lambda: memory)
+    monkeypatch.setattr(dost_main, "build_context", lambda: "LIVE CONTEXT")
+    monkeypatch.setattr(dost_main, "llm_decide", fake_decide)
+    monkeypatch.setattr(dost_main, "wants_audit", lambda task: False)
+    # _conversation_prefix now scopes per conversation_id; bypass it so the
+    # only cross-session memory source under test is build_context_prompt.
+    monkeypatch.setattr(dost_main, "_conversation_prefix", lambda conversation_id: "")
+    monkeypatch.setattr(dost_main.MEMORY, "add_interaction", lambda *args, **kwargs: None)
+
+    # First turn: user states a preference; turn + extracted fact must persist.
+    reply1 = dost_main.dost_respond(
+        "I prefer concise replies.",
+        conversation_id="conv-dost-1",
+        interface="cli",
+    )
+    assert "You prefer concise replies." in reply1
+    session = memory.load_session("conv-dost-1")
+    assert session is not None
+    assert session.messages[-2]["content"] == "I prefer concise replies."
+    assert "You prefer concise replies." in session.messages[-1]["content"]
+    facts = memory.get_facts("conv-dost-1")
+    assert ("preference", "concise replies") in [(f.type, f.content) for f in facts]
+
+    # Second turn: follow-up must see the earlier turn via injected memory context.
+    dost_main.dost_respond(
+        "What do I prefer?",
+        conversation_id="conv-dost-1",
+        interface="cli",
+    )
+    assert "I prefer concise replies." in captured["context"]
+
+    # A separate conversation must not leak into this one.
+    dost_main.dost_respond("Hello.", conversation_id="conv-dost-2", interface="cli")
+    assert "I prefer concise replies." not in captured["context"]

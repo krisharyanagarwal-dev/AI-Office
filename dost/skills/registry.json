@@ -4,8 +4,8 @@
     "version": "1.0.0",
     "description": "Simple calculator skill for basic arithmetic operations",
     "author": "dost-generator",
-    "created_at": "2026-11-23T09:02:53.663239+00:00",
-    "updated_at": "2026-11-23T09:02:53.663263+00:00",
+    "created_at": "2026-11-27T12:36:00.934736+00:00",
+    "updated_at": "2026-11-27T12:36:00.934751+00:00",
     "dependencies": [],
     "entry_point": "main",
     "module_file": "sample_calculator.py",
@@ -31,6 +31,47 @@
       "math",
       "utility",
       "demo"
+    ],
+    "enabled": true,
+    "last_test_run": null,
+    "last_test_passed": null,
+    "deploy_status": "pending",
+    "deploy_ts": null
+  },
+  "web_search": {
+    "name": "web_search",
+    "version": "1.0.0",
+    "description": "Keyless public web search via DuckDuckGo HTML endpoint",
+    "author": "dost",
+    "created_at": "2026-11-27T12:36:00.935191+00:00",
+    "updated_at": "2026-11-27T12:36:00.935203+00:00",
+    "dependencies": [],
+    "entry_point": "main",
+    "module_file": "web_search.py",
+    "test_file": "test_web_search.py",
+    "config_schema": {
+      "type": "object",
+      "properties": {
+        "max_results": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "timeout": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 60
+        }
+      }
+    },
+    "default_config": {
+      "max_results": 5,
+      "timeout": 10
+    },
+    "tags": [
+      "search",
+      "web",
+      "research"
     ],
     "enabled": true,
     "last_test_run": null,

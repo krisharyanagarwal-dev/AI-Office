@@ -4,7 +4,7 @@
 #
 # Usage (from the Shortcuts app):
 #   ./siri_dost.sh                  # no message → reads the daily briefing
-#   ./siri_dost.sh "research NSE edges"  # message → dost_respond directly
+#   ./siri_dost.sh "research NSE edges"  # message → dost_respond (shared memory, speaks via voice CLI)
 #
 # Prints clean, speakable text to stdout. Always exits 0 so Shortcuts can
 # speak a friendly fallback even when Dost is unreachable.
@@ -16,7 +16,9 @@ set -u
 # no matter where it is invoked from.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 COMPANY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-DOST_CLI="$COMPANY_DIR/dost.py"
+DOST_DIR="$COMPANY_DIR/dost"
+VOICE_CLI="dost.voice.cli"   # run as: python3 -m dost.voice.cli   (cwd = COMPANY_DIR)
+DOST_MAIN="dost.dost_main"   # run as: python3 -m dost.dost_main   (cwd = COMPANY_DIR)
 
 SORRY="Sorry, I'm having trouble reaching Dost right now. Please try again later."
 
@@ -34,16 +36,15 @@ clean_text() {
         | sed -e '/^[[:space:]]*$/d' -e 's/^[[:space:]]*//'
 }
 
+# Run a dost module from COMPANY_DIR so the `dost` package resolves.
+run_dost_module() {
+    ( cd "$COMPANY_DIR" && python3 -m "$@" 2>/dev/null )
+}
+
 main() {
     # python3 must be available
     if ! command -v python3 >/dev/null 2>&1; then
         printf '%s\n' "$SORRY (python3 not found)"
-        return 0
-    fi
-
-    # dost.py must exist
-    if [ ! -f "$DOST_CLI" ]; then
-        printf '%s\n' "$SORRY (dost.py not found)"
         return 0
     fi
 
@@ -56,7 +57,7 @@ main() {
 
     if printf '%s' "$lower_msg" | grep -qiE "anything broken|system health|is everything ok|anything wrong|any alerts"; then
         # Siri alert phrase → run doctor and summarize anomalies
-        output="$(python3 "$DOST_CLI" --doctor 2>/dev/null | grep -E "FAIL|FAILED|Anomaly|Quota" | head -5 || true)"
+        output="$(run_dost_module "$DOST_MAIN" --doctor | grep -E "FAIL|FAILED|Anomaly|Quota" | head -5 || true)"
         if [ -z "$output" ]; then
             output="All systems look good. No anomalies detected."
         fi
@@ -77,12 +78,16 @@ except Exception as e:
 " 2>/dev/null)" || true
     elif [ -z "$msg" ]; then
         # No message → daily briefing (deterministic, no LLM needed)
-        output="$(python3 "$DOST_CLI" --briefing 2>/dev/null)" || true
+        output="$(run_dost_module "$DOST_MAIN" --briefing 2>/dev/null)" || true
     else
-        # Message → dost_respond directly (warm spoken reply).
-        # Note: --dispatch would only queue a fleet task and print JSON,
-        # which is not speakable, so we use dost_respond instead.
-        output="$(python3 "$DOST_CLI" "$@" 2>/dev/null)" || true
+        # Message → dost_respond via the voice CLI (shared memory across
+        # CLI/web/Telegram/voice sessions, reply spoken locally via afplay
+        # and returned on stdout for Shortcuts).
+        [ -f "$DOST_DIR/voice/cli.py" ] || {
+            printf '%s\n' "$SORRY (voice CLI not found)"
+            return 0
+        }
+        output="$(run_dost_module "$VOICE_CLI" -- "$msg" 2>/dev/null)" || true
     fi
 
     if [ -z "$output" ]; then
