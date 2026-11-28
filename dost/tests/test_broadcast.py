@@ -164,6 +164,50 @@ def test_status_follows_healer_redispatch_to_replacement_answer(env):
     assert any("Risk is low." in t[3] for t in env["memory"].turns)
 
 
+def test_unlinked_redispatch_is_matched_to_its_replacement(env):
+    sent = dm.dispatch_broadcast_to_fleet("what is the risk?")
+    bid = sent["broadcast_id"]
+    origin = env["hive"] / f"{sent['task_ids']['alpha-analyst']}.json"
+
+    # Old-style redispatch: marked redispatched, but no redispatched_to link.
+    task = json.loads(origin.read_text())
+    task["status"] = "redispatched"
+    origin.write_text(json.dumps(task))
+    replacement = {
+        "id": "jev-replacement",
+        "agent_id": "alpha-analyst",
+        "status": "done",
+        "description": "what is the risk?",
+        "created_at": task["created_at"],
+        "metadata": {"source": "dost"},
+        "result": {"text": "Risk is low."},
+    }
+    (env["hive"] / "jev-replacement.json").write_text(json.dumps(replacement))
+    # A same-prompt task for a different agent must not be claimed.
+    decoy = dict(replacement, id="jev-decoy", agent_id="beta-trader")
+    (env["hive"] / "jev-decoy.json").write_text(json.dumps(decoy))
+
+    result = dm.broadcast_status(bid)
+    assert result["workers"]["alpha-analyst"]["task_id"] == "jev-replacement"
+    assert result["workers"]["alpha-analyst"]["status"] == "done"
+    assert result["counts"]["redispatched"] == 0
+    assert json.loads(origin.read_text())["metadata"]["redispatched_to"] == "jev-replacement"
+    assert any("Risk is low." in t[3] for t in env["memory"].turns)
+
+
+def test_collector_keeps_broadcast_open_while_workers_are_redispatched(env):
+    sent = dm.dispatch_broadcast_to_fleet("ping")
+    for task_id in sent["task_ids"].values():
+        path = env["hive"] / f"{task_id}.json"
+        task = json.loads(path.read_text())
+        task["status"] = "redispatched"
+        path.write_text(json.dumps(task))
+
+    summary = dm.broadcast_collect()
+    assert summary["checked"] == 1
+    assert summary["open"] == 1
+
+
 def test_status_for_unknown_broadcast_reports_error(env):
     result = dm.broadcast_status("bc-doesnotexist")
     assert result["ok"] is False

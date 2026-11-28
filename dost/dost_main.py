@@ -177,6 +177,120 @@ def run_web_search(query: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Read-only repository introspection tools (safe: no edits, no live systems).
+# These give the dost CLI assistant Claude Code-style file reading and code
+# search within the AI-Office repo, so it can inspect the codebase during a
+# conversation instead of only running research/fleet commands.
+# ---------------------------------------------------------------------------
+
+REPO_READ_MAX_BYTES = 200_000
+REPO_GREP_MAX_MATCHES = 50
+REPO_GREP_MAX_PER_FILE = 10
+
+_SECRET_NAMES = frozenset({
+    ".env", ".env.local", ".env.production", "secrets.json", "credentials.json",
+    "id_rsa", "id_ed25519", "id_dsa",
+})
+
+
+def _looks_like_secret(name: str) -> bool:
+    lower = name.lower()
+    if lower in _SECRET_NAMES:
+        return True
+    if lower.endswith((".pem", ".key")) or lower.startswith("id_"):
+        return True
+    return False
+
+
+def _is_under_repo(path: Path) -> bool:
+    try:
+        return path.is_relative_to(COMPANY_DIR)
+    except AttributeError:
+        return path == COMPANY_DIR or COMPANY_DIR in path.parents
+
+
+def read_repo_file(path: str) -> str:
+    """Read one file under the AI-Office repository root (read-only).
+
+    Size-capped, text-only, skips credential-style filenames. Returns the
+    file contents or an error message the LLM can narrate.
+    """
+    try:
+        requested = Path(path)
+        if not requested.is_absolute():
+            requested = COMPANY_DIR / requested
+        resolved = requested.resolve(strict=False)
+    except (OSError, ValueError):
+        return f"Cannot read '{path}': invalid path."
+    if not _is_under_repo(resolved):
+        return f"Cannot read '{path}': outside the AI-Office repository."
+    if _looks_like_secret(resolved.name):
+        return f"Cannot read '{path}': credential-style file is not readable."
+    try:
+        if not resolved.exists() or not resolved.is_file():
+            return f"Cannot read '{path}': not a file under the repository."
+        if resolved.stat().st_size > REPO_READ_MAX_BYTES:
+            return (
+                f"Cannot read '{path}': file is larger than {REPO_READ_MAX_BYTES} bytes. "
+                "Ask for a specific section instead."
+            )
+        data = resolved.read_bytes()
+    except OSError as exc:
+        return f"Cannot read '{path}': {exc}."
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return f"Cannot read '{path}': binary file, not readable as text."
+    return text
+
+
+def grep_repo_code(pattern: str) -> str:
+    """Search repository files for a case-insensitive literal pattern.
+
+    Returns matching lines as `file:line: content`, capped so output stays
+    small enough to feed back to the LLM. Read-only.
+    """
+    if not pattern or not pattern.strip():
+        return "Cannot grep: empty pattern."
+    term = pattern.strip().lower()
+    matches = []
+    try:
+        files = [p for p in COMPANY_DIR.rglob("*") if p.is_file()]
+    except OSError:
+        files = []
+    for path in files:
+        try:
+            if not _is_under_repo(path):
+                continue
+            if _looks_like_secret(path.name):
+                continue
+            if path.stat().st_size > REPO_READ_MAX_BYTES:
+                continue
+            data = path.read_bytes()
+        except OSError:
+            continue
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        rel = path.relative_to(COMPANY_DIR)
+        count = 0
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if term in line.lower():
+                matches.append(f"{rel}:{lineno}: {line}")
+                count += 1
+                if count >= REPO_GREP_MAX_PER_FILE:
+                    break
+            if len(matches) >= REPO_GREP_MAX_MATCHES:
+                break
+        if len(matches) >= REPO_GREP_MAX_MATCHES:
+            break
+    if not matches:
+        return f"No matches for '{pattern}' in the repository."
+    return "\n".join(matches)
+
+
+# ---------------------------------------------------------------------------
 # LLM prompts
 # ---------------------------------------------------------------------------
 
@@ -192,6 +306,8 @@ Decide how to respond:
 - If they want analysis delegated to the company fleet, reply with ONLY: FLEET:<prompt>
 - If they want the same prompt sent to every worker at once, reply with ONLY: BROADCAST:<prompt>
 - If they want a multi-step plan executed through web search and the fleet, reply with ONLY: ORCHESTRATE:<goal>
+- If they want you to look at a file in the AI-Office repo, reply with ONLY: READ:<path relative to repo root>
+- If they want you to search the codebase for something, reply with ONLY: GREP:<literal pattern to search for>
 - Otherwise, write a warm, natural response in your own voice. Ground any numbers in the CONTEXT above. Be honest about failures — don't hide them. Don't expose internal IDs, provider names, model names, task IDs, or technical plumbing. Sound like a capable friend who knows about trading research.
 """
 
@@ -502,6 +618,18 @@ def dost_respond(
             MEMORY.add_interaction(task, "orchestrate", f"Orchestrated goal: {goal[:80]}")
             step += 1
             label = f"orchestrate: {goal[:60]}"
+        elif decision.startswith("READ:"):
+            path = decision[len("READ:"):].strip()
+            output = read_repo_file(path)
+            MEMORY.add_interaction(task, "repo", f"Read repo file: {path}")
+            step += 1
+            label = f"read: {path}"
+        elif decision.startswith("GREP:"):
+            pattern = decision[len("GREP:"):].strip()
+            output = grep_repo_code(pattern)
+            MEMORY.add_interaction(task, "repo", f"Grep repo: {pattern}")
+            step += 1
+            label = f"grep: {pattern}"
         else:
             # Natural-language final answer (one-shot or after tool results).
             MEMORY.add_interaction(task, route_department(task), "Conversational response")
@@ -519,9 +647,9 @@ def dost_respond(
             f"{context}\n\n"
             f"I ran the tool '{label}' and got this result:\n{output}\n\n"
             f"Reply with your final answer to the user's request based on the result "
-            f"above, or COMMAND:<name> / FLEET:<prompt> / ORCHESTRATE:<goal> to run "
-            f"another tool. Ground any numbers in the result; if it is empty or failed, "
-            f"say so plainly."
+            f"above, or COMMAND:<name> / FLEET:<prompt> / ORCHESTRATE:<goal> / "
+            f"READ:<path> / GREP:<pattern> to run another tool. Ground any numbers in "
+            f"the result; if it is empty or failed, say so plainly."
         )
         decision = llm_decide(task, tool_context)
         continue
@@ -570,7 +698,8 @@ for anything not covered):
   the office P&L summary, the fleet task summary, and live fleet status in
   the CONTEXT.
 - What you can do: chat, run a read-only system audit when asked to "audit"
-  or "check the system", run the research pipeline commands register,
+  or "check the system", read files and search code inside the AI-Office
+  repository, run the research pipeline commands register,
   gate, holdout, calibrate, report and all (only when asked by name), and
   submit prompts to the fleet orchestrator.
 - What you cannot do: place trades (paper only, live orders locked), edit
@@ -1767,6 +1896,72 @@ def dispatch_broadcast_to_fleet(
     }
 
 
+def _created_at_to_epoch(value: str) -> float:
+    """Epoch for a task created_at. The dispatcher writes local time with a 'Z' suffix
+    (time.strftime with no UTC conversion), so parse it as local time to match."""
+    try:
+        return time.mktime(time.strptime(value[:19], "%Y-%m-%dT%H:%M:%S"))
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _link_replacement(task: dict, manifest: dict) -> str | None:
+    """Find the task the healer created to replace a redispatched broadcast task, and link it.
+
+    Older redispatches (before the healer carried broadcast_id) left no link. The
+    replacement is the earliest task for the same agent and prompt created after
+    the original, not tagged with another broadcast, and not claimed by another
+    original. The link is written onto the original task so later checks are direct.
+    """
+    origin_id = task.get("id")
+    agent = task.get("agent_id")
+    prompt = task.get("description")
+    origin_created = task.get("created_at", "")
+    bid = manifest.get("id")
+    if not origin_id or not agent or not prompt:
+        return None
+    floor = _created_at_to_epoch(origin_created) - 60
+    best: tuple[str, dict] | None = None
+    try:
+        entries = list(os.scandir(HIVE_DIR))
+    except OSError:
+        return None
+    for entry in entries:
+        if not (entry.name.startswith("jev-") and entry.name.endswith(".json")):
+            continue
+        try:
+            if entry.stat().st_mtime < floor:
+                continue
+            candidate = json.loads(Path(entry.path).read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        meta = candidate.get("metadata") or {}
+        if candidate.get("id") == origin_id or candidate.get("agent_id") != agent:
+            continue
+        if candidate.get("description") != prompt:
+            continue
+        if meta.get("broadcast_id") not in (None, bid):
+            continue
+        if meta.get("redispatched_from") not in (None, origin_id):
+            continue
+        if candidate.get("created_at", "") < origin_created:
+            continue
+        if best is None or candidate.get("created_at", "") < best[1].get("created_at", ""):
+            best = (candidate["id"], candidate)
+    if best is None:
+        return None
+    try:
+        origin_path = HIVE_DIR / f"{origin_id}.json"
+        stored = json.loads(origin_path.read_text())
+        stored.setdefault("metadata", {})["redispatched_to"] = best[0]
+        tmp = origin_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(stored, indent=2))
+        os.replace(tmp, origin_path)
+    except (OSError, json.JSONDecodeError) as exc:
+        log(f"Could not link redispatched task {origin_id}: {type(exc).__name__}")
+    return best[0]
+
+
 def broadcast_status(broadcast_id: str) -> dict:
     """Report per-worker state for a broadcast, and record new finished answers to memory.
 
@@ -1790,8 +1985,11 @@ def broadcast_status(broadcast_id: str) -> dict:
         # A healer redispatch replaces the task with a new id; follow the chain (bounded).
         for _ in range(10):
             task = _read_orchestrate_task(task_id)
-            replacement = ((task or {}).get("metadata") or {}).get("redispatched_to")
-            if not (task and task.get("status") == "redispatched" and replacement):
+            if not (task and task.get("status") == "redispatched"):
+                break
+            replacement = ((task.get("metadata") or {}).get("redispatched_to")
+                           or _link_replacement(task, manifest))
+            if not replacement:
                 break
             task_id = replacement
         status = task.get("status", "pending") if task else "missing"
@@ -1846,7 +2044,8 @@ def broadcast_collect() -> dict:
         if not status.get("ok"):
             continue
         summary["checked"] += 1
-        if status["counts"]["pending"]:
+        counts = status["counts"]
+        if counts["pending"] or counts["in_progress"] or counts["redispatched"]:
             summary["open"] += 1
         if status["newly_recorded"]:
             summary["newly_recorded"][path.stem] = status["newly_recorded"]
