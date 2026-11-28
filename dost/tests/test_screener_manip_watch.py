@@ -227,6 +227,74 @@ def test_ev_new_age_absent_means_no_boost(monkeypatch):
     assert watch._manipulation_score(_ev_boost_row("PLAIN")) == 75.0
 
 
+def _news_boost_row(symbol: str, signal: str = "negative") -> dict:
+    """Row scoring 75 (Extreme leverage + Parabolic), below the 80 threshold."""
+    return {
+        "symbol": symbol,
+        "leverage_flag": "Extreme",
+        "momentum_flag": "Parabolic",
+        "pct_from_52w_high": "-20",
+        "pe_ttm": "18",
+        "debt_to_equity": "40",
+        "current_ratio": "2.0",
+        "news_sentiment": {"signal": signal, "score": -0.8, "sources": 2},
+    }
+
+
+def _social_boost_row(symbol: str, signal: str = "negative") -> dict:
+    """Row scoring 75 (Extreme leverage + Parabolic), below the 80 threshold."""
+    return {
+        "symbol": symbol,
+        "leverage_flag": "Extreme",
+        "momentum_flag": "Parabolic",
+        "pct_from_52w_high": "-20",
+        "pe_ttm": "18",
+        "debt_to_equity": "40",
+        "current_ratio": "2.0",
+        "social_sentiment": {"signal": signal, "score": -0.8, "sources": 2},
+    }
+
+
+# ----------------------- News sentiment score booster -----------------------
+
+def test_news_sentiment_boost_adds_five_points(monkeypatch):
+    watch, _, _ = _make_watch(monkeypatch, config={"thresholds": {"news_sentiment_enabled": True}})
+    assert watch._manipulation_score(_news_boost_row("NEWSUP")) == 80.0
+
+
+def test_news_sentiment_boost_off_by_default(monkeypatch):
+    """Controlled rollout: news sentiment boost is opt-in and defaults to off."""
+    watch, _, _ = _make_watch(monkeypatch)
+    assert watch.config["thresholds"]["news_sentiment_enabled"] is False
+    assert watch._manipulation_score(dict(_news_boost_row("GATED"))) == 75.0
+
+
+def test_news_sentiment_boost_only_on_negative(monkeypatch):
+    watch, _, _ = _make_watch(monkeypatch, config={"thresholds": {"news_sentiment_enabled": True}})
+    assert watch._manipulation_score(dict(_news_boost_row("NEUTRAL", signal="neutral"))) == 75.0
+    assert watch._manipulation_score(dict(_news_boost_row("POS", signal="positive"))) == 75.0
+
+
+# ----------------------- Social sentiment score booster -----------------------
+
+def test_social_sentiment_boost_adds_five_points(monkeypatch):
+    watch, _, _ = _make_watch(monkeypatch, config={"thresholds": {"social_sentiment_enabled": True}})
+    assert watch._manipulation_score(_social_boost_row("SOCUP")) == 80.0
+
+
+def test_social_sentiment_boost_off_by_default(monkeypatch):
+    """Controlled rollout: social sentiment boost is opt-in and defaults to off."""
+    watch, _, _ = _make_watch(monkeypatch)
+    assert watch.config["thresholds"]["social_sentiment_enabled"] is False
+    assert watch._manipulation_score(dict(_social_boost_row("GATED"))) == 75.0
+
+
+def test_social_sentiment_boost_only_on_negative(monkeypatch):
+    watch, _, _ = _make_watch(monkeypatch, config={"thresholds": {"social_sentiment_enabled": True}})
+    assert watch._manipulation_score(dict(_social_boost_row("NEUTRAL", signal="neutral"))) == 75.0
+    assert watch._manipulation_score(dict(_social_boost_row("POS", signal="positive"))) == 75.0
+
+
 def test_signals_include_ev_fields(monkeypatch):
     watch, _, _ = _make_watch(monkeypatch, config={"thresholds": {"ev_new_age_enabled": True}})
     row = dict(_ev_boost_row("EVSIG"), ev_new_age=True, ev_new_age_score=88.0)
