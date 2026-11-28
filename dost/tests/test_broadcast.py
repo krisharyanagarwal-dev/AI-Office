@@ -112,7 +112,9 @@ def test_status_records_each_finished_answer_once(env):
 
     first = dm.broadcast_status(bid)
     assert first["ok"] is True
-    assert first["counts"] == {"done": 1, "error": 1, "pending": 1, "missing": 0}
+    assert first["counts"] == {
+        "done": 1, "error": 1, "pending": 1, "in_progress": 0, "redispatched": 0, "missing": 0,
+    }
     assert sorted(first["newly_recorded"]) == ["alpha-analyst", "beta-trader"]
     # 1 dispatch summary (written at send time) + 2 worker answers.
     assert len(env["memory"].turns) == 3

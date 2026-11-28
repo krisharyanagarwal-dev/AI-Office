@@ -1782,14 +1782,17 @@ def broadcast_status(broadcast_id: str) -> dict:
     recorded = set(manifest.get("recorded", []))
     prompt = manifest.get("prompt", "")
     conversation_id = f"broadcast-{broadcast_id}"
-    counts = {"done": 0, "error": 0, "pending": 0, "missing": 0}
+    counts = {"done": 0, "error": 0, "pending": 0, "in_progress": 0, "redispatched": 0, "missing": 0}
     workers: dict[str, dict] = {}
     newly_recorded: list[str] = []
 
     for agent, task_id in manifest.get("task_ids", {}).items():
         task = _read_orchestrate_task(task_id)
         status = task.get("status", "pending") if task else "missing"
-        bucket = status if status in ("done", "error") else ("missing" if status == "missing" else "pending")
+        if status in ("done", "error", "missing", "in_progress", "redispatched"):
+            bucket = status
+        else:
+            bucket = "pending"
         counts[bucket] += 1
         workers[agent] = {"task_id": task_id, "status": status}
 
