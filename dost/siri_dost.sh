@@ -4,9 +4,10 @@
 #
 # Usage (from the Shortcuts app):
 #   ./siri_dost.sh                  # no message → reads the daily briefing
-#   ./siri_dost.sh "research NSE edges"  # message → dost_respond (shared memory, speaks via voice CLI)
+#   ./siri_dost.sh "research NSE edges"  # message → fleet dispatch via voice CLI --dispatch
 #
-# Prints clean, speakable text to stdout. Always exits 0 so Shortcuts can
+# Prints the fleet task_id to stdout (for Shortcuts) and speaks the result
+# via TTS when the fleet task completes. Always exits 0 so Shortcuts can
 # speak a friendly fallback even when Dost is unreachable.
 #
 # Paper-only. Kill switch locked. No live orders. No Telegram token needed.
@@ -80,14 +81,14 @@ except Exception as e:
         # No message → daily briefing (deterministic, no LLM needed)
         output="$(run_dost_module "$DOST_MAIN" --briefing 2>/dev/null)" || true
     else
-        # Message → dost_respond via the voice CLI (shared memory across
-        # CLI/web/Telegram/voice sessions, reply spoken locally via afplay
-        # and returned on stdout for Shortcuts).
+        # Message → dispatch to fleet via voice CLI --dispatch.
+        # Voice CLI prints {"ok": true, "task_id": "jev-..."} to stdout for
+        # Shortcuts, then speaks the fleet result via TTS when ready.
         [ -f "$DOST_DIR/voice/cli.py" ] || {
             printf '%s\n' "$SORRY (voice CLI not found)"
             return 0
         }
-        output="$(run_dost_module "$VOICE_CLI" -- "$msg" 2>/dev/null)" || true
+        output="$(run_dost_module "$VOICE_CLI" --dispatch -- "$msg" 2>/dev/null)" || true
     fi
 
     if [ -z "$output" ]; then

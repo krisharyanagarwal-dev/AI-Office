@@ -17,7 +17,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from dost import dost_respond
-from dost.dost_main import dispatch_prompt_to_fleet, sanitize_response
+from dost.dost_main import (
+    dispatch_prompt_to_fleet,
+    sanitize_response,
+    _wait_for_task,
+)
 from .stt import transcribe
 from .tts import synthesize
 
@@ -72,6 +76,78 @@ def process_voice_input(audio_path: str | Path) -> dict:
     }
 
 
+def speak(text: str) -> None:
+    """Synthesize and play text (best-effort; never fail the CLI)."""
+    try:
+        out = Path(tempfile.mktemp(suffix=".mp3"))
+        try:
+            synthesize(text, out)
+            subprocess.run(["afplay", str(out)], capture_output=True, timeout=30)
+        finally:
+            try:
+                out.unlink()
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
+def run_dispatch(
+    prompt: str,
+    department: str = "assistant",
+    priority: str = "normal",
+    conversation_id: str = "voice-owner",
+) -> int:
+    """Dispatch a prompt to the fleet, poll for its result, and speak it.
+
+    Prints {"ok", "task_id", "agent_id"} to stdout so callers (e.g. Siri
+    Shortcuts) can surface the task id, then speaks the fleet result via TTS
+    once the task completes. The turn is recorded to jarvis_memory so voice
+    context survives process restarts.
+    """
+    result = dispatch_prompt_to_fleet(prompt, agent_id=department, priority=priority)
+    if not result.get("ok"):
+        spoken = sanitize_response(
+            f"Fleet dispatch failed: {result.get('error', 'unknown error')}"
+        )
+        print(json.dumps({"ok": False, "error": spoken}))
+        speak(spoken)
+        return 1
+
+    task_id = result.get("task_id", "unknown")
+    agent_id = result.get("agent_id", "unknown")
+    print(json.dumps({"ok": True, "task_id": task_id, "agent_id": agent_id}))
+
+    # Poll until the fleet task completes (or times out).
+    task = _wait_for_task(task_id)
+    if task is None:
+        output = f"Fleet task {task_id} still pending."
+    elif task.get("status") == "error":
+        output = f"Fleet task errored: {task.get('error', 'unknown error')}"
+    else:
+        task_result = task.get("result") or {}
+        if isinstance(task_result, dict):
+            output = task_result.get("text") or task_result.get("preview") or ""
+        elif isinstance(task_result, str):
+            output = task_result
+        else:
+            output = ""
+    output = output or f"(fleet task {task_id} completed with no result text)"
+
+    spoken = sanitize_response(output)
+
+    # Persist the turn so voice context survives across restarts.
+    try:
+        from jarvis_memory.session import append_turn
+
+        append_turn(conversation_id, "voice", prompt, spoken)
+    except Exception:  # noqa: BLE001
+        pass
+
+    speak(spoken)
+    return 0
+
+
 def main(args: list[str] | None = None) -> int:
     """Main entry point for voice CLI.
 
@@ -87,8 +163,15 @@ def main(args: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Dost voice CLI")
     parser.add_argument("prompt", nargs="?", help="Text prompt (bypasses STT)")
     parser.add_argument("--audio", help="Audio file path for STT")
-    parser.add_argument("--department", default="assistant", help="Fleet department")
+    parser.add_argument(
+        "--department", default="assistant", help="Fleet department"
+    )
     parser.add_argument("--priority", default="normal", help="Task priority")
+    parser.add_argument(
+        "--dispatch",
+        action="store_true",
+        help="Dispatch to fleet, poll for result, and speak it",
+    )
     parser.add_argument("--version", action="store_true", help="Show version")
 
     parsed = parser.parse_args(args)
@@ -109,6 +192,13 @@ def main(args: list[str] | None = None) -> int:
         parser.print_help()
         return 1
 
+    if parsed.dispatch:
+        return run_dispatch(
+            text,
+            department=parsed.department,
+            priority=parsed.priority,
+        )
+
     # Route through the shared, memory-aware chat path so voice
     # conversations persist across CLI/web/Telegram sessions.
     response = dost_respond(
@@ -124,18 +214,7 @@ def main(args: list[str] | None = None) -> int:
     print(response)
 
     # Speak the reply (best-effort; never fail the CLI on TTS/audio issues).
-    try:
-        out = Path(tempfile.mktemp(suffix=".mp3"))
-        try:
-            synthesize(response, out)
-            subprocess.run(["afplay", str(out)], capture_output=True, timeout=30)
-        finally:
-            try:
-                out.unlink()
-            except OSError:
-                pass
-    except Exception:
-        pass
+    speak(response)
 
     return 0
 
