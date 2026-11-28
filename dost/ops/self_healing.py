@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import subprocess
 import sys
@@ -28,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # AI-Office/ (for 
 
 from memory_pkg.unified import get_unified_memory
 
-from dost.dost_main import dispatch_prompt_to_fleet
+from dost.dost_main import dispatch_prompt_to_fleet, tier_c_agents
 
 
 HEALING_CONFIG = {
@@ -98,9 +99,9 @@ class HealingAction:
 class FleetSelfHealing:
     """Self-healing system for fleet operations."""
 
-    def __init__(self, config: dict | None = None):
+    def __init__(self, config: dict | None = None, memory=None):
         self.config = {**HEALING_CONFIG, **(config or {})}
-        self.memory = get_unified_memory()
+        self.memory = memory if memory is not None else get_unified_memory()
         self._last_action: dict[str, float] = {}
         self._action_history: list[HealingAction] = []
         # Consecutive failure count per cooldown key for escalating backoff.
@@ -116,10 +117,17 @@ class FleetSelfHealing:
         )
         # Per-pool routing scale factors (1.0 = full traffic share). Persisted so
         # auto-scaling decisions survive restarts and are visible on the dashboard.
-        self._pool_scale_factors: dict[str, float] = {
-            name: float(scale)
-            for name, scale in (self.memory.get_preference("pool_scale_factors", {}) or {}).items()
-        }
+        stored_pool_factors = self.memory.get_preference("pool_scale_factors", {})
+        self._pool_scale_factors: dict[str, float] = {}
+        if isinstance(stored_pool_factors, dict):
+            for name, scale in stored_pool_factors.items():
+                if not isinstance(name, str) or not name:
+                    continue
+                if isinstance(scale, bool) or not isinstance(scale, (int, float)):
+                    continue
+                if not math.isfinite(scale):
+                    continue
+                self._pool_scale_factors[name] = float(scale)
         # Circuit breaker state: True when dispatching is paused due to error spikes.
         # Persisted across restarts so a tripped circuit stays open after reboot.
         self._circuit_broken: bool = bool(
@@ -165,7 +173,7 @@ class FleetSelfHealing:
                 return json.loads(result.stdout)
             return {}
         except Exception as e:
-            print(f"[self_healing] Failed to fetch metrics: {e}")
+            print(f"[self_healing] Failed to fetch metrics: {e}", file=sys.stderr)
             return {}
 
     def fetch_trading_fleet_metrics(self) -> dict[str, dict[str, float]]:
@@ -195,7 +203,7 @@ class FleetSelfHealing:
                 return {}
             return self._parse_prometheus_text(result.stdout)
         except Exception as e:
-            print(f"[self_healing] Failed to fetch trading fleet metrics: {e}")
+            print(f"[self_healing] Failed to fetch trading fleet metrics: {e}", file=sys.stderr)
             return {}
 
     @staticmethod
@@ -361,13 +369,25 @@ class FleetSelfHealing:
             agent_id = task.get("agent_id") or "strategy-advisor"
             priority = task.get("priority", "normal")
 
-            result = dispatch_prompt_to_fleet(prompt, agent_id=agent_id, priority=priority, dry_run=False)
+            # Tier C agents are human-only: never re-run them automatically.
+            if agent_id in tier_c_agents():
+                continue
 
-            retry_count = (task.get("metadata") or {}).get("redispatch_count", 0) + 1
+            original_meta = task.get("metadata") or {}
+            extra = {"redispatched_from": task_id}
+            if original_meta.get("broadcast_id"):
+                extra["broadcast_id"] = original_meta["broadcast_id"]
+            result = dispatch_prompt_to_fleet(
+                prompt, agent_id=agent_id, priority=priority, dry_run=False, extra_metadata=extra,
+            )
+
+            retry_count = original_meta.get("redispatch_count", 0) + 1
             try:
-                task["metadata"] = task.get("metadata") or {}
+                task["metadata"] = original_meta
                 task["metadata"]["redispatch_count"] = retry_count
                 task["metadata"]["last_redispatch_at"] = datetime.now(timezone.utc).isoformat()
+                if result.get("task_id"):
+                    task["metadata"]["redispatched_to"] = result["task_id"]
                 task["status"] = "redispatched"
                 task["updated_at"] = datetime.now(timezone.utc).isoformat()
                 task_path.write_text(json.dumps(task, indent=2))

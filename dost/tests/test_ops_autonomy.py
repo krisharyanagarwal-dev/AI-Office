@@ -179,7 +179,7 @@ def test_opportunity_scanner_run_once_dispatches_all_screens(monkeypatch):
 
     prompts = []
 
-    def fake_dispatch(prompt, agent_id="research"):
+    def fake_dispatch(prompt, agent_id="research", priority="normal", dry_run=False, extra_metadata=None):
         prompts.append(prompt)
         return {"ok": True, "task_id": "task-1", "agent_id": "research"}
 
@@ -346,7 +346,7 @@ def _fake_subprocess(monkeypatch, restart_rc=0, kickstart_rc=0, list_running=Fal
 def _fake_dispatch(monkeypatch):
     calls = []
 
-    def fake_dispatch(prompt, agent_id="strategy-advisor", priority="normal", dry_run=False):
+    def fake_dispatch(prompt, agent_id="strategy-advisor", priority="normal", dry_run=False, extra_metadata=None):
         calls.append((prompt, agent_id, priority, dry_run))
         return {"ok": True, "task_id": "new-task"}
 
@@ -456,7 +456,7 @@ def test_fetch_trading_fleet_metrics_parses_text(monkeypatch):
     # Malformed lines are skipped, not fatal.
 
 
-def test_fetch_trading_fleet_metrics_unreachable_returns_empty(monkeypatch):
+def test_fetch_trading_fleet_metrics_unreachable_returns_empty(monkeypatch, capsys):
     """Exporter down degrades to {} instead of crashing the cycle."""
     fake = FakeMemory()
     monkeypatch.setattr("ops.self_healing.get_unified_memory", lambda: fake)
@@ -467,6 +467,9 @@ def test_fetch_trading_fleet_metrics_unreachable_returns_empty(monkeypatch):
 
     monkeypatch.setattr("ops.self_healing.subprocess.run", fake_run)
     assert heal.fetch_trading_fleet_metrics() == {}
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "[self_healing] Failed to fetch trading fleet metrics" in captured.err
 
 
 def _trading_heal(monkeypatch):
@@ -636,6 +639,26 @@ def test_self_healing_clear_task_backlog_redispatches_stuck_task(monkeypatch, tm
     assert "last_redispatch_at" in updated["metadata"]
 
 
+def test_self_healing_never_redispatches_tier_c_agent(monkeypatch, tmp_path):
+    """A stuck task for a Tier C (human-only) agent is left alone, not re-run."""
+    fake = FakeMemory()
+    monkeypatch.setattr("ops.self_healing.get_unified_memory", lambda: fake)
+    monkeypatch.setattr("ops.self_healing.HIVE_DIR", tmp_path)
+    monkeypatch.setattr("ops.self_healing.tier_c_agents", lambda: {"risk-manager"})
+
+    heal = FleetSelfHealing()
+    dispatch_calls = _fake_dispatch(monkeypatch)
+
+    old = (datetime.now(timezone.utc) - timedelta(minutes=45)).isoformat()
+    _write_hive_task(tmp_path, "task-tier-c-1", "in_progress", updated_at=old, agent_id="risk-manager")
+
+    actions = heal._clear_task_backlog({})
+
+    assert actions == []
+    assert dispatch_calls == []
+    assert json.loads((tmp_path / "task-tier-c-1.json").read_text())["status"] == "in_progress"
+
+
 def test_self_healing_clear_task_backlog_redispatches_failed_under_retries(
     monkeypatch, tmp_path
 ):
@@ -741,6 +764,34 @@ def test_provider_pool_scales_down_when_saturating(monkeypatch):
     assert actions[0].target == "nvidia_key1"
     assert heal._pool_scale_factors["nvidia_key1"] == 0.5
     assert fake.prefs["pool_scale_factors"]["nvidia_key1"] == 0.5
+
+
+@pytest.mark.parametrize("stored_factors", ["not-a-dict", ["mlx_local"], None])
+def test_self_healing_ignores_non_mapping_persisted_pool_factors(stored_factors):
+    fake = FakeMemory()
+    fake.prefs["pool_scale_factors"] = stored_factors
+
+    heal = FleetSelfHealing(memory=fake)
+
+    assert heal._pool_scale_factors == {}
+
+
+def test_self_healing_filters_invalid_persisted_pool_factors():
+    fake = FakeMemory()
+    fake.prefs["pool_scale_factors"] = {
+        "valid": 0.5,
+        "integer": 1,
+        "string": "0.25",
+        "boolean": True,
+        "nan": float("nan"),
+        "infinite": float("inf"),
+        "": 0.75,
+        7: 0.25,
+    }
+
+    heal = FleetSelfHealing(memory=fake)
+
+    assert heal._pool_scale_factors == {"valid": 0.5, "integer": 1.0}
 
 
 def test_provider_pool_scales_down_to_min_scale_then_stops(monkeypatch):

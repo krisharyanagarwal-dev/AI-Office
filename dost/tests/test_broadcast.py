@@ -134,6 +134,36 @@ def test_status_records_each_finished_answer_once(env):
     assert any("beta-trader" in c and "provider timeout" in c for c in answers)
 
 
+def test_status_follows_healer_redispatch_to_replacement_answer(env):
+    sent = dm.dispatch_broadcast_to_fleet("what is the risk?")
+    bid = sent["broadcast_id"]
+    ids = sent["task_ids"]
+
+    # The healer replaced alpha's stuck task with a new one and linked them.
+    original = env["hive"] / f"{ids['alpha-analyst']}.json"
+    task = json.loads(original.read_text())
+    task["status"] = "redispatched"
+    task["metadata"]["redispatched_to"] = "jev-replacement"
+    original.write_text(json.dumps(task))
+    replacement = {
+        "id": "jev-replacement",
+        "agent_id": "alpha-analyst",
+        "status": "done",
+        "description": "what is the risk?",
+        "metadata": {"broadcast_id": bid, "redispatched_from": ids["alpha-analyst"]},
+        "result": {"text": "Risk is low."},
+    }
+    (env["hive"] / "jev-replacement.json").write_text(json.dumps(replacement))
+
+    result = dm.broadcast_status(bid)
+    assert result["workers"]["alpha-analyst"]["task_id"] == "jev-replacement"
+    assert result["workers"]["alpha-analyst"]["status"] == "done"
+    assert result["counts"]["done"] == 1
+    assert result["counts"]["redispatched"] == 0
+    assert "alpha-analyst" in result["newly_recorded"]
+    assert any("Risk is low." in t[3] for t in env["memory"].turns)
+
+
 def test_status_for_unknown_broadcast_reports_error(env):
     result = dm.broadcast_status("bc-doesnotexist")
     assert result["ok"] is False

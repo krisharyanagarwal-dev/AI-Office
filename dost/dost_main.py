@@ -1787,7 +1787,13 @@ def broadcast_status(broadcast_id: str) -> dict:
     newly_recorded: list[str] = []
 
     for agent, task_id in manifest.get("task_ids", {}).items():
-        task = _read_orchestrate_task(task_id)
+        # A healer redispatch replaces the task with a new id; follow the chain (bounded).
+        for _ in range(10):
+            task = _read_orchestrate_task(task_id)
+            replacement = ((task or {}).get("metadata") or {}).get("redispatched_to")
+            if not (task and task.get("status") == "redispatched" and replacement):
+                break
+            task_id = replacement
         status = task.get("status", "pending") if task else "missing"
         if status in ("done", "error", "missing", "in_progress", "redispatched"):
             bucket = status
