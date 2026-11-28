@@ -324,3 +324,30 @@ def test_anonymous_chat_still_gets_a_pending_key(env, monkeypatch):
     dm.companion_respond("broadcast ping", conversation_id=None, interface="slack")
     assert dm._pending_path("anon-slack").exists()
     dm._pending_take("anon-slack")
+
+
+def test_companion_fleet_route_returns_the_worker_answer_not_raw_text(env, monkeypatch):
+    monkeypatch.setattr(dm, "build_context", lambda: "")
+    monkeypatch.setattr(dm, "_history_context", lambda history: "")
+    monkeypatch.setattr(dm, "llm_decide", lambda task, context, style="": "FLEET: analyse the book")
+    monkeypatch.setattr(dm, "_wait_for_task", lambda task_id, timeout_sec=0: {"status": "done", "result": {"text": "Book is fine."}})
+    monkeypatch.setattr(dm.MEMORY, "add_interaction", lambda *a, **k: None)
+
+    reply = dm.companion_respond("analyse the book for me", conversation_id="pet-1", interface="web")
+
+    assert reply == "Book is fine."
+    assert "FLEET:" not in reply
+    assert [t["agent_id"] for t in _task_files(env["hive"])] == ["strategy-advisor"]
+
+
+def test_companion_orchestrate_route_returns_the_plan_result(env, monkeypatch):
+    monkeypatch.setattr(dm, "build_context", lambda: "")
+    monkeypatch.setattr(dm, "_history_context", lambda history: "")
+    monkeypatch.setattr(dm, "llm_decide", lambda task, context, style="": "ORCHESTRATE: research the sector")
+    monkeypatch.setattr(dm, "orchestrate", lambda goal, conversation_id=None, interface=None: "Plan finished.")
+    monkeypatch.setattr(dm.MEMORY, "add_interaction", lambda *a, **k: None)
+
+    reply = dm.companion_respond("research the sector", conversation_id="pet-2", interface="web")
+
+    assert reply == "Plan finished."
+    assert "ORCHESTRATE:" not in reply

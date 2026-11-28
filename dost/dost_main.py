@@ -2629,6 +2629,29 @@ def companion_respond(
         prompt = decision[len("BROADCAST:"):].strip()
         return finish(alert_prefix + _propose_broadcast(prompt, conversation_id or f"anon-{interface}", task, interface))
 
+    # Same fleet and orchestrate routes as dost_respond, so these never leak as raw "FLEET:" text.
+    if decision and decision.startswith("FLEET:"):
+        prompt = decision[len("FLEET:"):].strip()
+        result = dispatch_prompt_to_fleet(prompt, agent_id="strategy-advisor", priority="normal")
+        if not result.get("ok"):
+            output = f"Fleet dispatch failed: {result.get('error', 'unknown error')}"
+        else:
+            fleet_task = _wait_for_task(result["task_id"])
+            if fleet_task is None:
+                output = f"Fleet task {result['task_id']} still pending."
+            elif fleet_task.get("status") == "error":
+                output = f"Fleet task errored: {fleet_task.get('error', 'unknown error')}"
+            else:
+                output = _fleet_result_text(fleet_task) or f"(fleet task {result['task_id']} completed with no result text)"
+        MEMORY.add_interaction(task, "fleet", f"Dispatched fleet prompt: {prompt[:80]}")
+        return finish(alert_prefix + output)
+
+    if decision and decision.startswith("ORCHESTRATE:"):
+        goal = decision[len("ORCHESTRATE:"):].strip()
+        output = orchestrate(goal, conversation_id=conversation_id, interface=interface)
+        MEMORY.add_interaction(task, "orchestrate", f"Orchestrated goal: {goal[:80]}")
+        return finish(alert_prefix + output)
+
     if decision and decision.startswith("COMMAND:"):
         command = decision[len("COMMAND:"):].strip()
         if command not in RESEARCH_COMMANDS or not _asked_for_command(task, command):
